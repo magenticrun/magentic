@@ -1,0 +1,37 @@
+{
+  "name": "magentic",
+  "private": true,
+  "description": "The agent harness your team can actually share.",
+  "license": "MIT",
+  "workspaces": {
+    "packages": [
+      "apps/*",
+      "packages/*"
+    ],
+    "catalog": {
+      "effect": "4.0.0-rc.112",
+      "@effect/platform-bun": "4.0.0-rc.112"
+    }
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --filter @magentic/gateway dev",
+    "test": "bun --bun vitest run",
+    "test:watch": "bun --bun vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint && oxfmt --check",
+    "format": "oxlint --fix; oxfmt",
+    "check": "bun run typecheck && bun run lint && bun run test"
+  },
+  "devDependencies": {
+    "@effect/language-service": "^0.87.2",
+    "@effect/vitest": "4.0.0-rc.112",
+    "@oxlint/plugins": "1.81.0",
+    "@types/bun": "^1.4.0",
+    "effect": "catalog:",
+    "oxfmt": "^0.66.0",
+    "oxlint": "^1.81.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.11"
+  }
+}

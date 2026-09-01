@@ -1,0 +1,24 @@
+{
+  "name": "@magentic/gateway",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The magentic gateway: hosts agents and runs every request through identity, policy, and audit.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "bun --watch src/main.ts",
+    "start": "bun src/main.ts",
+    "test": "bun --bun vitest run --root ../.. apps/gateway"
+  },
+  "dependencies": {
+    "@effect/platform-bun": "catalog:",
+    "@magentic/audit": "workspace:*",
+    "@magentic/core": "workspace:*",
+    "@magentic/identity": "workspace:*",
+    "@magentic/policy": "workspace:*",
+    "@magentic/protocol": "workspace:*",
+    "effect": "catalog:"
+  }
+}

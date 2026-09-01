@@ -1,0 +1,17 @@
+{
+  "name": "@magentic/core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Agent runtime: agents, skills, tools, memory, and cron.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun --bun vitest run --root ../.. packages/core"
+  },
+  "dependencies": {
+    "@magentic/protocol": "workspace:*",
+    "effect": "catalog:"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "@magentic/policy",
+  "version": "0.0.0",
+  "private": true,
+  "description": "One policy for every request: who is asking, what they may use, what needs approval.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun --bun vitest run --root ../.. packages/policy"
+  },
+  "dependencies": {
+    "@magentic/protocol": "workspace:*",
+    "effect": "catalog:"
+  }
+}

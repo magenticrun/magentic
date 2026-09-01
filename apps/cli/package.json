@@ -1,0 +1,19 @@
+{
+  "name": "@magentic/cli",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Terminal client for a magentic gateway.",
+  "bin": {
+    "magentic": "./src/main.ts"
+  },
+  "type": "module",
+  "scripts": {
+    "start": "bun src/main.ts",
+    "test": "bun --bun vitest run --root ../.. apps/cli"
+  },
+  "dependencies": {
+    "@effect/platform-bun": "catalog:",
+    "@magentic/protocol": "workspace:*",
+    "effect": "catalog:"
+  }
+}
