@@ -1,0 +1,17 @@
+{
+  "name": "@magentic/identity",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Resolves callers to principals via Slack, Okta, or a local fallback.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun --bun vitest run --root ../.. packages/identity"
+  },
+  "dependencies": {
+    "@magentic/protocol": "workspace:*",
+    "effect": "catalog:"
+  }
+}

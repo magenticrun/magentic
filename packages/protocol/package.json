@@ -1,0 +1,16 @@
+{
+  "name": "@magentic/protocol",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Wire types and the HttpApi definition shared by the gateway and every surface.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun --bun vitest run --root ../.. packages/protocol"
+  },
+  "dependencies": {
+    "effect": "catalog:"
+  }
+}

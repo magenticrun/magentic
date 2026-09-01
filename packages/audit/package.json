@@ -1,0 +1,17 @@
+{
+  "name": "@magentic/audit",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Append-only record of every action taken through the gateway.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun --bun vitest run --root ../.. packages/audit"
+  },
+  "dependencies": {
+    "@magentic/protocol": "workspace:*",
+    "effect": "catalog:"
+  }
+}
