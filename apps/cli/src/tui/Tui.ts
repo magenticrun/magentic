@@ -13,7 +13,8 @@ export const acquireRenderer: Effect.Effect<CliRenderer, never, Scope.Scope> =
         exitOnCtrlC: false,
         exitSignals: [],
         consoleMode: "disabled",
-        useMouse: false,
+        // The wheel scrolls the transcript; without tracking, the terminal keeps the wheel.
+        useMouse: true,
       }),
     ),
     (renderer) => Effect.sync(() => renderer.destroy()),

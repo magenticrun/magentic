@@ -50,16 +50,37 @@ const stylesFor = (colours: Palette) => ({
   "variable.parameter": { fg: colours.text, italic: true },
 });
 
+/** The same markup, all in the muted colour, for what the model thinks rather than says. */
+const subtleStylesFor = (colours: Palette) =>
+  Object.fromEntries(
+    Object.entries(stylesFor(colours)).map(([name, style]) => [
+      name,
+      { ...style, fg: colours.muted },
+    ]),
+  );
+
 // A SyntaxStyle is a native handle; one per palette lives as long as the process.
 const cache = new Map<Palette, SyntaxStyle>();
+const subtleCache = new Map<Palette, SyntaxStyle>();
 
-/** The syntax style for a palette, built once. */
-export const markdownStyleFor = (colours: Palette): SyntaxStyle => {
-  const known = cache.get(colours);
+const cached = (
+  store: Map<Palette, SyntaxStyle>,
+  colours: Palette,
+  build: (colours: Palette) => SyntaxStyle,
+): SyntaxStyle => {
+  const known = store.get(colours);
   if (known !== undefined) {
     return known;
   }
-  const built = SyntaxStyle.fromStyles(stylesFor(colours));
-  cache.set(colours, built);
+  const built = build(colours);
+  store.set(colours, built);
   return built;
 };
+
+/** The syntax style for a palette, built once. */
+export const markdownStyleFor = (colours: Palette): SyntaxStyle =>
+  cached(cache, colours, (c) => SyntaxStyle.fromStyles(stylesFor(c)));
+
+/** The muted style for reasoning, built once. */
+export const subtleStyleFor = (colours: Palette): SyntaxStyle =>
+  cached(subtleCache, colours, (c) => SyntaxStyle.fromStyles(subtleStylesFor(c)));
