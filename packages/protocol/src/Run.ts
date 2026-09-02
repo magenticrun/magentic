@@ -82,6 +82,15 @@ export const Compacted = Schema.TaggedStruct("Compacted", {
   messagesAfter: Schema.Number,
 });
 export type Compacted = typeof Compacted.Type;
+/** A model call failed in a way worth another try; the next one comes after `delayMs`. */
+export const Retrying = Schema.TaggedStruct("Retrying", {
+  /** This is the nth retry, of at most `limit`. */
+  attempt: Schema.Number,
+  limit: Schema.Number,
+  message: Schema.String,
+  delayMs: Schema.Number,
+});
+export type Retrying = typeof Retrying.Type;
 export const RunFinished = Schema.TaggedStruct("RunFinished", { reason: Schema.String });
 export const RunFailed = Schema.TaggedStruct("RunFailed", { message: Schema.String });
 
@@ -95,6 +104,7 @@ export const RunEvent = Schema.Union([
   TokenUsage,
   CompactionStarted,
   Compacted,
+  Retrying,
   RunFinished,
   RunFailed,
 ]);
