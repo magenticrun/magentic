@@ -5,3 +5,4 @@ export * from "./Capability.ts";
 export * from "./Plugin.ts";
 export * from "./Principal.ts";
 export * from "./Run.ts";
+export * from "./Conversation.ts";

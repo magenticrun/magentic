@@ -1,6 +1,6 @@
 import type { TextareaOptions, TextareaRenderable, ThemeMode } from "@opentui/core";
 import { parseModelRef, type Picked, type Picker } from "@magentic/plugin";
-import type { RunEvent } from "@magentic/protocol";
+import type { RunEvent, TranscriptEntry } from "@magentic/protocol";
 import { type JSX, useKeyboard, useRenderer } from "@opentui/solid";
 import { Option, Predicate, type Schema } from "effect";
 import {
@@ -134,6 +134,10 @@ export interface ChatTui {
   pick(picker: Picker, done: (picked: Option.Option<Picked>) => void): void;
   /** Close the picker, if one is open: the command that asked has ended. */
   dismiss(): void;
+  /** Replace the transcript with an earlier conversation's, and the context it last held. */
+  restore(entries: ReadonlyArray<TranscriptEntry>, contextTokens: number): void;
+  /** Clear the transcript for a new conversation. */
+  reset(): void;
   /** Note that the person stopped the run in flight. */
   interrupted(): void;
   setStatus(status: string): void;
@@ -255,6 +259,26 @@ export const createChatTui = (options: {
           return;
       }
     });
+
+  /** A transcript entry the way the run events would have drawn it. */
+  const toLine = (entry: TranscriptEntry): Line => {
+    switch (entry._tag) {
+      case "User":
+        return { kind: "user", text: entry.text };
+      case "Assistant":
+        return { kind: "assistant", text: entry.text };
+      case "Tool": {
+        const call: ToolLine = {
+          kind: "tool",
+          name: entry.name,
+          params: summariseParams(entry.params),
+        };
+        return entry.result === undefined
+          ? call
+          : { ...call, result: { ok: !entry.isFailure, text: summarise(entry.result) } };
+      }
+    }
+  };
 
   const view = () => {
     // A first ctrl+c arms quitting for a moment; only a second one quits.
@@ -623,6 +647,9 @@ export const createChatTui = (options: {
     setModel: (ref, contextWindow) => setState({ model: Option.some(ref), contextWindow }),
     pick,
     dismiss,
+    restore: (entries, contextTokens) =>
+      setState({ lines: entries.map(toLine), contextTokens, status: "" }),
+    reset: () => setState({ lines: [], contextTokens: 0, status: "" }),
     interrupted: () => push({ kind: "error", text: "Interrupted" }),
     setStatus: (status) => setState("status", status),
     setBusy: (busy) => setState("busy", busy),

@@ -40,7 +40,7 @@ export const run = Effect.fn("Cli.run")(function* (options: RunOptions) {
 
   const events = yield* client.agents.run({
     params: { name: agent.name },
-    payload: { input: options.input },
+    payload: { input: options.input, directory: process.cwd() },
   });
   yield* Stream.runForEach(events, print);
 }, Effect.scoped);

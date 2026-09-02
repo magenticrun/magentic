@@ -20,16 +20,32 @@ const agentFlag = Flag.string("agent").pipe(
   Flag.optional,
 );
 
+const continueFlag = Flag.boolean("continue").pipe(
+  Flag.withAlias("c"),
+  Flag.withDescription("Continue the most recent conversation, of the agent when one is named"),
+  Flag.withDefault(false),
+);
+
+const resumeFlag = Flag.string("resume").pipe(
+  Flag.withAlias("r"),
+  Flag.withDescription("Continue the conversation with this id; /resume in the chat lists them"),
+  Flag.optional,
+);
+
 const agentArgument = Argument.string("agent").pipe(
   Argument.withDescription("Agent to talk to; the first one the gateway hosts by default"),
   Argument.optional,
 );
 
 /** `magentic` on its own opens the chat. */
-const magentic = Command.make("magentic", { agent: agentArgument }).pipe(
+const magentic = Command.make("magentic", {
+  agent: agentArgument,
+  continue: continueFlag,
+  resume: resumeFlag,
+}).pipe(
   Command.withSharedFlags({ gateway }),
-  Command.withHandler(({ agent, gateway: baseUrl }) =>
-    chat({ baseUrl, agent }).pipe(Effect.provide(LocalHost)),
+  Command.withHandler(({ agent, continue: latest, resume, gateway: baseUrl }) =>
+    chat({ baseUrl, agent, continue: latest, resume }).pipe(Effect.provide(LocalHost)),
   ),
   Command.withDescription("Chat with an agent in the terminal"),
 );

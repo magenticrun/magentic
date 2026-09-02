@@ -6,6 +6,8 @@ export const RunRequest = Schema.Struct({
   conversationId: Schema.optional(Schema.String),
   /** A `provider/model` reference to run on instead of the agent's own. */
   model: Schema.optional(Schema.String),
+  /** Where the surface is working; conversations are listed by it. */
+  directory: Schema.optional(Schema.String),
 });
 export type RunRequest = typeof RunRequest.Type;
 

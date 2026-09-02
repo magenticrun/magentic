@@ -66,15 +66,16 @@ Schemas are `Schema.Class` and live in protocol so surfaces and the CLI share th
 
 HttpApi groups (all under `Api`):
 
-| Group       | Endpoints                                                                                            |
-| ----------- | ---------------------------------------------------------------------------------------------------- |
-| `system`    | `GET /health`, `GET /me`                                                                             |
-| `agents`    | `GET /agents`, `GET /agents/:name`, `POST /agents/:name/runs` (returns `RunId`)                      |
-| `runs`      | `GET /runs/:id`, `GET /runs/:id/events` (SSE), `POST /runs/:id/cancel`                               |
-| `approvals` | `GET /approvals` (pending for me), `POST /approvals/:id/decide`                                      |
-| `sessions`  | `POST /sessions/login`, `POST /sessions/logout`, `GET /tokens`, `POST /tokens`, `DELETE /tokens/:id` |
-| `slack`     | `POST /slack/events`, `POST /slack/interactions` (signed, not bearer)                                |
-| `mcp`       | `POST /mcp` (Streamable HTTP, bearer)                                                                |
+| Group           | Endpoints                                                                                                                                      |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `system`        | `GET /health`, `GET /me`                                                                                                                       |
+| `agents`        | `GET /agents`, `GET /agents/:name`, `POST /agents/:name/runs` (returns `RunId`)                                                                |
+| `conversations` | `GET /conversations?agent=`, `GET /conversations/:id`, `GET /conversations/:id/transcript`, `DELETE /conversations/:id`; the caller's own only |
+| `runs`          | `GET /runs/:id`, `GET /runs/:id/events` (SSE), `POST /runs/:id/cancel`                                                                         |
+| `approvals`     | `GET /approvals` (pending for me), `POST /approvals/:id/decide`                                                                                |
+| `sessions`      | `POST /sessions/login`, `POST /sessions/logout`, `GET /tokens`, `POST /tokens`, `DELETE /tokens/:id`                                           |
+| `slack`         | `POST /slack/events`, `POST /slack/interactions` (signed, not bearer)                                                                          |
+| `mcp`           | `POST /mcp` (Streamable HTTP, bearer)                                                                                                          |
 
 All groups except `system.health`, `sessions.login`, and `slack` sit behind the
 `Authentication` middleware (see identity.md).
@@ -96,8 +97,14 @@ Each is a `Context.Service` with static layers. Ids are `magentic/core/<Name>`.
 - **Memory**: `remember(scope, key, text)`, `recall(scope, query)`. Scopes: `agent` (shared by
   the team), `principal` (private to one person), `conversation`. Storage is `KeyValueStore`
   first, SQL with full-text search second, embeddings (`EmbeddingModel`) third.
-- **ConversationStore**: `load(id)` / `save(id, chatJson)`. Uses `Chat.exportJson` and
-  `Chat.fromJson`, so history is opaque to us and survives model provider changes.
+- **ConversationStore**: `get(id)`, `history(id)`, `list`, `save(info, chatJson)`, `remove(id)`.
+  History is `Chat.exportJson` output, opaque to us, so it survives model provider changes;
+  beside it sits a `Conversation` record (agent, principal, title from the first input, the
+  model of the latest run, the directory the surface started it from, timestamps, message
+  count, usage) that the runner rewrites after
+  every run, failed ones included. `layerFile(dir)` keeps one directory per conversation
+  under the gateway's data directory (`conversation.json`, `history.json`); `layerMemory`
+  is for tests. This is the opencode session model without the generated title.
 - **Runner**: the loop above. `run(request): Stream<RunEvent, RunError>`. Owns the tool
   wrapping. Depends on `LanguageModel`, `Policy`, `Audit`, `ApprovalService`.
 - **ModelProvider** (`@magentic/model`): picks the `LanguageModel` layer from
@@ -200,7 +207,9 @@ because `SqlClient` abstracts the dialect for what we need.
 
 ## Surfaces
 
-- **CLI** (`apps/cli`): `magentic [agent]` opens the full-screen chat (exists), `magentic run
+- **CLI** (`apps/cli`): `magentic [agent]` opens the full-screen chat (exists); `-c` picks up
+  the newest conversation and `-r <id>` a named one, transcript and model restored, and
+  `/resume` and `/new` do the same from inside the chat, as in opencode. `magentic run
 "<input>"` prints the events as plain lines (exists), `magentic agents` (exists), `magentic
 auth login|list|logout` (exists, inline `@clack/prompts` like opencode's, not the TUI),
   `magentic approvals` (list and decide), `magentic tokens`, `magentic config check`,

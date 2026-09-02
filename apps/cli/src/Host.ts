@@ -8,6 +8,7 @@ import {
 } from "@magentic/model";
 import { ModelCatalog } from "@magentic/plugin";
 import { Effect, Layer } from "effect";
+import { conversationCommandsPlugin } from "./commands/Conversations.ts";
 
 /**
  * The plugins that run beside the CLI itself: the providers, for signing in
@@ -24,6 +25,7 @@ export const LocalHost = Layer.unwrap(
         ...modelPlugins.map(builtin),
         builtin(modelCommandPlugin),
         builtin(contextCommandPlugin),
+        builtin(conversationCommandsPlugin),
       ],
       paths: { config, workspace: process.cwd(), data },
     });
