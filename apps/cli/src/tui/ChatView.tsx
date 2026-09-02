@@ -625,7 +625,7 @@ export const createChatTui = (options: {
       setDismissed(false);
       setSelected(0);
     });
-    /** The footer shows the provider and model apart; a bare provider means its default model. */
+    /** The footer shows the provider and model joined with a `/`; a bare provider means its default model. */
     const modelParts = () =>
       Option.map(state.model, (ref) => {
         const parsed = parseModelRef(ref);
@@ -894,7 +894,7 @@ export const createChatTui = (options: {
               ),
               onSome: ({ provider, model }) => (
                 <text fg={palette().muted} wrapMode="none" truncate>
-                  {provider} · <strong style={{ fg: palette().text }}>{model}</strong>
+                  {provider}/<strong style={{ fg: palette().text }}>{model}</strong>
                 </text>
               ),
             })}
@@ -913,7 +913,7 @@ export const createChatTui = (options: {
               when={armed() ? "ctrl+c again to quit" : flash()}
               fallback={
                 <text fg={palette().muted} wrapMode="none" truncate>
-                  shift+enter newline · pgup/pgdn scroll
+                  shift+enter newline
                 </text>
               }
             >
