@@ -142,7 +142,7 @@ layer(TestLayer)("gateway api", (it) => {
       const events = yield* Stream.runCollect(stream);
       assert.deepStrictEqual(
         events.map((e) => e._tag),
-        ["RunStarted", "TextDelta", "RunFinished"],
+        ["RunStarted", "TextDelta", "TokenUsage", "RunFinished"],
       );
       const delta = events[1];
       assert.isTrue(delta?._tag === "TextDelta" && delta.text === "echo: hello there");
@@ -163,7 +163,7 @@ layer(TestLayer)("gateway api", (it) => {
         .pipe(Effect.flatMap(Stream.runCollect));
       assert.deepStrictEqual(
         chosen.map((e) => e._tag),
-        ["RunStarted", "TextDelta", "RunFinished"],
+        ["RunStarted", "TextDelta", "TokenUsage", "RunFinished"],
       );
 
       const unknown = yield* client.agents
@@ -184,7 +184,15 @@ layer(TestLayer)("gateway api", (it) => {
       const events = yield* Stream.runCollect(stream);
       assert.deepStrictEqual(
         events.map((e) => e._tag),
-        ["RunStarted", "ToolCall", "ToolResult", "TextDelta", "RunFinished"],
+        [
+          "RunStarted",
+          "ToolCall",
+          "ToolResult",
+          "TokenUsage",
+          "TextDelta",
+          "TokenUsage",
+          "RunFinished",
+        ],
       );
       const recorded = yield* Ref.get(yield* AuditMemory);
       assert.deepStrictEqual(

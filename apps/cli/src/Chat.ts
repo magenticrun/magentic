@@ -1,5 +1,5 @@
-import { CommandRegistry } from "@magentic/core";
-import type { ChatSession, CommandUi } from "@magentic/plugin";
+import { CommandRegistry, ModelRegistry } from "@magentic/core";
+import type { ChatSession, CommandUi, SessionUsage } from "@magentic/plugin";
 import { render } from "@opentui/solid";
 import { Cause, Deferred, Effect, Option, Predicate, Queue, Ref, Stream } from "effect";
 import { resolveAgent } from "./Agents.ts";
@@ -30,6 +30,22 @@ const parseCommand = (input: string): { readonly name: string; readonly args: st
 };
 
 /**
+ * How many tokens a model can hold, when the providers on this machine know
+ * the model and its catalog entry gives a limit; 0 otherwise.
+ */
+const contextWindow = Effect.fn("Cli.chat.contextWindow")(function* (
+  models: ModelRegistry["Service"],
+  ref: string,
+) {
+  const resolved = yield* models.resolve(Option.some(ref)).pipe(Effect.option);
+  if (Option.isNone(resolved)) {
+    return 0;
+  }
+  const known = yield* resolved.value.provider.models;
+  return known.find((m) => m.id === resolved.value.model)?.context ?? 0;
+});
+
+/**
  * The full-screen chat. Inputs come from the view through a queue; each one
  * becomes a run whose events are folded back into the transcript, or, when
  * it starts with a slash, a command from the local plugin host. Esc stops
@@ -39,6 +55,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   const { client, embedded } = yield* ensureGateway(options.baseUrl);
   const agent = yield* resolveAgent(client, options.agent);
   const commands = yield* CommandRegistry;
+  const models = yield* ModelRegistry;
 
   const renderer = yield* acquireRenderer;
   // The terminal reports light or dark within a few milliseconds; drawing
@@ -56,11 +73,14 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
 
   // What runs use; starts as what the gateway said the agent runs on.
   const model = yield* Ref.make(Option.fromNullishOr(agent.model));
+  // Folded from the usage events, for /context.
+  const usage = yield* Ref.make(Option.none<SessionUsage>());
 
   const tui = createChatTui({
     agent: agent.name,
     gateway: embedded ? `${options.baseUrl} (started here)` : options.baseUrl,
     model: Option.fromNullishOr(agent.model),
+    contextWindow: Predicate.isString(agent.model) ? yield* contextWindow(models, agent.model) : 0,
     commands: (yield* commands.list).map(({ name, description }) => ({ name, description })),
     onSubmit: (text) => {
       Queue.offerUnsafe(inputs, text);
@@ -88,6 +108,24 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
               if (event._tag === "RunStarted") {
                 yield* Ref.set(conversation, Option.some(event.conversationId));
               }
+              if (event._tag === "TokenUsage") {
+                yield* Ref.update(usage, (previous) =>
+                  Option.some({
+                    latest: event,
+                    calls: Option.match(previous, { onNone: () => 1, onSome: (u) => u.calls + 1 }),
+                    totalInputTokens:
+                      Option.match(previous, {
+                        onNone: () => 0,
+                        onSome: (u) => u.totalInputTokens,
+                      }) + event.inputTokens,
+                    totalOutputTokens:
+                      Option.match(previous, {
+                        onNone: () => 0,
+                        onSome: (u) => u.totalOutputTokens,
+                      }) + event.outputTokens,
+                  }),
+                );
+              }
               tui.apply(event);
             }),
           ),
@@ -109,8 +147,11 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   const session: ChatSession = {
     agent: agent.name,
     model: Ref.get(model),
-    setModel: (ref) =>
-      Ref.set(model, Option.some(ref)).pipe(Effect.andThen(Effect.sync(() => tui.setModel(ref)))),
+    setModel: Effect.fn("Cli.chat.setModel")(function* (ref) {
+      yield* Ref.set(model, Option.some(ref));
+      tui.setModel(ref, yield* contextWindow(models, ref));
+    }),
+    usage: Ref.get(usage),
   };
 
   const runCommand = Effect.fn("Cli.chat.runCommand")(function* (input: string) {
@@ -126,6 +167,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
       return;
     }
     const outcome = yield* Effect.exit(command.value.run({ ui, session, args }));
+    tui.dismiss();
     if (outcome._tag === "Failure") {
       tui.error(describeCause(outcome.cause));
     }

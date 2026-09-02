@@ -1,3 +1,4 @@
+import type { TokenUsage } from "@magentic/protocol";
 import type { Effect, Option, Scope } from "effect";
 import { Schema } from "effect";
 import type { PluginSetupError, Registration } from "./Plugin.ts";
@@ -47,12 +48,23 @@ export interface CommandUi {
   notify(message: string): Effect.Effect<void>;
 }
 
+/** Tokens this chat has used: the latest model call, whose input is the context in use, and running totals. */
+export interface SessionUsage {
+  readonly latest: TokenUsage;
+  /** Model calls since the chat opened; a run with tool calls makes several. */
+  readonly calls: number;
+  readonly totalInputTokens: number;
+  readonly totalOutputTokens: number;
+}
+
 /** The chat a command runs in, and what it may change about it. */
 export interface ChatSession {
   readonly agent: string;
   /** The `provider/model` runs use, when one was chosen. */
   readonly model: Effect.Effect<Option.Option<string>>;
   setModel(ref: string): Effect.Effect<void>;
+  /** None before the first reply. */
+  readonly usage: Effect.Effect<Option.Option<SessionUsage>>;
 }
 
 /** A command that could not do what was asked, in words for the transcript. */

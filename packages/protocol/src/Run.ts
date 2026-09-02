@@ -27,6 +27,39 @@ export const ToolResult = Schema.TaggedStruct("ToolResult", {
   result: Schema.Json,
   isFailure: Schema.Boolean,
 });
+/**
+ * Where the context goes, estimated at four characters a token from what the
+ * runner sent, since providers report one total. `toolCalls` covers the
+ * calls' arguments and results.
+ */
+export const ContextBreakdown = Schema.Struct({
+  system: Schema.Number,
+  tools: Schema.Number,
+  toolCount: Schema.Number,
+  user: Schema.Number,
+  assistant: Schema.Number,
+  toolCalls: Schema.Number,
+  messages: Schema.Number,
+});
+export type ContextBreakdown = typeof ContextBreakdown.Type;
+
+/**
+ * What the latest model call cost, once per call. The input is the whole
+ * conversation so far, cached or not, so input plus output is the context in
+ * use. The finer counts are absent when the provider does not report them.
+ */
+export const TokenUsage = Schema.TaggedStruct("TokenUsage", {
+  inputTokens: Schema.Number,
+  outputTokens: Schema.Number,
+  /** Input served from the provider's prompt cache; part of `inputTokens`. */
+  cacheReadTokens: Schema.optional(Schema.Number),
+  /** Input written to the prompt cache this call; part of `inputTokens`. */
+  cacheWriteTokens: Schema.optional(Schema.Number),
+  /** Output spent thinking; part of `outputTokens`. */
+  reasoningTokens: Schema.optional(Schema.Number),
+  breakdown: ContextBreakdown,
+});
+export type TokenUsage = typeof TokenUsage.Type;
 export const RunFinished = Schema.TaggedStruct("RunFinished", { reason: Schema.String });
 export const RunFailed = Schema.TaggedStruct("RunFailed", { message: Schema.String });
 
@@ -37,6 +70,7 @@ export const RunEvent = Schema.Union([
   ReasoningDelta,
   ToolCall,
   ToolResult,
+  TokenUsage,
   RunFinished,
   RunFailed,
 ]);

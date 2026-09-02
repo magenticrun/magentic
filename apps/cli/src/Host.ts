@@ -1,6 +1,11 @@
 import { configDir, dataDir } from "@magentic/gateway";
 import { builtin, PluginHost, ToolCallGuard } from "@magentic/core";
-import { layerCredentialStores, modelCommandPlugin, modelPlugins } from "@magentic/model";
+import {
+  contextCommandPlugin,
+  layerCredentialStores,
+  modelCommandPlugin,
+  modelPlugins,
+} from "@magentic/model";
 import { ModelCatalog } from "@magentic/plugin";
 import { Effect, Layer } from "effect";
 
@@ -15,7 +20,11 @@ export const LocalHost = Layer.unwrap(
     const config = yield* configDir;
     const data = yield* dataDir;
     return PluginHost.layer({
-      plugins: [...modelPlugins.map(builtin), builtin(modelCommandPlugin)],
+      plugins: [
+        ...modelPlugins.map(builtin),
+        builtin(modelCommandPlugin),
+        builtin(contextCommandPlugin),
+      ],
       paths: { config, workspace: process.cwd(), data },
     });
   }),

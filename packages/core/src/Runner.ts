@@ -2,6 +2,7 @@ import type { AgentDefinition } from "@magentic/plugin";
 import type { Principal, RunEvent } from "@magentic/protocol";
 import { Context, Effect, Layer, Option, Queue, Ref, type Schema, Stream } from "effect";
 import { Chat, LanguageModel, Prompt, type Response, type Tool } from "effect/unstable/ai";
+import { estimateContext } from "./ContextEstimate.ts";
 import { ConversationStore } from "./ConversationStore.ts";
 import { describeCause } from "./Errors.ts";
 import { RunEventBus } from "./EventBus.ts";
@@ -115,6 +116,7 @@ export class Runner extends Context.Service<
               let prompt: Prompt.RawInput = options.input;
               while (true) {
                 const calledTool = yield* Ref.make(false);
+                const usage = yield* Ref.make(Option.none<Response.Usage>());
                 yield* chat.streamText({ prompt, toolkit: tools }).pipe(
                   Stream.provideService(LanguageModel.LanguageModel, model),
                   Stream.runForEach((part) =>
@@ -124,6 +126,7 @@ export class Runner extends Context.Service<
                       }
                       if (part.type === "finish") {
                         yield* Ref.set(finishReason, part.reason);
+                        yield* Ref.set(usage, Option.some(part.usage));
                       }
                       for (const event of toEvents(part)) {
                         yield* emit(event);
@@ -131,6 +134,20 @@ export class Runner extends Context.Service<
                     }),
                   ),
                 );
+                // Once the call is in the history, so the estimate matches what was counted.
+                const reported = yield* Ref.get(usage);
+                if (Option.isSome(reported)) {
+                  const { inputTokens, outputTokens } = reported.value;
+                  yield* emit({
+                    _tag: "TokenUsage",
+                    inputTokens: inputTokens.total ?? 0,
+                    outputTokens: outputTokens.total ?? 0,
+                    cacheReadTokens: inputTokens.cacheRead,
+                    cacheWriteTokens: inputTokens.cacheWrite,
+                    reasoningTokens: outputTokens.reasoning,
+                    breakdown: estimateContext(yield* Ref.get(chat.history), tools.tools),
+                  });
+                }
                 if (!(yield* Ref.get(calledTool))) {
                   return;
                 }
