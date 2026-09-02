@@ -1,0 +1,10 @@
+mcp:
+  github:
+    type: local
+    command: [gh, mcp]
+    environment:
+      GITHUB_READ_ONLY: "1"
+      GITHUB_TOOLSETS: all
+  grep:
+    type: remote
+    url: https://mcp.grep.app

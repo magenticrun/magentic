@@ -8,6 +8,7 @@ import {
   TranscriptEntry,
 } from "./Conversation.ts";
 import { ConversationId } from "./ConversationId.ts";
+import { McpServerInfo } from "./Mcp.ts";
 import { PluginInfo } from "./Plugin.ts";
 import { Compacted, RunDenied, RunEvent, RunRequest } from "./Run.ts";
 
@@ -67,6 +68,8 @@ export const Api = RpcGroup.make(
     error: Schema.Union([ConversationNotFound, CompactionFailed]),
   }),
   Rpc.make("listPlugins", { success: Schema.Array(PluginInfo) }),
+  /** The MCP servers the gateway was configured with, whether or not they connected. */
+  Rpc.make("listMcpServers", { success: Schema.Array(McpServerInfo) }),
 );
 export type Api = typeof Api;
 

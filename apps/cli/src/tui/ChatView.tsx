@@ -721,22 +721,29 @@ export const createChatTui = (options: {
                 <Match when={asThinking(line)}>
                   {(thought) => (
                     <box flexDirection="column" marginBottom={1}>
-                      {/* Click the header to open a folded thought again, or fold it. */}
-                      <box
-                        flexDirection="row"
-                        onMouseUp={() => {
-                          if (!selecting()) {
-                            toggleThinking(index());
-                          }
-                        }}
-                      >
-                        <text fg={palette().muted} flexShrink={0}>
-                          {thought().endedTick === undefined ? frame() : "⏺"}
-                        </text>
-                        <text fg={palette().muted} marginLeft={1} wrapMode="none">
-                          {thought().endedTick === undefined ? "Thinking…" : thoughtFor(thought())}
-                        </text>
-                      </box>
+                      {/*
+                        A thought in progress carries no header: the footer is
+                        already saying `Thinking…` on its own line, and there is
+                        nothing to fold yet. The header arrives with the duration
+                        it reports; click it to open the thought again, or fold it.
+                      */}
+                      <Show when={thought().endedTick !== undefined}>
+                        <box
+                          flexDirection="row"
+                          onMouseUp={() => {
+                            if (!selecting()) {
+                              toggleThinking(index());
+                            }
+                          }}
+                        >
+                          <text fg={palette().muted} flexShrink={0}>
+                            {"⏺"}
+                          </text>
+                          <text fg={palette().muted} marginLeft={1} wrapMode="none">
+                            {thoughtFor(thought())}
+                          </text>
+                        </box>
+                      </Show>
                       <Show when={thought().endedTick === undefined || thought().expanded}>
                         <box marginLeft={2}>
                           <markdown

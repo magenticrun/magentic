@@ -1,4 +1,4 @@
-import type { Conversation, TokenUsage } from "@magentic/protocol";
+import type { Conversation, McpServerInfo, TokenUsage } from "@magentic/protocol";
 import type { Effect, Option, Scope } from "effect";
 import { Schema } from "effect";
 import type { PluginSetupError, Registration } from "./Plugin.ts";
@@ -83,6 +83,8 @@ export interface ChatSession {
   readonly compact: Effect.Effect<void, CommandError>;
   /** Give the current conversation a title of the person's choosing. */
   rename(title: string): Effect.Effect<void, CommandError>;
+  /** The MCP servers the gateway was configured with, connected or not, by name. */
+  readonly mcpServers: Effect.Effect<ReadonlyArray<McpServerInfo>, CommandError>;
 }
 
 export interface CommandInput {
