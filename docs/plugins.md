@@ -232,6 +232,7 @@ export interface ChatSession {
   readonly conversations: Effect.Effect<ReadonlyArray<Conversation>, CommandError>; // this agent's, newest first
   resume(id: string): Effect.Effect<void, CommandError>; // restore the transcript and continue from it
   readonly startNew: Effect.Effect<void>;
+  readonly mcpServers: Effect.Effect<ReadonlyArray<McpServerInfo>, CommandError>; // the gateway's, connected or not
 }
 ```
 
@@ -407,6 +408,19 @@ What the plugin does with a server, following opencode's `MCP` service:
   override the prompt above it or grant anything. That is an agent transform, so it replays
   with the rest and follows the tool list.
 - Answers `roots/list` with the workspace.
+- Pipes a local server's stderr into the gateway's log, one line each as
+  `mcp <server> [stderr]: ...`, rather than letting the child inherit the terminal: a gateway
+  embedded in the full-screen chat would otherwise have the server's logs drawn over the
+  transcript.
+- Reports where each server stands to `McpServers`, a service in the same package: `connected`
+  with its registered tools, `disabled`, `failed` with the decode or handshake error, or
+  `closed` once a connected server went away. A listing that could not be registered leaves
+  the server `connected` with the error beside the tools it still offers. The gateway serves
+  the table as the `listMcpServers` RPC, and `/mcp` in the CLI
+  (`apps/cli/src/commands/Mcp.ts`, over `ChatSession.mcpServers`) prints it: one line per
+  server with its standing, the command line or URL under it, and the error when there is
+  one, so a missing tool is explained in the chat rather than in the gateway log.
+  `/mcp <server>` adds the tools that server offers.
 
 An agent lists MCP tools like any other, by name, or as `<server>_*` for everything a server
 offers: an entry in `tools:` that ends in `*` matches by prefix. The client is the official

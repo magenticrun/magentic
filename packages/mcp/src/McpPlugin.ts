@@ -6,9 +6,11 @@ import {
   type Registration,
   toolMatches,
 } from "@magentic/plugin";
+import { McpServerInfo, type McpServerStatus } from "@magentic/protocol";
 import { Duration, Effect, Option, type Path, Queue, Ref, Schema, type Scope } from "effect";
 import { McpServerConfig } from "./McpConfig.ts";
 import { connect, type ConnectionEvent, type McpConnection } from "./McpConnection.ts";
+import { McpServers } from "./McpServers.ts";
 import { toolkitFor } from "./McpTools.ts";
 
 const Servers = Schema.Record(Schema.String, Schema.Json);
@@ -56,25 +58,45 @@ const logAt = (event: Extract<ConnectionEvent, { readonly _tag: "Log" }>, server
   }
 };
 
+/** What a status line names: the command line of a local server, the URL of a remote one. */
+const targetOf = (config: McpServerConfig): string =>
+  config.type === "local" ? config.command.join(" ") : config.url;
+
 /** One server: connect, publish its tools, and follow it until it goes away. */
 const serve = Effect.fn("mcpPlugin.serve")(function* (
   ctx: PluginContext,
   server: string,
   raw: Schema.Json,
 ) {
+  const servers = yield* McpServers;
   const decoded = yield* Effect.result(Schema.decodeUnknownEffect(McpServerConfig)(raw));
   if (decoded._tag === "Failure") {
-    yield* Effect.logError(`mcp server ${server} has an invalid entry: ${decoded.failure.message}`);
+    // The schema reports over several lines; one line reads better in a log and in /mcp.
+    const error = `invalid entry: ${decoded.failure.message.replaceAll(/\s*\n\s*/g, " ")}`;
+    yield* Effect.logError(`mcp server ${server} has an ${error}`);
+    yield* servers.report(new McpServerInfo({ name: server, status: "failed", error, tools: [] }));
     return;
   }
   const config = decoded.success;
+  const target = targetOf(config);
+  /** What `/mcp` shows for this server from now on. */
+  const report = (status: McpServerStatus, tools: ReadonlyArray<string>, error?: string) =>
+    servers.report(
+      new McpServerInfo(
+        error === undefined
+          ? { name: server, status, target, tools }
+          : { name: server, status, target, error, tools },
+      ),
+    );
   if (config.enabled === false) {
     yield* Effect.logInfo(`mcp server ${server} is disabled`);
+    yield* report("disabled", []);
     return;
   }
   const connected = yield* Effect.result(connect(server, config, ctx.paths.workspace));
   if (connected._tag === "Failure") {
     yield* Effect.logWarning(`mcp server ${server} is unavailable: ${connected.failure.message}`);
+    yield* report("failed", [], connected.failure.message);
     return;
   }
   const connection: McpConnection = connected.success;
@@ -122,10 +144,19 @@ const serve = Effect.fn("mcpPlugin.serve")(function* (
     }
     const names = registered.success;
     yield* Effect.logInfo(`mcp server ${server}: ${names.length} tools (${names.join(", ")})`);
+    yield* report("connected", names);
     if (Option.isSome(connection.instructions)) {
       yield* ctx.agent.rebuild;
     }
-  }).pipe(Effect.catch((error) => Effect.logError(`mcp server ${server}: ${error.message}`)));
+  }).pipe(
+    Effect.catch((error) =>
+      Effect.gen(function* () {
+        yield* Effect.logError(`mcp server ${server}: ${error.message}`);
+        // Still connected, and still offering whatever was registered before this listing.
+        yield* report("connected", yield* Ref.get(published), error.message);
+      }),
+    ),
+  );
 
   if (Option.isSome(connection.instructions)) {
     const instructions = connection.instructions.value;
@@ -175,6 +206,7 @@ const serve = Effect.fn("mcpPlugin.serve")(function* (
       yield* withdraw;
       yield* ctx.agent.rebuild;
       yield* Effect.logWarning(`mcp server ${server} closed the connection; its tools are gone`);
+      yield* report("closed", [], "the server closed the connection");
       return;
     }
     if (events.some((event) => event._tag === "ToolsChanged")) {
@@ -190,9 +222,10 @@ const serve = Effect.fn("mcpPlugin.serve")(function* (
  * `magentic.yaml` is one server; its tools register as `<server>_<tool>` with
  * the `mcp` capability, so an agent lists them by name or as `<server>_*` and
  * policy decides each call. A server that cannot be reached is logged and
- * skipped; the rest keep working.
+ * skipped; the rest keep working. Every server's standing is reported to
+ * `McpServers`, which the gateway serves as `listMcpServers` for `/mcp`.
  */
-export const mcpPlugin = define<Path.Path>({
+export const mcpPlugin = define<Path.Path | McpServers>({
   id: "mcp",
   description: "Tools from the MCP servers named under mcp: in magentic.yaml.",
   setup: Effect.fn("mcpPlugin.setup")(function* (ctx) {

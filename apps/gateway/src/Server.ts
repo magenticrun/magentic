@@ -10,7 +10,7 @@ import {
   Runner,
 } from "@magentic/core";
 import { Identity } from "@magentic/identity";
-import { mcpPlugin } from "@magentic/mcp";
+import { mcpPlugin, McpServers } from "@magentic/mcp";
 import { layerCredentialStores, modelPlugins } from "@magentic/model";
 import { define, ModelCatalog } from "@magentic/plugin";
 import { Policy } from "@magentic/policy";
@@ -154,6 +154,8 @@ const AdmissionLayer = Layer.mergeAll(Identity.layerLocal, Policy.layerAllowAll,
  * Identity, policy, and audit meet the runner here and nowhere else. The
  * model catalog comes from outside, so a process that already has one (the
  * CLI with its embedded gateway) serves with it rather than a second copy.
+ * The MCP standings the plugin reports stay visible so the handlers can
+ * serve them.
  */
 export const ServicesLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer).pipe(
   Layer.provideMerge(
@@ -163,6 +165,7 @@ export const ServicesLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer).pipe(
         layerCredentialStores,
         ToolCallGuardLive.pipe(Layer.provide(AdmissionLayer)),
       ]),
+      Layer.provideMerge(McpServers.layer),
     ),
   ),
 );

@@ -1,69 +1,201 @@
-# magentic
+<p align="center">
+  <img src="docs/logotype.svg" width="481" alt="magentic" />
+</p>
 
 **The agent harness your team can actually share.**
 
-magentic is an open-source agent harness built for teams instead of one person. Run it as a gateway on your own box and it becomes the shared brain: your agents live there, with skills, tools, memory, and cron; people reach them from Slack, a terminal, or Cursor; and every request passes through one policy that knows who's asking, what they may use, and what needs approval. Identity comes from Slack, or Okta when you have it, and every action is audited.
+magentic is a self-hosted, Bun-native agent gateway for a shared workspace. It gives people a terminal interface today and is designed to put the same agents, tools, conversation history, and controls behind other team surfaces.
 
-Locally it's just a good agent. Deployed, it's the one your whole team can safely share.
+Run it locally and it is a capable coding agent. Run it as a gateway and one configuration can define the agents your team uses.
 
-## Layout
+> **Current status:** early-stage software. The gateway currently uses local identity, an allow-all policy, and an in-memory audit sink. It binds to loopback by default; do not expose it to an untrusted network. See [Security](#security) before changing the bind address.
 
-A [Bun](https://bun.sh) workspace built on [Effect](https://effect.website) 4.
+## What it does today
 
-| Package                   | Role                                                                                 |
-| ------------------------- | ------------------------------------------------------------------------------------ |
-| `apps/gateway`            | The server. Hosts agents and runs every request through identity, policy, and audit. |
-| `apps/cli`                | Terminal client (`magentic`).                                                        |
-| `packages/protocol`       | Wire schemas and the RPC definition shared by the gateway and every surface.         |
-| `packages/core`           | Agent runtime: agents, skills, tools, memory, cron.                                  |
-| `packages/plugin`         | The plugin contract: `define`, the tool, model, agent, command, and event domains.   |
-| `packages/model`          | Model provider plugins (OpenAI, Anthropic, Codex, Z.AI, OpenCode Zen) and stores.    |
-| `packages/tools`          | The built-in file and shell tools, confined to the workspace.                        |
-| `packages/policy`         | The one policy every request passes through.                                         |
-| `packages/identity`       | Resolves callers to principals via Slack, Okta, or a local fallback.                 |
-| `packages/audit`          | Append-only record of every action.                                                  |
-| `packages/surface-slack`  | Slack surface.                                                                       |
-| `packages/mcp`            | The `mcp` plugin: tools from MCP servers named in `magentic.yaml`.                   |
-| `packages/surface-cursor` | Cursor surface, via MCP.                                                             |
+- Runs a gateway over Effect RPC, with a health endpoint at `GET /health`.
+- Starts a full-screen terminal chat or accepts one-shot prompts.
+- Connects to OpenAI/Codex, Anthropic, Z.AI, and OpenCode Zen model providers.
+- Lets agents use workspace-confined file tools and a shell tool.
+- Stores conversations on disk and supports continuing or resuming them.
+- Loads additional agents from YAML, reloads them on `SIGHUP`, and can watch their directory.
+- Loads built-in, local-file, package, and MCP tool plugins.
 
-## Develop
+## Quick start
+
+### 1. Install dependencies
+
+[magentic uses Bun](https://bun.sh), not npm, pnpm, or yarn.
 
 ```sh
 bun install
-bun run dev          # gateway with reload on http://localhost:4321
-bun run check        # typecheck + lint + knip + tests
 ```
 
-The gateway listens on 127.0.0.1; set `MAGENTIC_HOST` to bind elsewhere (see `docs/identity.md`).
+### 2. Sign in to a model provider
 
-### Environment
+```sh
+bun apps/cli/src/main.ts auth login
+bun apps/cli/src/main.ts auth list
+```
 
-Every setting is an environment variable, read through `Config`. Bun loads a `.env` in the
-working directory on its own.
+Follow the provider picker. Credentials are kept in your magentic data directory, not in project configuration.
 
-| Variable                   | Default                              | What it does                                                          |
-| -------------------------- | ------------------------------------ | --------------------------------------------------------------------- |
-| `PORT`                     | `4321`                               | Port the gateway listens on.                                          |
-| `MAGENTIC_HOST`            | `127.0.0.1`                          | Address the gateway binds. Anything else needs `IDENTITY_LOCAL=true`. |
-| `IDENTITY_LOCAL`           | `false`                              | Accept that local identity trusts every caller on the bound network.  |
-| `MAGENTIC_HOME`            | `./magentic`                         | Configuration directory: `magentic.yaml`, `agents/`, plugins.         |
-| `MAGENTIC_DATA_DIR`        | `$HOME/.config/magentic`             | Per-person state: conversations, the CLI's last chat.                 |
-| `MAGENTIC_WORKSPACE`       | the working directory                | Directory the file and shell tools may touch.                         |
-| `MAGENTIC_API_KEYS_FILE`   | `$MAGENTIC_DATA_DIR/api-keys.json`   | Where API keys are kept, mode 0600.                                   |
-| `MAGENTIC_CODEX_AUTH_FILE` | `$MAGENTIC_DATA_DIR/codex-auth.json` | Where the ChatGPT (Codex) login is kept, mode 0600.                   |
-| `CODEX_HOME`               | `$HOME/.codex`                       | The Codex CLI's directory, for `auth login` to copy its `auth.json`.  |
-| `MAGENTIC_MODELS_URL`      | `https://models.dev/api.json`        | Where the model catalog is fetched from.                              |
-| `MAGENTIC_MODELS_CACHE`    | `$HOME/.cache/magentic/models.json`  | The catalog's on-disk copy, refreshed hourly.                         |
-| `MAGENTIC_MODELS_OFFLINE`  | `false`                              | Never fetch the catalog; use the cache or the bundled snapshot.       |
-| `USER`                     | `local`                              | The subject local identity resolves every caller to.                  |
+### 3. Start chatting
 
-In another terminal:
+```sh
+# Opens the terminal UI. If no local gateway is running, the CLI starts one for this session.
+bun apps/cli/src/main.ts
+
+# Or send one prompt and print streamed events in the terminal.
+bun apps/cli/src/main.ts run "Explain this repository"
+```
+
+The built-in `assistant` can inspect, edit, and run commands in the current workspace. List the agents available to the gateway with:
 
 ```sh
 bun apps/cli/src/main.ts agents
-bun apps/cli/src/main.ts --gateway http://gateway.internal:4321 agents
 ```
+
+## Run the gateway
+
+For a long-running local gateway:
+
+```sh
+bun run dev
+# Gateway: http://127.0.0.1:4321
+# Health:  http://127.0.0.1:4321/health
+```
+
+Point the CLI at another gateway with `--gateway` (or `-g`):
+
+```sh
+bun apps/cli/src/main.ts --gateway http://gateway.internal:4321 agents
+bun apps/cli/src/main.ts --gateway http://gateway.internal:4321 run "Summarize the latest changes"
+```
+
+Useful CLI commands:
+
+```sh
+bun apps/cli/src/main.ts --help
+bun apps/cli/src/main.ts plugin list
+bun apps/cli/src/main.ts -c                 # continue the latest conversation
+bun apps/cli/src/main.ts -r <conversation>  # resume a conversation by id
+```
+
+## Configure agents
+
+By default magentic looks for configuration in `./magentic`. Set `MAGENTIC_HOME` to use another directory. Add agent definitions under `agents/`; the built-in `assistant` remains available.
+
+```text
+magentic/
+├── magentic.yaml
+└── agents/
+    └── reviewer.yaml
+```
+
+`magentic/agents/reviewer.yaml`:
+
+```yaml
+name: reviewer
+description: Reviews changes in the current workspace.
+model: anthropic/claude-sonnet-4-5
+prompt: |
+  Review the user's requested change carefully.
+  Explain risks clearly and cite files and line numbers.
+tools: [read_file, glob, grep]
+maxSteps: 12
+```
+
+An agent’s `prompt` can also load a file relative to the configuration directory:
+
+```yaml
+prompt:
+  file: prompts/reviewer.md
+```
+
+Use `reload: watch` in `magentic.yaml` to rebuild configured agents when their files change. Sending `SIGHUP` to the gateway also reloads them.
+
+```yaml
+reload: watch
+
+# Disable a built-in tool everywhere.
+tools:
+  shell: false
+
+# Disable a built-in plugin or load a trusted external plugin.
+plugins:
+  disable: []
+  use: []
+```
+
+See [docs/plugins.md](docs/plugins.md) for plugin and MCP configuration. Treat external plugins as trusted code: they run in the gateway process with its privileges.
+
+## Environment
+
+Bun loads `.env` from the working directory. Do not commit credentials.
+
+| Variable                   | Default                              | Purpose                                                                                |
+| -------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------- |
+| `PORT`                     | `4321`                               | Gateway port.                                                                          |
+| `MAGENTIC_HOST`            | `127.0.0.1`                          | Address on which the gateway listens.                                                  |
+| `IDENTITY_LOCAL`           | `false`                              | Explicitly permits a non-loopback bind with local identity. See [Security](#security). |
+| `MAGENTIC_HOME`            | `./magentic`                         | Configuration directory containing `magentic.yaml` and `agents/`.                      |
+| `MAGENTIC_DATA_DIR`        | `$HOME/.config/magentic`             | Local conversations, CLI state, and `gateway.log` from a gateway the CLI started.      |
+| `MAGENTIC_WORKSPACE`       | Current working directory            | Root available to built-in file and shell tools.                                       |
+| `MAGENTIC_API_KEYS_FILE`   | `$MAGENTIC_DATA_DIR/api-keys.json`   | Stored model API keys.                                                                 |
+| `MAGENTIC_CODEX_AUTH_FILE` | `$MAGENTIC_DATA_DIR/codex-auth.json` | Stored ChatGPT/Codex login.                                                            |
+| `CODEX_HOME`               | `$HOME/.codex`                       | Codex CLI directory used when importing its login.                                     |
+| `MAGENTIC_MODELS_URL`      | `https://models.dev/api.json`        | Model catalog source.                                                                  |
+| `MAGENTIC_MODELS_CACHE`    | `$HOME/.cache/magentic/models.json`  | Cached model catalog.                                                                  |
+| `MAGENTIC_MODELS_OFFLINE`  | `false`                              | Use only the cached or bundled model catalog.                                          |
+| `USER`                     | `local`                              | Subject assigned by local identity.                                                    |
+
+## Security
+
+The gateway is deliberately conservative while authentication is still under development:
+
+- It listens on `127.0.0.1` by default.
+- Setting `MAGENTIC_HOST` to anything else fails unless you also set `IDENTITY_LOCAL=true`.
+- With local identity enabled, callers on the reachable network are trusted as the local user.
+- The current policy allows actions and the audit sink is in memory. Do not treat this as a multi-tenant or production authorization boundary.
+- Built-in workspace tools are confined to `MAGENTIC_WORKSPACE`; the shell tool runs with the gateway process’s privileges inside that workspace.
+
+For the intended identity and policy model, read [docs/identity.md](docs/identity.md). For a public deployment, keep the gateway behind a trusted network boundary until authenticated edge support lands.
+
+## Development
+
+```sh
+bun run dev        # gateway with reload
+bun run test       # Vitest suite on the Bun runtime
+bun run typecheck  # TypeScript checks
+bun run lint       # oxlint and formatting check
+bun run check      # typecheck + lint + knip + tests
+```
+
+This is a Bun workspace built on [Effect](https://effect.website) 4. Read [CLAUDE.md](CLAUDE.md) for repository conventions and contributor commands.
+
+## Repository layout
+
+| Path                | Responsibility                                                                    |
+| ------------------- | --------------------------------------------------------------------------------- |
+| `apps/gateway`      | Gateway server: configuration, plugin hosting, RPC routes, and service wiring.    |
+| `apps/cli`          | `magentic` terminal client and full-screen chat.                                  |
+| `packages/protocol` | Shared schemas and Effect RPC API.                                                |
+| `packages/core`     | Agent runtime, conversations, plugin host, retries, and configuration primitives. |
+| `packages/plugin`   | Public plugin contract and model catalog.                                         |
+| `packages/model`    | Model-provider plugins, API keys, and Codex login.                                |
+| `packages/tools`    | Workspace-confined file and shell tools.                                          |
+| `packages/mcp`      | MCP client plugin and MCP-provided tools.                                         |
+| `packages/identity` | Identity abstractions and local identity implementation.                          |
+| `packages/policy`   | Policy decisions and enforcement interfaces.                                      |
+| `packages/audit`    | Audit interfaces and current in-memory implementation.                            |
+| `docs/`             | Design notes, configuration details, and research.                                |
+
+## Documentation
+
+- [Harness design](docs/harness.md) — architecture, request lifecycle, and delivery phases.
+- [Identity design](docs/identity.md) — planned credentials, sessions, and authorization boundary.
+- [Plugin guide](docs/plugins.md) — plugin contract, external plugins, and MCP servers.
 
 ## License
 
-MIT
+[MIT](LICENSE)

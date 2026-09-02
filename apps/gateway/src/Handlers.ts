@@ -9,6 +9,7 @@ import {
   transcriptFromJson,
 } from "@magentic/core";
 import { Identity } from "@magentic/identity";
+import { McpServers } from "@magentic/mcp";
 import { Policy } from "@magentic/policy";
 import {
   AgentInfo,
@@ -45,7 +46,7 @@ const owned = Effect.fn("Gateway.ownedConversation")(function* (
   return found.value;
 });
 
-/** Every RPC the gateway answers. Needs the runner, the registries, and identity, policy, and audit. */
+/** Every RPC the gateway answers. Needs the runner, the registries, the MCP standings, and identity, policy, and audit. */
 export const RpcHandlers = Api.toLayer(
   Effect.gen(function* () {
     const host = yield* PluginHost;
@@ -56,6 +57,7 @@ export const RpcHandlers = Api.toLayer(
     const caller = callerVia(yield* Identity);
     const policy = yield* Policy;
     const audit = yield* Audit;
+    const mcp = yield* McpServers;
 
     /** What a surface may know, with the model the agent would run on today. */
     const toInfo = Effect.fn("Gateway.toInfo")(function* (agent: AgentDefinition) {
@@ -169,6 +171,7 @@ export const RpcHandlers = Api.toLayer(
       removeConversation: ({ id }) => remove(id),
       compact: ({ id }) => compact(id),
       listPlugins: () => host.plugins,
+      listMcpServers: () => mcp.list,
     });
   }),
 );

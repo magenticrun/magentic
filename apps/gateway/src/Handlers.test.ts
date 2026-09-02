@@ -3,6 +3,7 @@ import { assert, layer } from "@effect/vitest";
 import { Audit, AuditMemory } from "@magentic/audit";
 import { builtin, ConversationStore, PluginHost, Runner } from "@magentic/core";
 import { Identity } from "@magentic/identity";
+import { mcpPlugin, McpServers } from "@magentic/mcp";
 import { fakeProviderPlugin, type FakeScript } from "@magentic/model";
 import { AgentDefinition, define, ModelCatalog } from "@magentic/plugin";
 import { Policy } from "@magentic/policy";
@@ -103,6 +104,12 @@ const PlatformLayer = Layer.mergeAll(
   ModelCatalog.layerSnapshot,
 );
 
+/** Two servers that need no process or network: one turned off, one that does not decode. */
+const mcpServers = {
+  archive: { type: "remote", url: "https://archive.example/mcp", enabled: false },
+  broken: { type: "local" },
+};
+
 /** The handlers over the plugins above, admitted by the given identity, policy, and audit. */
 const handlersWith = (policy: Layer.Layer<Policy>) => {
   const AdmissionLayer = Layer.mergeAll(Identity.layerLocal, policy, Audit.layerMemory);
@@ -111,9 +118,13 @@ const handlersWith = (policy: Layer.Layer<Policy>) => {
       builtin(fileToolsPlugin),
       builtin(fakeProviderPlugin(scripted)),
       builtin(triagePlugin),
+      builtin(mcpPlugin, mcpServers),
     ],
     paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
-  }).pipe(Layer.provide([WorkspaceLayer, ToolCallGuardLive.pipe(Layer.provide(AdmissionLayer))]));
+  }).pipe(
+    Layer.provide([WorkspaceLayer, ToolCallGuardLive.pipe(Layer.provide(AdmissionLayer))]),
+    Layer.provideMerge(McpServers.layer),
+  );
   const RunnerLayer = Runner.layer.pipe(Layer.provideMerge(ConversationStore.layerMemory));
   const ServicesLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer).pipe(
     Layer.provideMerge(HostLayer),
@@ -186,8 +197,24 @@ layer(TestLayer)("gateway api", (it) => {
           ],
           ["fake", "active", [], []],
           ["triage", "active", [], ["triage"]],
+          ["mcp", "active", [], []],
         ],
       );
+    }),
+  );
+
+  it.effect("lists MCP servers with why each has no tools", () =>
+    Effect.gen(function* () {
+      const client = yield* makeClient;
+      const servers = yield* client.listMcpServers();
+      assert.deepStrictEqual(
+        servers.map((s) => [s.name, s.status, s.target, [...s.tools]]),
+        [
+          ["archive", "disabled", "https://archive.example/mcp", []],
+          ["broken", "failed", undefined, []],
+        ],
+      );
+      assert.match(servers[1]?.error ?? "", /invalid entry/);
     }),
   );
 

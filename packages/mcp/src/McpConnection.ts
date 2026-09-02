@@ -8,7 +8,7 @@ import {
   type Transport,
 } from "@modelcontextprotocol/client";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/client/stdio";
-import { Duration, Effect, Option, Path, Queue, Schema } from "effect";
+import { Duration, Effect, Option, Path, Predicate, Queue, Schema } from "effect";
 import { pathToFileURL } from "node:url";
 import { DEFAULT_TIMEOUT_MS, type McpServerConfig } from "./McpConfig.ts";
 
@@ -43,17 +43,54 @@ export interface McpConnection {
   readonly events: Queue.Dequeue<ConnectionEvent>;
 }
 
+/**
+ * A local server's stderr, line by line, as log events. Left to the SDK the
+ * child would inherit ours, and a gateway embedded in the full-screen chat
+ * would have the server's logs drawn over the transcript.
+ */
+const forwardStderr = (transport: StdioClientTransport, events: Queue.Enqueue<ConnectionEvent>) => {
+  const stderr = transport.stderr;
+  if (stderr === null) {
+    return;
+  }
+  const decoder = new TextDecoder();
+  let pending = "";
+  const emit = (line: string) => {
+    if (line.trim().length > 0) {
+      Queue.offerUnsafe(events, {
+        _tag: "Log",
+        level: "info",
+        logger: Option.some("stderr"),
+        data: line,
+      });
+    }
+  };
+  stderr.on("data", (chunk: Uint8Array | string) => {
+    pending += Predicate.isString(chunk) ? chunk : decoder.decode(chunk, { stream: true });
+    const lines = pending.split("\n");
+    pending = lines.pop() ?? "";
+    lines.forEach(emit);
+  });
+  stderr.on("end", () => {
+    emit(pending);
+    pending = "";
+  });
+};
+
 /** Builds the transports to try, in order. Remote servers get SSE as a fallback. */
 const transportsFor = Effect.fn("Mcp.transportsFor")(function* (
   config: McpServerConfig,
   workspace: string,
+  events: Queue.Enqueue<ConnectionEvent>,
 ) {
   const path = yield* Path.Path;
   if (config.type === "local") {
     const [command, ...args] = config.command;
     const cwd = config.cwd === undefined ? workspace : path.resolve(workspace, config.cwd);
     const env = { ...getDefaultEnvironment(), ...config.environment };
-    const transport: Transport = new StdioClientTransport({ command, args, cwd, env });
+    const stdio = new StdioClientTransport({ command, args, cwd, env, stderr: "pipe" });
+    forwardStderr(stdio, events);
+    const transport: Transport = stdio;
     return [transport];
   }
   const url = yield* Effect.try({
@@ -81,7 +118,7 @@ export const connect = Effect.fn("Mcp.connect")(function* (
   const timeout = config.timeout ?? DEFAULT_TIMEOUT_MS;
   const events = yield* Queue.unbounded<ConnectionEvent>();
   const failed = (message: string) => new McpError({ server, reason: "Connect", message });
-  const transports = yield* transportsFor(config, workspace).pipe(Effect.mapError(failed));
+  const transports = yield* transportsFor(config, workspace, events).pipe(Effect.mapError(failed));
 
   const attach = (client: Client) => {
     client.setRequestHandler("roots/list", () => ({

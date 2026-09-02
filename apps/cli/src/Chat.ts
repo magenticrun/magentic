@@ -386,6 +386,9 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
         .pipe(Effect.catchCause((cause) => gatewayFailed("rename")(cause)));
       tui.note(`Renamed to "${renamed.title}"`);
     }),
+    mcpServers: client
+      .listMcpServers()
+      .pipe(Effect.catchCause((cause) => gatewayFailed("mcp")(cause))),
   };
 
   const runCommand = Effect.fn("Cli.chat.runCommand")(function* (input: string) {

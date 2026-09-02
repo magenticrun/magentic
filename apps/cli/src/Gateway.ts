@@ -1,6 +1,7 @@
+import { dataDir } from "@magentic/core";
 import { ModelCatalog } from "@magentic/plugin";
 import { Api, RPC_PATH } from "@magentic/protocol";
-import { Effect, Layer, Option, Schedule, Schema } from "effect";
+import { Effect, FileSystem, Layer, Logger, Option, Path, Schedule, Schema } from "effect";
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 
 class GatewayUnreachable extends Schema.TaggedError<GatewayUnreachable>()("GatewayUnreachable", {
@@ -19,6 +20,20 @@ export const gatewayClient = (baseUrl: string) =>
   );
 
 const isLocal = (url: URL) => url.hostname === "localhost" || url.hostname === "127.0.0.1";
+
+/**
+ * Where an embedded gateway writes its log, appended to across sessions. The
+ * terminal is the chat's, or the one-shot run's output, so plugin and MCP
+ * server logs cannot go there; they stay readable here for when a server
+ * does not connect.
+ */
+const embeddedLogger = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const dir = yield* dataDir;
+  yield* fs.makeDirectory(dir, { recursive: true });
+  return yield* Logger.toFile(Logger.formatLogFmt, path.join(dir, "gateway.log"), { flag: "a" });
+});
 
 /**
  * A client for the gateway at `baseUrl`. When nothing answers there and the
@@ -41,13 +56,15 @@ export const ensureGateway = Effect.fn("Cli.ensureGateway")(function* (baseUrl: 
   // The server is loaded only now: most starts find a gateway already running.
   const { layerServer } = yield* Effect.promise(() => import("@magentic/gateway"));
   // Request logs would land in the transcript, or on top of the full-screen
-  // chat. The catalog this process already has, when it has one, is shared.
+  // chat; everything else the gateway logs goes to a file for the same
+  // reason. The catalog this process already has, when it has one, is shared.
   const catalog = yield* Effect.serviceOption(ModelCatalog);
   const options = Option.match(catalog, {
     onNone: () => ({ quiet: true }),
     onSome: (service) => ({ quiet: true, catalog: Layer.succeed(ModelCatalog, service) }),
   });
-  yield* Layer.build(layerServer(port, options));
+  const logger = yield* embeddedLogger;
+  yield* Layer.build(layerServer(port, options)).pipe(Effect.provide(Logger.layer([logger])));
   yield* client.health().pipe(Effect.retry({ times: 50, schedule: Schedule.spaced("100 millis") }));
   return { client, embedded: true };
 });

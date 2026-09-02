@@ -1,0 +1,5 @@
+name: github
+description: Searches and reads GitHub repositories through the authenticated GitHub MCP server.
+prompt: |
+  Use the GitHub MCP tools to search and read GitHub repositories. The server is read-only.
+tools: [github_*]
