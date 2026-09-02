@@ -3,7 +3,6 @@ import { Console, Effect } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
 import { auth } from "./Auth.ts";
-import { chat } from "./Chat.ts";
 import { ensureGateway, gatewayClient } from "./Gateway.ts";
 import { LocalHost } from "./Host.ts";
 import { run } from "./Run.ts";
@@ -45,8 +44,14 @@ const magentic = Command.make("magentic", {
   resume: resumeFlag,
 }).pipe(
   Command.withSharedFlags({ gateway }),
-  Command.withHandler(({ agent, continue: latest, resume, gateway: baseUrl }) =>
-    chat({ baseUrl, agent, continue: latest, resume }).pipe(Effect.provide(LocalHost)),
+  Command.withHandler(
+    Effect.fn(function* ({ agent, continue: latest, resume, gateway: baseUrl }) {
+      // The chat brings the terminal UI with it, which no other command needs.
+      const { chat } = yield* Effect.promise(() => import("./Chat.ts"));
+      return yield* chat({ baseUrl, agent, continue: latest, resume }).pipe(
+        Effect.provide(LocalHost),
+      );
+    }),
   ),
   Command.withDescription("Chat with an agent in the terminal"),
 );

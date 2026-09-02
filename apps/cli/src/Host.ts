@@ -1,4 +1,4 @@
-import { configDir, dataDir } from "@magentic/gateway";
+import { configDir, dataDir } from "@magentic/gateway/paths";
 import { builtin, PluginHost, ToolCallGuard } from "@magentic/core";
 import {
   contextCommandPlugin,

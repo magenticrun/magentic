@@ -13,7 +13,8 @@ import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import { configAgentsPlugin } from "./ConfigAgents.ts";
 import { ToolCallGuardLive } from "./Guard.ts";
 import { RpcHandlers } from "./Handlers.ts";
-import { configDir, dataDir, loadExternalPlugin, loadGatewayConfig } from "./Plugins.ts";
+import { configDir, dataDir } from "./Paths.ts";
+import { loadExternalPlugin, loadGatewayConfig } from "./Plugins.ts";
 
 /** The one agent every gateway has until `agents/*.yaml` exists. */
 export const assistant = new AgentDefinition({
