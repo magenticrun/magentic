@@ -55,6 +55,10 @@ export const TranscriptEntry = Schema.Union([
 ]);
 export type TranscriptEntry = typeof TranscriptEntry.Type;
 
+/** A new title for a conversation; the first input names it until then. */
+export const RenameRequest = Schema.Struct({ title: Schema.NonEmptyString });
+export type RenameRequest = typeof RenameRequest.Type;
+
 export class ConversationNotFound extends Schema.TaggedError<ConversationNotFound>()(
   "ConversationNotFound",
   { id: Schema.String },

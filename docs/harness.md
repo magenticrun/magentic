@@ -245,7 +245,10 @@ auth login|list|logout` (exists, inline `@clack/prompts` like opencode's, not th
   string a second time, and stores them as base64 in `history.json`, which cannot hold bytes.
   `/compact` (in the conversation commands plugin, over `ChatSession.compact`) asks the
   gateway to fold the conversation into a summary; the transcript keeps every earlier line
-  and shows the summary where the compaction happened, on resume too.
+  and shows the summary where the compaction happened, on resume too. `/rename <title>`
+  (same plugin, over `ChatSession.rename` and `PATCH /conversations/:id`) names the
+  conversation, as in opencode; until then the title is the first input, and a bare
+  `/rename` says what it is.
 - **Slack** (`packages/surface-slack`): Events API subscription for mentions and DMs;
   interactivity endpoint for approval buttons. Signature verification is the auth. Thread id
   becomes the conversation id. Replies are posted then edited as text streams in.

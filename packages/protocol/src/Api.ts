@@ -11,6 +11,7 @@ import {
   CompactionFailed,
   Conversation,
   ConversationNotFound,
+  RenameRequest,
   TranscriptEntry,
 } from "./Conversation.ts";
 import { PluginInfo } from "./Plugin.ts";
@@ -56,6 +57,13 @@ export class ConversationsApi extends HttpApiGroup.make("conversations")
     HttpApiEndpoint.get("transcript", "/:id/transcript", {
       params: { id: Schema.String },
       success: Schema.Array(TranscriptEntry),
+      error: ConversationNotFound,
+    }),
+    /** Give the conversation a title of the caller's choosing. */
+    HttpApiEndpoint.patch("rename", "/:id", {
+      params: { id: Schema.String },
+      payload: RenameRequest,
+      success: Conversation,
       error: ConversationNotFound,
     }),
     HttpApiEndpoint.delete("remove", "/:id", {

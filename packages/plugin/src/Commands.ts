@@ -81,6 +81,8 @@ export interface ChatSession {
   readonly startNew: Effect.Effect<void>;
   /** Fold the conversation so far into a summary the model continues from. */
   readonly compact: Effect.Effect<void, CommandError>;
+  /** Give the current conversation a title of the person's choosing. */
+  rename(title: string): Effect.Effect<void, CommandError>;
 }
 
 export interface CommandInput {

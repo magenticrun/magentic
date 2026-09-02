@@ -383,6 +383,19 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
       yield* Ref.set(usage, Option.none());
       tui.apply(done);
     }),
+    rename: Effect.fn("Cli.chat.rename")(function* (title: string) {
+      const id = yield* Ref.get(conversation);
+      if (Option.isNone(id)) {
+        return yield* new CommandError({
+          command: "rename",
+          message: "Nothing to rename yet; this conversation has not started.",
+        });
+      }
+      const renamed = yield* client.conversations
+        .rename({ params: { id: id.value }, payload: { title } })
+        .pipe(Effect.catchCause((cause) => gatewayFailed("rename")(cause)));
+      tui.note(`Renamed to "${renamed.title}"`);
+    }),
   };
 
   const runCommand = Effect.fn("Cli.chat.runCommand")(function* (input: string) {

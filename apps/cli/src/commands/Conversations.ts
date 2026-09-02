@@ -5,6 +5,7 @@ import { DateTime, Effect, Option } from "effect";
 const RESUME = "resume";
 const NEW = "new";
 const COMPACT = "compact";
+const RENAME = "rename";
 
 /** `just now`, `5m ago`, `3h ago`, `2d ago`: enough to tell conversations apart. */
 export const ago = (at: DateTime.Utc, now: DateTime.Utc): string => {
@@ -51,16 +52,34 @@ const resume = Effect.fn("resume.run")(function* ({ ui, session, args }: Command
   }
 });
 
+/** `/rename <title>` sets the title; bare `/rename` says what it is now. */
+const rename = Effect.fn("rename.run")(function* ({ ui, session, args }: CommandInput) {
+  const title = args.trim();
+  if (title.length > 0) {
+    return yield* session.rename(title);
+  }
+  const current = yield* session.conversation;
+  if (Option.isNone(current)) {
+    return yield* new CommandError({
+      command: RENAME,
+      message: "Nothing to rename yet; this conversation has not started.",
+    });
+  }
+  yield* ui.notify(`This conversation is "${current.value.title}"; /rename <title> changes it.`);
+});
+
 /**
  * `/resume`: pick one of this agent's earlier conversations and carry on
  * from it, the transcript restored; `/resume <id>` names one outright.
  * `/new` puts the current one aside and starts fresh. `/compact` folds the
- * current one into a summary the model continues from.
+ * current one into a summary the model continues from. `/rename <title>`
+ * names the current one, as in opencode, where the title is otherwise the
+ * first input.
  */
 export const conversationCommandsPlugin = define({
   id: "conversation-commands",
   description:
-    "The /resume, /new and /compact commands: pick up an earlier conversation, start one, or fold one into a summary.",
+    "The /resume, /new, /compact and /rename commands: pick up an earlier conversation, start one, fold one into a summary, or title one.",
   setup: Effect.fn("conversationCommandsPlugin.setup")(function* (ctx) {
     yield* ctx.command.register({
       name: RESUME,
@@ -83,6 +102,11 @@ export const conversationCommandsPlugin = define({
       name: COMPACT,
       description: "Fold the conversation so far into a summary",
       run: ({ session }) => session.compact,
+    });
+    yield* ctx.command.register({
+      name: RENAME,
+      description: "Give this conversation a title: /rename <title>",
+      run: rename,
     });
   }),
 });
