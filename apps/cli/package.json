@@ -12,8 +12,16 @@
     "test": "bun --bun vitest run --root ../.. apps/cli"
   },
   "dependencies": {
+    "@clack/prompts": "catalog:",
     "@effect/platform-bun": "catalog:",
+    "@magentic/core": "workspace:*",
+    "@magentic/gateway": "workspace:*",
+    "@magentic/model": "workspace:*",
+    "@magentic/plugin": "workspace:*",
     "@magentic/protocol": "workspace:*",
-    "effect": "catalog:"
+    "@opentui/core": "catalog:",
+    "@opentui/solid": "catalog:",
+    "effect": "catalog:",
+    "solid-js": "catalog:"
   }
 }

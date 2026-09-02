@@ -1,0 +1,94 @@
+import { define, ModelInfo } from "@magentic/plugin";
+import { Effect, Layer, Option, Ref, Stream } from "effect";
+import { LanguageModel, type Response } from "effect/unstable/ai";
+
+/**
+ * A provider plugin whose model replays `script`. Always "signed in", so a
+ * test host with this plugin needs no credentials. Its id is `fake`.
+ */
+export const fakeProviderPlugin = (script: FakeScript) =>
+  define({
+    id: "fake",
+    description: "A scripted model for tests.",
+    setup: (ctx) =>
+      Effect.asVoid(
+        ctx.model.register({
+          id: "fake",
+          name: "Fake",
+          description: "Replays a script.",
+          methods: [],
+          status: Effect.succeed(Option.some("scripted")),
+          logout: Effect.void,
+          models: Effect.succeed([
+            new ModelInfo({
+              id: "fake",
+              name: "Fake",
+              reasoning: false,
+              toolCall: true,
+              context: 0,
+              output: 0,
+            }),
+          ]),
+          defaultModel: "fake",
+          model: () => Effect.succeed(Option.some(layerFake(script))),
+        }),
+      ),
+  });
+
+/** One scripted model turn: what the fake replies with for the nth call. */
+export type FakeScript = (call: {
+  readonly index: number;
+  readonly options: LanguageModel.ProviderOptions;
+}) => ReadonlyArray<Response.PartEncoded>;
+
+/** Splits a text or reasoning part into the start / delta / end parts a real provider streams. */
+const toStreamParts = (
+  parts: ReadonlyArray<Response.PartEncoded>,
+): Array<Response.StreamPartEncoded> => {
+  const out: Array<Response.StreamPartEncoded> = [];
+  parts.forEach((part, index) => {
+    const id = `part-${index}`;
+    switch (part.type) {
+      case "text":
+        out.push(
+          { type: "text-start", id },
+          { type: "text-delta", id, delta: part.text },
+          { type: "text-end", id },
+        );
+        return;
+      case "reasoning":
+        out.push(
+          { type: "reasoning-start", id },
+          { type: "reasoning-delta", id, delta: part.text },
+          { type: "reasoning-end", id },
+        );
+        return;
+      default:
+        out.push(part);
+    }
+  });
+  return out;
+};
+
+/**
+ * A LanguageModel that replays a script. Tests use it to drive the runner
+ * through tool calls without a network.
+ */
+export const layerFake = (script: FakeScript): Layer.Layer<LanguageModel.LanguageModel> =>
+  Layer.effect(
+    LanguageModel.LanguageModel,
+    Effect.gen(function* () {
+      const calls = yield* Ref.make(0);
+      const next = (options: LanguageModel.ProviderOptions) =>
+        Ref.getAndUpdate(calls, (n) => n + 1).pipe(
+          Effect.map((index) => script({ index, options })),
+        );
+      return yield* LanguageModel.make({
+        generateText: (options) => next(options).pipe(Effect.map((parts) => [...parts])),
+        streamText: (options) =>
+          Stream.unwrap(
+            next(options).pipe(Effect.map((parts) => Stream.fromIterable(toStreamParts(parts)))),
+          ),
+      });
+    }),
+  );

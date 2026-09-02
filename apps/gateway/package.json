@@ -17,8 +17,11 @@
     "@magentic/audit": "workspace:*",
     "@magentic/core": "workspace:*",
     "@magentic/identity": "workspace:*",
+    "@magentic/model": "workspace:*",
+    "@magentic/plugin": "workspace:*",
     "@magentic/policy": "workspace:*",
     "@magentic/protocol": "workspace:*",
+    "@magentic/tools": "workspace:*",
     "effect": "catalog:"
   }
 }

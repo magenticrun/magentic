@@ -2,7 +2,7 @@
   "name": "@magentic/core",
   "version": "0.0.0",
   "private": true,
-  "description": "Agent runtime: agents, skills, tools, memory, and cron.",
+  "description": "Agent runtime: the plugin host, registries, runner, and conversations.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
@@ -11,7 +11,13 @@
     "test": "bun --bun vitest run --root ../.. packages/core"
   },
   "dependencies": {
+    "@magentic/plugin": "workspace:*",
     "@magentic/protocol": "workspace:*",
     "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/platform-bun": "catalog:",
+    "@magentic/model": "workspace:*",
+    "@magentic/tools": "workspace:*"
   }
 }

@@ -3,9 +3,14 @@ import { Effect } from "effect";
 import { AgentDefinition } from "./Agent.ts";
 import { AgentRegistry } from "./AgentRegistry.ts";
 
-const triage = new AgentDefinition({ name: "triage", description: "Triage issues", tools: [] });
+const triage = new AgentDefinition({
+  name: "triage",
+  description: "Triage issues",
+  prompt: "Triage issues.",
+  tools: [],
+});
 
-layer(AgentRegistry.layerMemory)("AgentRegistry", (it) => {
+layer(AgentRegistry.layerMemory())("AgentRegistry", (it) => {
   it.effect("registers and lists agents", () =>
     Effect.gen(function* () {
       const registry = yield* AgentRegistry;

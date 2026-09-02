@@ -5,6 +5,8 @@ export class AgentInfo extends Schema.Class<AgentInfo>("magentic/protocol/AgentI
   name: Schema.NonEmptyString,
   description: Schema.String,
   tools: Schema.Array(Schema.String),
+  /** The `provider/model` the agent runs on; absent when no provider answers to its configuration. */
+  model: Schema.optional(Schema.String),
 }) {}
 
 export class AgentNotFound extends Schema.TaggedError<AgentNotFound>()(

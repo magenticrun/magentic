@@ -1,0 +1,22 @@
+{
+  "name": "@magentic/model",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Language model provider plugins: how to sign in and which LanguageModel you get.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun --bun vitest run --root ../.. packages/model"
+  },
+  "dependencies": {
+    "@effect/ai-anthropic": "catalog:",
+    "@effect/ai-openai": "catalog:",
+    "@magentic/plugin": "workspace:*",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/platform-bun": "catalog:"
+  }
+}
