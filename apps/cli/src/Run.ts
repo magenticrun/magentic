@@ -39,7 +39,9 @@ export const run = Effect.fn("Cli.run")(function* (options: RunOptions) {
           `← ${event.name} ${event.isFailure ? "failed" : "ok"} ${summarise(event.result)}`,
         );
       case "RunFinished":
-        return Console.log("");
+        return event.reason === "step-limit"
+          ? Console.log("\n(stopped at the agent's step limit; send another input to continue)")
+          : Console.log("");
       case "RunFailed":
         return Console.error(`\nrun failed: ${event.message}`);
     }

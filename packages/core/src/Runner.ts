@@ -123,6 +123,16 @@ const forModel = (prompt: Prompt.Prompt): Prompt.Prompt =>
 /** How much of the first input names the conversation. */
 const TITLE_LENGTH = 80;
 
+/**
+ * Model calls one run may make when the agent does not say. A model that
+ * keeps calling tools without ever answering stops here, with `RunFinished`
+ * reason `step-limit`, instead of spending until the provider cuts it off.
+ */
+export const DEFAULT_MAX_STEPS = 50;
+
+/** The `RunFinished` reason for a run that stopped at its step limit. */
+export const STEP_LIMIT_REASON = "step-limit";
+
 const titleOf = (input: string): string => {
   const flat = input.replace(/\s+/g, " ").trim();
   return flat.length > TITLE_LENGTH ? `${flat.slice(0, TITLE_LENGTH - 1)}…` : flat;
@@ -324,7 +334,8 @@ export class Runner extends Context.Service<
                     )
                   : Effect.void;
               let prompt = promptOf(options.input, options.attachments);
-              while (true) {
+              const maxSteps = options.agent.maxSteps ?? DEFAULT_MAX_STEPS;
+              for (let step = 1; ; step++) {
                 const calledTool = yield* Ref.make(false);
                 const usage = yield* Ref.make(Option.none<Response.Usage>());
                 // A call that fails before anything reached the surface is tried
@@ -381,6 +392,14 @@ export class Runner extends Context.Service<
                   yield* compactIfFull(event.inputTokens + event.outputTokens);
                 }
                 if (!(yield* Ref.get(calledTool))) {
+                  return;
+                }
+                if (step >= maxSteps) {
+                  // The tool results are in the history; the next input picks up from them.
+                  yield* Ref.set(finishReason, STEP_LIMIT_REASON);
+                  yield* Effect.logWarning(
+                    `run ${runId} stopped at ${agent}'s step limit of ${maxSteps} model calls`,
+                  );
                   return;
                 }
                 // The tool results are already in the history; ask the model to continue.

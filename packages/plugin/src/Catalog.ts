@@ -1,3 +1,4 @@
+import { messageOf } from "./Errors.ts";
 import {
   Clock,
   Config,
@@ -32,7 +33,7 @@ export class CatalogModel extends Schema.Class<CatalogModel>("magentic/plugin/Ca
   status: Schema.optional(Schema.String),
   release_date: Schema.optional(Schema.String),
   limit: Schema.optional(
-    Schema.Struct({ context: Schema.Number, output: Schema.optional(Schema.Number) }),
+    Schema.Struct({ context: Schema.Finite, output: Schema.optional(Schema.Finite) }),
   ),
   /** The protocol (an AI SDK package name) and base URL when they differ from the provider's. */
   provider: Schema.optional(
@@ -115,8 +116,7 @@ const feed = Effect.fn("ModelCatalog.feed")(function* (input: Schema.Json) {
 const parseJson = (text: string) =>
   Effect.try({
     try: (): Schema.Json => JSON.parse(text),
-    catch: (error) =>
-      new CatalogError({ message: error instanceof Error ? error.message : String(error) }),
+    catch: (error) => new CatalogError({ message: messageOf(error) }),
   });
 
 /** Where the live catalog comes from. */
@@ -227,7 +227,7 @@ export class ModelCatalog extends Context.Service<
           onNone: () => false,
           onSome: (mtime) => now - mtime.getTime() < Duration.toMillis(CACHE_TTL),
         });
-      }).pipe(Effect.catch(() => Effect.succeed(false)));
+      }).pipe(Effect.orElseSucceed(() => false));
 
       const fetchAndStore = Effect.gen(function* () {
         const text = yield* HttpClientRequest.get(url).pipe(

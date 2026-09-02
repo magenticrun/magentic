@@ -1,7 +1,7 @@
-import { Effect, FileSystem, Option, Path, Schema } from "effect";
+import { Effect, FileSystem, Option, Path, Schema, Stream } from "effect";
 import { Tool, Toolkit } from "effect/unstable/ai";
-import { CapabilityAnnotation } from "@magentic/plugin";
-import { WorkspaceRoot } from "./WorkspaceRoot.ts";
+import { CapabilityAnnotation, messageOf } from "@magentic/plugin";
+import { resolveWithin, WorkspaceRoot } from "./WorkspaceRoot.ts";
 
 /**
  * Returned to the model as a tool result rather than failing the run, so the
@@ -30,6 +30,12 @@ export const GLOB_LIMIT = 200;
 export const GREP_LIMIT = 100;
 /** Files a search reads at most. */
 const GREP_FILE_LIMIT = 10_000;
+/** Bytes `read_file` returns at most; the rest is cut and `truncated` set. */
+export const READ_MAX_BYTES = 1_048_576;
+/** Files bigger than this are not searched: a bundle or a data dump, not code. */
+export const GREP_FILE_MAX_BYTES = 1_048_576;
+/** Files read at once during a search. */
+const GREP_CONCURRENCY = 8;
 /** Directories a walk enters at most, so a symlink cycle ends. */
 const WALK_DIR_LIMIT = 5_000;
 /** Entries stat'd at once within one directory. */
@@ -52,9 +58,16 @@ const DirectoryParam = Schema.optional(
 );
 
 export const ReadFile = Tool.make("read_file", {
-  description: "Read a UTF-8 text file from the workspace.",
+  description:
+    "Read a UTF-8 text file from the workspace. " +
+    `A file over ${READ_MAX_BYTES} bytes comes back cut there with truncated set; use grep to find the part you need.`,
   parameters: Schema.Struct({ path: PathParam }),
-  success: Schema.Struct({ path: Schema.String, content: Schema.String }),
+  success: Schema.Struct({
+    path: Schema.String,
+    content: Schema.String,
+    /** Present, and true, only when the content was cut at the size limit. */
+    truncated: Schema.optional(Schema.Boolean),
+  }),
   failure: FileToolError,
   failureMode: "return",
 })
@@ -68,7 +81,7 @@ export const WriteFile = Tool.make("write_file", {
     path: PathParam,
     content: Schema.String.annotate({ description: "The full new file content" }),
   }),
-  success: Schema.Struct({ path: Schema.String, bytes: Schema.Number }),
+  success: Schema.Struct({ path: Schema.String, bytes: Schema.Finite }),
   failure: FileToolError,
   failureMode: "return",
 })
@@ -88,7 +101,7 @@ export const EditFile = Tool.make("edit_file", {
       Schema.Boolean.annotate({ description: "Replace every occurrence; default false" }),
     ),
   }),
-  success: Schema.Struct({ path: Schema.String, replacements: Schema.Number }),
+  success: Schema.Struct({ path: Schema.String, replacements: Schema.Finite }),
   failure: FileToolError,
   failureMode: "return",
 })
@@ -99,7 +112,7 @@ export const DirEntry = Schema.Struct({
   name: Schema.String,
   type: Schema.Literals(["file", "directory", "other"]),
   /** Bytes; 0 for a directory. */
-  size: Schema.Number,
+  size: Schema.Finite,
 });
 export type DirEntry = typeof DirEntry.Type;
 
@@ -143,7 +156,7 @@ export const Glob = Tool.make("glob", {
 export const GrepMatch = Schema.Struct({
   path: Schema.String,
   /** One-based. */
-  line: Schema.Number,
+  line: Schema.Finite,
   text: Schema.String,
 });
 export type GrepMatch = typeof GrepMatch.Type;
@@ -152,7 +165,7 @@ export const Grep = Tool.make("grep", {
   description:
     "Search file contents in the workspace with a regular expression in JavaScript syntax. " +
     `Returns matching lines with their path and line number, ${GREP_LIMIT} at most. ` +
-    "node_modules, .git, hidden directories, and binary files are skipped.",
+    `node_modules, .git, hidden directories, binary files, and files over ${GREP_FILE_MAX_BYTES} bytes are skipped.`,
   parameters: Schema.Struct({
     pattern: Schema.String.annotate({ description: "The regular expression to search for" }),
     path: DirectoryParam,
@@ -171,9 +184,15 @@ export const Grep = Tool.make("grep", {
 
 export const FileTools = Toolkit.make(ReadFile, WriteFile, EditFile, ListDir, Glob, Grep);
 
-/** Files found under a directory, as workspace-relative paths in walk order. */
+/** One file a walk found: its workspace-relative path and size in bytes. */
+interface WalkedFile {
+  readonly path: string;
+  readonly size: number;
+}
+
+/** Files found under a directory, in walk order. */
 interface Walked {
-  readonly files: ReadonlyArray<string>;
+  readonly files: ReadonlyArray<WalkedFile>;
   readonly truncated: boolean;
 }
 
@@ -197,22 +216,38 @@ export const fileToolHandlers = Effect.gen(function* () {
   const path = yield* Path.Path;
   const root = yield* WorkspaceRoot;
 
-  /** Resolve a user path against the root and refuse anything that escapes it. */
+  const ioError = (requested: string) => (error: { readonly message: string }) =>
+    new FileToolError({ reason: "IoError", path: requested, message: error.message });
+
+  /** Resolve a user path against the root and refuse anything that escapes it, links included. */
   const resolveInside = Effect.fn("FileTools.resolveInside")(function* (requested: string) {
-    const absolute = path.resolve(root, requested);
-    const relative = path.relative(root, absolute);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    const resolved = yield* resolveWithin(root, requested).pipe(
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.provideService(Path.Path, path),
+      Effect.mapError(ioError(requested)),
+    );
+    if (Option.isNone(resolved)) {
       return yield* new FileToolError({
         reason: "OutsideWorkspace",
         path: requested,
         message: `${requested} is outside the workspace`,
       });
     }
-    return { absolute, relative };
+    return resolved.value;
   });
 
-  const ioError = (requested: string) => (error: { readonly message: string }) =>
-    new FileToolError({ reason: "IoError", path: requested, message: error.message });
+  /** The root with links resolved, what every entry's real path is measured against. */
+  const realRoot = yield* fs.realPath(root).pipe(Effect.orElseSucceed(() => root));
+
+  /** Whether an existing entry's real path is under the real root; a link elsewhere is not. */
+  const insideReal = (full: string) =>
+    Effect.map(fs.realPath(full).pipe(Effect.option), (real) => {
+      if (Option.isNone(real)) {
+        return false;
+      }
+      const relative = path.relative(realRoot, real.value);
+      return !relative.startsWith("..") && !path.isAbsolute(relative);
+    });
 
   const notFound = (requested: string) =>
     new FileToolError({
@@ -248,7 +283,7 @@ export const fileToolHandlers = Effect.gen(function* () {
         new FileToolError({
           reason: "InvalidPattern",
           path: pattern,
-          message: error instanceof Error ? error.message : String(error),
+          message: messageOf(error),
         }),
     });
   });
@@ -268,12 +303,17 @@ export const fileToolHandlers = Effect.gen(function* () {
     );
 
   /**
-   * Every file under a directory, depth first with each directory's files
-   * before its subdirectories, pruned of what nobody searches. Stops at
-   * `limit` files and reports that it did.
+   * Every file under a directory that `keep` accepts, depth first with each
+   * directory's files before its subdirectories, pruned of what nobody
+   * searches. Stops at `limit` kept files and reports that it did, so a
+   * caller that wants two hundred matches never walks ten thousand files.
    */
-  const walk = Effect.fn("FileTools.walk")(function* (start: string, limit: number) {
-    const files: Array<string> = [];
+  const walk = Effect.fn("FileTools.walk")(function* (
+    start: string,
+    limit: number,
+    keep: (full: string) => boolean = () => true,
+  ) {
+    const files: Array<WalkedFile> = [];
     const stack = [start];
     let visited = 0;
     while (stack.length > 0) {
@@ -293,19 +333,19 @@ export const fileToolHandlers = Effect.gen(function* () {
           continue;
         }
         if (info.value.type === "Directory") {
-          if (!pruned(name)) {
+          if (!pruned(name) && (yield* insideReal(full))) {
             subdirectories.push(full);
           }
           continue;
         }
-        if (info.value.type !== "File") {
+        if (info.value.type !== "File" || !keep(full)) {
           continue;
         }
         if (files.length >= limit) {
           const walked: Walked = { files, truncated: true };
           return walked;
         }
-        files.push(path.relative(root, full));
+        files.push({ path: path.relative(root, full), size: Number(info.value.size) });
       }
       // Reversed so the first subdirectory in name order is walked next.
       stack.push(...subdirectories.toReversed());
@@ -321,8 +361,24 @@ export const fileToolHandlers = Effect.gen(function* () {
       if (!exists) {
         return yield* notFound(requested);
       }
-      const content = yield* fs.readFileString(absolute).pipe(Effect.mapError(ioError(requested)));
-      return { path: relative, content };
+      const info = yield* fs.stat(absolute).pipe(Effect.mapError(ioError(requested)));
+      if (Number(info.size) <= READ_MAX_BYTES) {
+        const content = yield* fs
+          .readFileString(absolute)
+          .pipe(Effect.mapError(ioError(requested)));
+        return { path: relative, content };
+      }
+      // Only the head is read, so a huge file costs the limit and not its size.
+      const chunks = yield* Stream.runCollect(
+        fs.stream(absolute, { bytesToRead: READ_MAX_BYTES }),
+      ).pipe(Effect.mapError(ioError(requested)));
+      const head = new Uint8Array(chunks.reduce((n, chunk) => n + chunk.byteLength, 0));
+      let offset = 0;
+      for (const chunk of chunks) {
+        head.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return { path: relative, content: new TextDecoder().decode(head), truncated: true };
     }),
 
     write_file: Effect.fn("FileTools.write_file")(function* ({ path: requested, content }) {
@@ -412,22 +468,16 @@ export const fileToolHandlers = Effect.gen(function* () {
     glob: Effect.fn("FileTools.glob")(function* ({ pattern, path: requested }) {
       const glob = yield* compileGlob(pattern);
       const { absolute, relative } = yield* resolveDirectory(requested);
-      const files: Array<string> = [];
-      let truncated = false;
-      // The search directory's own prefix is not part of what the pattern sees.
-      const walked = yield* walk(absolute, GREP_FILE_LIMIT);
-      for (const file of walked.files) {
-        const local = relative === "." ? file : path.relative(relative, file);
-        if (!matches(glob, pattern, local, path.basename(file))) {
-          continue;
-        }
-        if (files.length >= GLOB_LIMIT) {
-          truncated = true;
-          break;
-        }
-        files.push(file);
-      }
-      return { path: relative, files, truncated: truncated || walked.truncated };
+      // The search directory's own prefix is not part of what the pattern sees,
+      // and the walk stops once it has found enough matches.
+      const walked = yield* walk(absolute, GLOB_LIMIT, (full) =>
+        matches(glob, pattern, path.relative(absolute, full), path.basename(full)),
+      );
+      return {
+        path: relative,
+        files: walked.files.map((file) => file.path),
+        truncated: walked.truncated,
+      };
     }),
 
     grep: Effect.fn("FileTools.grep")(function* ({ pattern, path: requested, include }) {
@@ -437,41 +487,57 @@ export const fileToolHandlers = Effect.gen(function* () {
           new FileToolError({
             reason: "InvalidPattern",
             path: pattern,
-            message: error instanceof Error ? error.message : String(error),
+            message: messageOf(error),
           }),
       });
       const filter = include === undefined ? undefined : yield* compileGlob(include);
       const { absolute } = yield* resolveDirectory(requested);
-      const walked = yield* walk(absolute, GREP_FILE_LIMIT);
+      // The include glob prunes the walk, so files it rules out are never read.
+      const walked = yield* walk(absolute, GREP_FILE_LIMIT, (full) =>
+        filter === undefined || include === undefined
+          ? true
+          : matches(filter, include, path.relative(root, full), path.basename(full)),
+      );
+
+      /** Every matching line of one file, in order; none for what cannot or should not be read. */
+      const search = (file: WalkedFile) =>
+        Effect.gen(function* () {
+          const hits: Array<GrepMatch> = [];
+          if (file.size > GREP_FILE_MAX_BYTES) {
+            return hits;
+          }
+          // A link to somewhere outside the workspace is not searched.
+          if (!(yield* insideReal(path.join(root, file.path)))) {
+            return hits;
+          }
+          // A file that cannot be read as text is skipped, not a failed search.
+          const text = yield* fs.readFileString(path.join(root, file.path)).pipe(Effect.option);
+          if (Option.isNone(text) || isBinary(text.value)) {
+            return hits;
+          }
+          const lines = text.value.split("\n");
+          for (let i = 0; i < lines.length && hits.length <= GREP_LIMIT; i++) {
+            const line = lines[i];
+            if (line !== undefined && regex.test(line)) {
+              hits.push({ path: file.path, line: i + 1, text: cutLine(line.replace(/\r$/, "")) });
+            }
+          }
+          return hits;
+        });
+
+      // Files are read a few at a time, a batch per round so the result keeps
+      // walk order and the search can stop as soon as it has enough.
       const found: Array<GrepMatch> = [];
       let full = false;
-      for (const file of walked.files) {
-        if (
-          filter !== undefined &&
-          include !== undefined &&
-          !matches(filter, include, file, path.basename(file))
-        ) {
-          continue;
-        }
-        // A file that cannot be read as text is skipped, not a failed search.
-        const text = yield* fs.readFileString(path.join(root, file)).pipe(Effect.option);
-        if (Option.isNone(text) || isBinary(text.value)) {
-          continue;
-        }
-        const lines = text.value.split("\n");
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i];
-          if (line === undefined || !regex.test(line)) {
-            continue;
-          }
+      for (let at = 0; at < walked.files.length && !full; at += GREP_CONCURRENCY) {
+        const batch = walked.files.slice(at, at + GREP_CONCURRENCY);
+        const results = yield* Effect.forEach(batch, search, { concurrency: GREP_CONCURRENCY });
+        for (const hit of results.flat()) {
           if (found.length >= GREP_LIMIT) {
             full = true;
             break;
           }
-          found.push({ path: file, line: i + 1, text: cutLine(line.replace(/\r$/, "")) });
-        }
-        if (full) {
-          break;
+          found.push(hit);
         }
       }
       return { matches: found, truncated: full || walked.truncated };

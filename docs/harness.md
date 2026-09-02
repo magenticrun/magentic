@@ -84,7 +84,8 @@ client from the group, or a REST facade, if one ever appears.
 | planned: runs, approvals, sessions and tokens, slack, mcp | Slack events and MCP stay HTTP routes beside `/rpc`, since those callers are not ours. |
 
 Everything except `health` and the login RPCs will sit behind the `Authentication` middleware
-(`RpcMiddleware`, see identity.md).
+(`RpcMiddleware`, see identity.md). Until it exists the gateway listens on loopback
+(`MAGENTIC_HOST`, default `127.0.0.1`); binding wider needs `IDENTITY_LOCAL=true`.
 
 ## Core services (`@magentic/core`)
 
@@ -122,14 +123,14 @@ Each is a `Context.Service` with static layers. Ids are `magentic/core/<Name>`.
   `CompactionStarted` and `Compacted`. A model call that fails before anything reached the
   surface is tried again when Effect's client marks the error retryable (transport errors,
   rate limits, provider 5xx): up to five times, backing off from two seconds and doubling
-  with jitter, capped at thirty seconds unless the provider sent `retry-after`
+  with jitter, capped at thirty seconds unless the provider sent `retry-after`; a `retry-after` beyond two minutes ends the run instead of waiting
   (`Retry.ts`, after opencode). The chat appends the prompt even when the stream fails, so
   the history is put back before each try; each try emits `Retrying` with the wait. A call
   that fails after it spoke is not retried, so nothing shows twice.
   The summary is a user message marked in its
   `options.magentic`; the model sees the system prompt, the latest summary, and what
   follows it, while `history.json` keeps everything before as well, so transcripts still
-  show it. `POST /conversations/:id/compact` is the manual route. Compaction is core, not a
+  show it. The `compact` RPC is the manual route. Compaction is core, not a
   plugin: a plugin command runs in the surface and only reaches the gateway through the
   protocol, so it cannot read the history or call the model.
 - **ModelProvider** (`@magentic/model`): picks the `LanguageModel` layer from
@@ -259,7 +260,7 @@ auth login|list|logout` (exists, inline `@clack/prompts` like opencode's, not th
   `/compact` (in the conversation commands plugin, over `ChatSession.compact`) asks the
   gateway to fold the conversation into a summary; the transcript keeps every earlier line
   and shows the summary where the compaction happened, on resume too. `/rename <title>`
-  (same plugin, over `ChatSession.rename` and `PATCH /conversations/:id`) names the
+  (same plugin, over `ChatSession.rename` and the `rename` RPC) names the
   conversation, as in opencode; until then the title is the first input, and a bare
   `/rename` says what it is.
 - **Slack** (`packages/surface-slack`): Events API subscription for mentions and DMs;

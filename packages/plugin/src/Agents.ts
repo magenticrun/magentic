@@ -16,6 +16,12 @@ export class AgentDefinition extends Schema.Class<AgentDefinition>(
    * A bare provider takes its default model; absent means the first signed-in provider.
    */
   model: Schema.optional(Schema.String),
+  /**
+   * Model calls one run may make before it stops with `RunFinished` reason
+   * `step-limit`; a run continues from there with the next input. The runner's
+   * default applies when absent.
+   */
+  maxSteps: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
 }) {}
 
 export class AgentAlreadyRegistered extends Schema.TaggedError<AgentAlreadyRegistered>()(

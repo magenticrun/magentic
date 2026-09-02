@@ -1,0 +1,14 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "workspaces": {
+    ".": {
+      // The root links the plugin contract so an external plugin under the
+      // config directory resolves the gateway's copy; nothing here imports them.
+      "ignoreDependencies": ["@magentic/plugin", "@magentic/protocol"],
+    },
+  },
+  // Placeholders for phases 3 and 4; they hold no code yet.
+  "ignoreWorkspaces": ["packages/surface-cursor", "packages/surface-slack"],
+  // Installed by `effect-tsgo patch` into TypeScript itself, not as a package.
+  "ignoreDependencies": ["@effect/language-service"],
+}

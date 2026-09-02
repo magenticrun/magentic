@@ -7,7 +7,7 @@ export interface PluginRef {
   readonly order: number;
 }
 
-export interface Entry<A> {
+interface Entry<A> {
   readonly plugin: PluginRef;
   readonly seq: number;
   readonly value: A;

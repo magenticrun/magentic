@@ -29,12 +29,6 @@ export const select = <Value>(options: prompts.SelectOptions<Value>) =>
     (result) => optional(result),
   );
 
-export const text = (options: prompts.TextOptions) =>
-  Effect.map(
-    Effect.promise(() => prompts.text(options)),
-    (result) => optional(result),
-  );
-
 export const password = (options: prompts.PasswordOptions) =>
   Effect.map(
     Effect.promise(() => prompts.password(options)),

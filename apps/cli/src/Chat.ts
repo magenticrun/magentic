@@ -1,5 +1,4 @@
-import { CommandRegistry, ModelRegistry } from "@magentic/core";
-import { dataDir } from "@magentic/gateway/paths";
+import { CommandRegistry, dataDir, describeCause, ModelRegistry } from "@magentic/core";
 import {
   CommandError,
   type ChatSession,
@@ -44,14 +43,6 @@ export interface ChatOptions {
 export class ResumeError extends Schema.TaggedError<ResumeError>()("ResumeError", {
   message: Schema.String,
 }) {}
-
-const describeCause = (cause: Cause.Cause<unknown>): string => {
-  const error = Cause.squash(cause);
-  if (Predicate.hasProperty(error, "message") && Predicate.isString(error.message)) {
-    return error.message;
-  }
-  return String(error);
-};
 
 /** `/name the rest` into its name and trimmed arguments. */
 const parseCommand = (input: string): { readonly name: string; readonly args: string } => {

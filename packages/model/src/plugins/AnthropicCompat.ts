@@ -1,4 +1,4 @@
-import { Effect, Predicate, type Schema, Stream } from "effect";
+import { Effect, Option, Predicate, type Schema, Stream } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 /**
@@ -102,12 +102,11 @@ const normalizeResponse = Effect.fn("anthropicCompatibleClient.normalize")(funct
     return HttpClientResponse.fromWeb(response.request, new Response(body, init));
   }
   const text = yield* response.text;
-  let normalized = text;
-  try {
-    normalized = JSON.stringify(normalizeAnthropicJson(JSON.parse(text)));
-  } catch {
-    // Not JSON (an HTML error page, say): the client reports it as is.
-  }
+  // Not JSON (an HTML error page, say) goes through as it is: the client reports it.
+  const normalized = Option.getOrElse(
+    Option.liftThrowable(() => JSON.stringify(normalizeAnthropicJson(JSON.parse(text))))(),
+    () => text,
+  );
   return HttpClientResponse.fromWeb(response.request, new Response(normalized, init));
 });
 

@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { ConversationId } from "./ConversationId.ts";
 
 /** A file sent along with the input, such as an image pasted into a chat. */
 export const Attachment = Schema.Struct({
@@ -13,7 +14,7 @@ export type Attachment = typeof Attachment.Type;
 export const RunRequest = Schema.Struct({
   input: Schema.NonEmptyString,
   attachments: Schema.optional(Schema.Array(Attachment)),
-  conversationId: Schema.optional(Schema.String),
+  conversationId: Schema.optional(ConversationId),
   /** A `provider/model` reference to run on instead of the agent's own. */
   model: Schema.optional(Schema.String),
   /** Where the surface is working; conversations are listed by it. */
@@ -45,13 +46,13 @@ export const ToolResult = Schema.TaggedStruct("ToolResult", {
  * calls' arguments and results.
  */
 export const ContextBreakdown = Schema.Struct({
-  system: Schema.Number,
-  tools: Schema.Number,
-  toolCount: Schema.Number,
-  user: Schema.Number,
-  assistant: Schema.Number,
-  toolCalls: Schema.Number,
-  messages: Schema.Number,
+  system: Schema.Finite,
+  tools: Schema.Finite,
+  toolCount: Schema.Finite,
+  user: Schema.Finite,
+  assistant: Schema.Finite,
+  toolCalls: Schema.Finite,
+  messages: Schema.Finite,
 });
 export type ContextBreakdown = typeof ContextBreakdown.Type;
 
@@ -61,14 +62,14 @@ export type ContextBreakdown = typeof ContextBreakdown.Type;
  * use. The finer counts are absent when the provider does not report them.
  */
 export const TokenUsage = Schema.TaggedStruct("TokenUsage", {
-  inputTokens: Schema.Number,
-  outputTokens: Schema.Number,
+  inputTokens: Schema.Finite,
+  outputTokens: Schema.Finite,
   /** Input served from the provider's prompt cache; part of `inputTokens`. */
-  cacheReadTokens: Schema.optional(Schema.Number),
+  cacheReadTokens: Schema.optional(Schema.Finite),
   /** Input written to the prompt cache this call; part of `inputTokens`. */
-  cacheWriteTokens: Schema.optional(Schema.Number),
+  cacheWriteTokens: Schema.optional(Schema.Finite),
   /** Output spent thinking; part of `outputTokens`. */
-  reasoningTokens: Schema.optional(Schema.Number),
+  reasoningTokens: Schema.optional(Schema.Finite),
   breakdown: ContextBreakdown,
 });
 export type TokenUsage = typeof TokenUsage.Type;
@@ -78,19 +79,24 @@ export const CompactionStarted = Schema.TaggedStruct("CompactionStarted", {});
 export const Compacted = Schema.TaggedStruct("Compacted", {
   summary: Schema.String,
   /** Messages the model saw before, and after; the system prompt included. */
-  messagesBefore: Schema.Number,
-  messagesAfter: Schema.Number,
+  messagesBefore: Schema.Finite,
+  messagesAfter: Schema.Finite,
 });
 export type Compacted = typeof Compacted.Type;
 /** A model call failed in a way worth another try; the next one comes after `delayMs`. */
 export const Retrying = Schema.TaggedStruct("Retrying", {
   /** This is the nth retry, of at most `limit`. */
-  attempt: Schema.Number,
-  limit: Schema.Number,
+  attempt: Schema.Finite,
+  limit: Schema.Finite,
   message: Schema.String,
-  delayMs: Schema.Number,
+  delayMs: Schema.Finite,
 });
 export type Retrying = typeof Retrying.Type;
+/**
+ * The model's finish reason (`stop`, `tool-calls`, `length`, …), or
+ * `step-limit` when the run stopped at the agent's step limit, tool results
+ * still in the history for the next input to continue from.
+ */
 export const RunFinished = Schema.TaggedStruct("RunFinished", { reason: Schema.String });
 export const RunFailed = Schema.TaggedStruct("RunFailed", { message: Schema.String });
 

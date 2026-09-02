@@ -7,15 +7,17 @@ import {
   type Plugin,
   PluginSetupError,
   type Registration,
+  ModelInfo,
   ToolCallContext,
   ModelCatalog,
 } from "@magentic/plugin";
 import { Principal } from "@magentic/protocol";
-import { Deferred, Effect, Layer, Schema, Stream } from "effect";
-import { Tool, Toolkit } from "effect/unstable/ai";
+import { Deferred, Effect, Layer, Logger, Option, Ref, Schema, Stream } from "effect";
+import { LanguageModel, Tool, Toolkit } from "effect/unstable/ai";
 import { FetchHttpClient } from "effect/unstable/http";
 import { AgentRegistry } from "../AgentRegistry.ts";
 import { CommandRegistry } from "./CommandRegistry.ts";
+import { ModelRegistry } from "./ModelRegistry.ts";
 import { builtin, PluginHost } from "./PluginHost.ts";
 import { ToolCallGuard, ToolRegistry } from "./ToolRegistry.ts";
 
@@ -80,7 +82,7 @@ const agentsPlugin = define({
               name: "helper",
               description: "",
               prompt: "",
-              tools: ["echo", "hidden"],
+              tools: ["echo", "hidden", "missing_*"],
             }),
           ),
         ),
@@ -176,7 +178,7 @@ layer(
     Effect.gen(function* () {
       const registry = yield* AgentRegistry;
       const found = yield* registry.get("helper");
-      assert.deepStrictEqual([...found.tools], ["echo", "hidden"]);
+      assert.deepStrictEqual([...found.tools], ["echo", "hidden", "missing_*"]);
       yield* registry.register(
         new AgentDefinition({ name: "late", description: "", prompt: "", tools: [] }),
       );
@@ -205,6 +207,21 @@ layer(
     }),
   );
 
+  it.effect("warns at boot about a tool no plugin registered", () =>
+    Effect.gen(function* () {
+      const lines: Array<string> = [];
+      const logger = Logger.make(({ message }) => {
+        lines.push(String(message));
+      });
+      yield* Layer.build(host([echoPlugin("echo"), agentsPlugin])).pipe(
+        Effect.provide(Logger.layer([logger])),
+        Effect.scoped,
+      );
+      assert.isTrue(lines.some((line) => line.includes("helper lists tool missing_*")));
+      assert.isFalse(lines.some((line) => line.includes("lists tool hidden")));
+    }),
+  );
+
   it.effect("hides tools an agent did not list or the config disabled", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry;
@@ -213,6 +230,17 @@ layer(
         { runId: "run-2", principal: alice },
       );
       assert.deepStrictEqual(Object.keys(kit.tools), []);
+    }),
+  );
+
+  it.effect("an entry ending in * lists every tool with that prefix", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry;
+      const kit = yield* registry.forAgent(
+        new AgentDefinition({ name: "x", description: "", prompt: "", tools: ["ec*"] }),
+        { runId: "run-3", principal: alice },
+      );
+      assert.deepStrictEqual(Object.keys(kit.tools), ["echo"]);
     }),
   );
 });
@@ -305,6 +333,116 @@ layer(host([scoped(handle)]))("PluginHost registrations", (it) => {
       // Disposal is idempotent.
       yield* registration.dispose;
       assert.deepStrictEqual(yield* registry.list, []);
+    }),
+  );
+});
+
+const Other = Tool.make("other", {
+  description: "Registers fine on its own",
+  parameters: Schema.Struct({}),
+  success: Schema.String,
+}).annotate(CapabilityAnnotation, "fs:read");
+
+/** A toolkit whose second tool clashes with `echo`, so neither may land. */
+const halfClashing = define({
+  id: "half",
+  description: "registers a toolkit that clashes on one tool",
+  setup: Effect.fn(function* (ctx) {
+    const kit = Toolkit.make(Other, Echo);
+    const handlers = yield* kit.toHandlers({
+      other: () => Effect.succeed("ok"),
+      echo: ({ text }) => Effect.succeed({ text, by: "half" }),
+    });
+    yield* ctx.tool.registerToolkit(yield* kit.pipe(Effect.provideContext(handlers)));
+  }),
+});
+
+layer(host([echoPlugin("echo"), halfClashing]))("PluginHost toolkit registration", (it) => {
+  it.effect("registers a toolkit whole or not at all", () =>
+    Effect.gen(function* () {
+      const plugins = yield* (yield* PluginHost).plugins;
+      assert.deepStrictEqual(
+        plugins.map((p) => [p.id, p.status]),
+        [
+          ["echo", "active"],
+          ["half", "failed"],
+        ],
+      );
+      // `other` was fine on its own, and still is not registered.
+      assert.deepStrictEqual(
+        (yield* (yield* ToolRegistry).list).map((t) => t.name),
+        ["echo"],
+      );
+    }),
+  );
+});
+
+const signedIn = Ref.makeUnsafe(Option.some("API key sk-…1234"));
+const builds = Ref.makeUnsafe(0);
+
+/** A provider whose credentials the test changes under the host. */
+const rotatingProvider = define({
+  id: "rotating",
+  description: "a provider whose key rotates",
+  setup: (ctx) =>
+    Effect.asVoid(
+      ctx.model.register({
+        id: "rotating",
+        name: "Rotating",
+        description: "",
+        methods: [],
+        status: Ref.get(signedIn),
+        logout: Effect.void,
+        models: Effect.succeed([
+          new ModelInfo({
+            id: "m",
+            name: "m",
+            reasoning: false,
+            toolCall: true,
+            context: 0,
+            output: 0,
+          }),
+        ]),
+        defaultModel: "m",
+        model: () =>
+          Effect.map(
+            Ref.get(signedIn),
+            Option.map(() =>
+              Layer.effect(
+                LanguageModel.LanguageModel,
+                Effect.andThen(
+                  Ref.update(builds, (n) => n + 1),
+                  LanguageModel.make({
+                    generateText: () => Effect.succeed([]),
+                    streamText: () => Stream.empty,
+                  }),
+                ),
+              ),
+            ),
+          ),
+      }),
+    ),
+});
+
+layer(host([rotatingProvider]))("ModelRegistry cache", (it) => {
+  it.effect("rebuilds a model when the credentials change and drops it on logout", () =>
+    Effect.gen(function* () {
+      const models = yield* ModelRegistry;
+      const ref = Option.some("rotating/m");
+      const first = yield* models.languageModel(ref);
+      const again = yield* models.languageModel(ref);
+      assert.strictEqual(again, first);
+      assert.strictEqual(yield* Ref.get(builds), 1);
+
+      yield* Ref.set(signedIn, Option.some("API key sk-…5678"));
+      const rotated = yield* models.languageModel(ref);
+      assert.notStrictEqual(rotated, first);
+      assert.strictEqual(yield* Ref.get(builds), 2);
+
+      yield* Ref.set(signedIn, Option.none());
+      const out = yield* models.languageModel(ref).pipe(Effect.flip);
+      assert.strictEqual(out._tag, "NoModelConfigured");
+      assert.include(out.message, "not signed in");
     }),
   );
 });

@@ -12,6 +12,12 @@ export const RETRY_FACTOR = 2;
 export const RETRY_MAX_DELAY = Duration.seconds(30);
 /** Tries after the first; the sixth failure is the one reported. */
 export const RETRY_LIMIT = 5;
+/**
+ * The longest `retry-after` a run waits out. A provider asking for more has
+ * cut the caller off for a while; the run fails and says so rather than
+ * holding the surface for an hour.
+ */
+export const RETRY_AFTER_MAX = Duration.minutes(2);
 
 /** The model call failed in a way worth another try, and when it comes. */
 export interface Retrying {
@@ -26,7 +32,13 @@ export interface Retrying {
  * rate limits, and provider 5xx. Everything else, such as a bad key, a
  * context overflow, or a content policy refusal, would only fail again.
  */
-export const shouldRetry = (error: AiError.AiError): boolean => error.isRetryable;
+export const shouldRetry = (error: AiError.AiError): boolean =>
+  error.isRetryable && !asksToWaitTooLong(error);
+
+/** Whether the provider's `retry-after` is beyond what a run waits out. */
+export const asksToWaitTooLong = (error: AiError.AiError): boolean =>
+  error.retryAfter !== undefined &&
+  Duration.toMillis(error.retryAfter) > Duration.toMillis(RETRY_AFTER_MAX);
 
 /** The wait before the nth try: the provider's `retry-after` when it sent one, backoff otherwise. */
 export const delayFor = (
@@ -55,6 +67,15 @@ export const retryPolicy = <R>(
 ): Schedule.Schedule<number, AiError.AiError, never, R> =>
   Schedule.fromStepWithMetadata<AiError.AiError, number, R, never, never, never>(
     Effect.succeed((meta: Schedule.InputMetadata<AiError.AiError>) => {
+      if (asksToWaitTooLong(meta.input)) {
+        return Effect.andThen(
+          Effect.logWarning(
+            `provider asked to retry after ${Duration.format(meta.input.retryAfter ?? Duration.zero)}, ` +
+              `more than the ${Duration.format(RETRY_AFTER_MAX)} a run waits; giving up`,
+          ),
+          Cause.done(meta.attempt),
+        );
+      }
       if (!shouldRetry(meta.input) || meta.attempt > RETRY_LIMIT) {
         return Cause.done(meta.attempt);
       }

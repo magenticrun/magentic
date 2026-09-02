@@ -4,6 +4,7 @@ import {
   ToolCallContext,
   type ToolCallBefore,
   type ToolHooks,
+  toolMatches,
 } from "@magentic/plugin";
 import { type Capability, type Principal, ToolCallRequest } from "@magentic/protocol";
 import { Context, Effect, Layer, type Schema, Stream } from "effect";
@@ -118,8 +119,9 @@ export const toolRegistryOver = (inputs: ToolRegistryInputs): ToolRegistry["Serv
     agent: AgentDefinition,
     run: RunIdentity,
   ) {
-    const allowed = new Set(agent.tools);
-    const entries = (yield* visible).filter((entry) => allowed.has(entry.tool.name));
+    const entries = (yield* visible).filter((entry) =>
+      agent.tools.some((pattern) => toolMatches(pattern, entry.tool.name)),
+    );
     const byName = new Map(entries.map((entry) => [entry.tool.name, entry]));
     const tools = Object.fromEntries(entries.map((entry) => [entry.tool.name, entry.tool]));
 

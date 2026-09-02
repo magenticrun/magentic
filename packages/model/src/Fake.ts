@@ -1,5 +1,5 @@
 import { define, ModelInfo } from "@magentic/plugin";
-import { Effect, Layer, Option, Ref, Stream } from "effect";
+import { Effect, Layer, Ref, Stream } from "effect";
 import { AiError, LanguageModel, type Response } from "effect/unstable/ai";
 
 /** Token limits the fake model claims; 0 when a test does not care, as the catalog would say. */
@@ -23,7 +23,7 @@ export const fakeProviderPlugin = (script: FakeScript, limits?: FakeLimits) =>
           name: "Fake",
           description: "Replays a script.",
           methods: [],
-          status: Effect.succeed(Option.some("scripted")),
+          status: Effect.succeedSome("scripted"),
           logout: Effect.void,
           models: Effect.succeed([
             new ModelInfo({
@@ -36,7 +36,7 @@ export const fakeProviderPlugin = (script: FakeScript, limits?: FakeLimits) =>
             }),
           ]),
           defaultModel: "fake",
-          model: () => Effect.succeed(Option.some(layerFake(script))),
+          model: () => Effect.succeedSome(layerFake(script)),
         }),
       ),
   });

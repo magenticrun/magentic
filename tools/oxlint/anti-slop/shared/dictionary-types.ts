@@ -31,7 +31,7 @@ export type UnsafeDictionary = {
 	readonly unsafeValue: "any" | "empty-object" | "object" | "union" | "unknown";
 };
 
-export type WideningTargetKind =
+type WideningTargetKind =
 	| "anonymous object"
 	| "generic container"
 	| "object"
@@ -197,9 +197,8 @@ function unsafeDirectValue(
 			unsafeDirectValue(member, environment, substitutions, resolvingAliases),
 		);
 		if (unsafeMembers.includes("any")) return "any";
-		return unsafeMembers.length > 0 && unsafeMembers.every((member) => member !== null)
-			? unsafeMembers[0]
-			: null;
+		const first = unsafeMembers[0];
+		return first !== undefined && unsafeMembers.every((member) => member !== null) ? first : null;
 	}
 	if (unwrapped.type !== "TSTypeReference") return null;
 	const name = typeReferenceName(unwrapped);
@@ -477,7 +476,7 @@ function classifyAliasBroadTarget(
 	);
 }
 
-export function isPopulatedObjectExpression(expression: ESTree.Expression): boolean {
+function isPopulatedObjectExpression(expression: ESTree.Expression): boolean {
 	let current = expression;
 	while (
 		current.type === "ParenthesizedExpression" ||

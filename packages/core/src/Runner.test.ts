@@ -413,3 +413,51 @@ layer(FlakyLayer)("Runner retries", (it) => {
       }),
   );
 });
+
+/** Asks for the file again on every call, so only the step limit ends the run. */
+const looping: FakeScript = ({ index }) => [
+  { type: "tool-call", id: `call-${index}`, name: "read_file", params: { path: "hello.txt" } },
+];
+
+const LoopingLayer = Runner.layer.pipe(
+  Layer.provideMerge(
+    Layer.mergeAll(
+      PluginHost.layer({
+        plugins: [builtin(fileToolsPlugin), builtin(fakeProviderPlugin(looping))],
+        paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
+      }).pipe(Layer.provide([WorkspaceLayer, ToolCallGuard.layerAllowAll])),
+      ConversationStore.layerMemory,
+    ),
+  ),
+  Layer.provideMerge(
+    Layer.mergeAll(BunServices.layer, FetchHttpClient.layer, ModelCatalog.layerSnapshot),
+  ),
+);
+
+layer(LoopingLayer)("Runner step limit", (it) => {
+  it.effect("ends a run that never stops calling tools at the agent's step limit", () =>
+    Effect.gen(function* () {
+      const runner = yield* Runner;
+      const events = yield* Stream.runCollect(
+        runner.run({
+          agent: new AgentDefinition({ ...reader, maxSteps: 2 }),
+          principal: alice,
+          input: "loop",
+          attachments: [],
+          conversationId: Option.none(),
+          model: Option.none(),
+          directory: Option.none(),
+        }),
+      );
+      assert.strictEqual(events.filter((e) => e._tag === "ToolCall").length, 2);
+      const last = events.at(-1);
+      assert.isTrue(last?._tag === "RunFinished" && last.reason === "step-limit");
+      // The history keeps the tool results, so the next input continues from them.
+      const started = events[0];
+      const id = started?._tag === "RunStarted" ? started.conversationId : "";
+      const store = yield* ConversationStore;
+      const saved = yield* store.get(id);
+      assert.strictEqual(Option.isSome(saved) ? saved.value.messages : 0, 6);
+    }),
+  );
+});

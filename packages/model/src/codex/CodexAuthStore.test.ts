@@ -24,6 +24,11 @@ layer(BunServices.layer)("codex auth store", (it) => {
         );
         const info = yield* fs.stat(file);
         assert.strictEqual(info.mode & 0o777, 0o600);
+        // The directory it made is private too, and a loosened file is closed on the next save.
+        assert.strictEqual((yield* fs.stat(path.dirname(file))).mode & 0o777, 0o700);
+        yield* fs.chmod(file, 0o644);
+        yield* store.save(tokens);
+        assert.strictEqual((yield* fs.stat(file)).mode & 0o777, 0o600);
         yield* store.clear;
         assert.deepStrictEqual(yield* store.load, Option.none());
         assert.isFalse(yield* fs.exists(file));

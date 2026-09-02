@@ -1,8 +1,8 @@
-import { Clock, Effect, Fiber, Option, Path, Schema, Stream } from "effect";
+import { Clock, Effect, Fiber, FileSystem, Option, Path, Ref, Schema, Stream } from "effect";
 import { Tool, Toolkit } from "effect/unstable/ai";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { CapabilityAnnotation } from "@magentic/plugin";
-import { WorkspaceRoot } from "./WorkspaceRoot.ts";
+import { resolveWithin, WorkspaceRoot } from "./WorkspaceRoot.ts";
 
 /** Returned to the model as a tool result, so the agent can pick another directory or report it. */
 export class ShellToolError extends Schema.TaggedError<ShellToolError>()("ShellToolError", {
@@ -72,47 +72,79 @@ export const Shell = Tool.make("shell", {
 
 export const ShellTools = Toolkit.make(Shell);
 
+/** How long the readers may keep draining after the command ended before we take what they have. */
+const COLLECT_GRACE = "2 seconds";
+
 interface Captured {
   readonly text: string;
   readonly truncated: boolean;
 }
 
-/** The first and last halves of an over-long output, with a note where the middle was. */
-const cut = (text: string): Captured => {
-  if (text.length <= OUTPUT_LIMIT) {
-    return { text, truncated: false };
+/** Output kept while it streams: the first half, the last half, and how much fell between. */
+interface Bounded {
+  readonly head: string;
+  readonly tail: string;
+  readonly omitted: number;
+}
+
+const HALF = Math.floor(OUTPUT_LIMIT / 2);
+const EMPTY: Bounded = { head: "", tail: "", omitted: 0 };
+
+/** Whether the buffer is still one unbroken prefix, short of the limit. */
+const whole = (buffer: Bounded): boolean => buffer.omitted === 0 && buffer.tail === "";
+
+/** Appends a chunk, keeping at most `HALF` characters at each end. */
+export const push = (buffer: Bounded, chunk: string): Bounded => {
+  if (whole(buffer) && buffer.head.length + chunk.length <= OUTPUT_LIMIT) {
+    return { ...buffer, head: buffer.head + chunk };
   }
-  const half = Math.floor(OUTPUT_LIMIT / 2);
-  const omitted = text.length - 2 * half;
-  return {
-    text: `${text.slice(0, half)}\n… ${omitted} characters omitted …\n${text.slice(-half)}`,
-    truncated: true,
-  };
+  // Past the limit: a fixed head, and a tail that slides over everything after it.
+  const joined = whole(buffer) ? buffer.head + chunk : buffer.tail + chunk;
+  const head = whole(buffer) ? joined.slice(0, HALF) : buffer.head;
+  const rest = whole(buffer) ? joined.slice(HALF) : joined;
+  const tail = rest.slice(-HALF);
+  const omitted = buffer.omitted + (rest.length - tail.length);
+  return { head, tail, omitted };
 };
+
+/** The text the model sees, with a note where the middle was. */
+export const render = (buffer: Bounded): Captured =>
+  whole(buffer)
+    ? { text: buffer.head, truncated: false }
+    : {
+        text: `${buffer.head}\n… ${buffer.omitted} characters omitted …\n${buffer.tail}`,
+        truncated: true,
+      };
 
 const clampTimeout = (requested: number | undefined): number =>
   requested === undefined || requested <= 0
     ? DEFAULT_TIMEOUT_MS
     : Math.min(requested, MAX_TIMEOUT_MS);
 
-/** Handlers for the shell tool. Needs a ChildProcessSpawner, a Path, and a WorkspaceRoot. */
+/** Handlers for the shell tool. Needs a ChildProcessSpawner, a FileSystem, a Path, and a WorkspaceRoot. */
 export const shellToolHandlers = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const root = yield* WorkspaceRoot;
 
   const resolveWorkdir = Effect.fn("ShellTool.resolveWorkdir")(function* (
     requested: string | undefined,
   ) {
-    const absolute = path.resolve(root, requested ?? ".");
-    const relative = path.relative(root, absolute);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    const resolved = yield* resolveWithin(root, requested ?? ".").pipe(
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.provideService(Path.Path, path),
+      Effect.mapError(
+        (error) => new ShellToolError({ reason: "SpawnFailed", message: error.message }),
+      ),
+    );
+    if (Option.isNone(resolved)) {
       return yield* new ShellToolError({
         reason: "OutsideWorkspace",
         message: `${requested} is outside the workspace`,
       });
     }
-    return absolute;
+    return resolved.value.absolute;
   });
 
   const spawnFailed = (error: { readonly message: string }) =>
@@ -137,10 +169,21 @@ export const shellToolHandlers = Effect.gen(function* () {
           )
           .pipe(Effect.mapError(spawnFailed));
         // Drain both pipes while the command runs, or a chatty one blocks on a full pipe.
+        // Each chunk lands in a Ref, so what was read survives interrupting the reader.
         const collect = (stream: Stream.Stream<Uint8Array, { readonly message: string }>) =>
-          stream.pipe(Stream.decodeText(), Stream.mkString, Effect.mapError(spawnFailed));
-        const stdout = yield* Effect.forkChild(collect(handle.stdout));
-        const stderr = yield* Effect.forkChild(collect(handle.stderr));
+          Effect.gen(function* () {
+            const buffer = yield* Ref.make(EMPTY);
+            const reader = yield* Effect.forkChild(
+              stream.pipe(
+                Stream.decodeText(),
+                Stream.runForEach((chunk) => Ref.update(buffer, (b) => push(b, chunk))),
+                Effect.mapError(spawnFailed),
+              ),
+            );
+            return { buffer, reader };
+          });
+        const stdout = yield* collect(handle.stdout);
+        const stderr = yield* collect(handle.stderr);
         const exit = yield* handle.exitCode.pipe(
           Effect.mapError(spawnFailed),
           Effect.timeoutOption(limit),
@@ -148,8 +191,19 @@ export const shellToolHandlers = Effect.gen(function* () {
         if (Option.isNone(exit)) {
           yield* handle.kill({ forceKillAfter: FORCE_KILL_AFTER }).pipe(Effect.ignore);
         }
-        const out = cut(yield* Fiber.join(stdout));
-        const err = cut(yield* Fiber.join(stderr));
+        /** Wait for a reader to finish; past the grace period take what it has and stop it. */
+        const settle = (collector: typeof stdout) =>
+          Effect.gen(function* () {
+            const done = yield* Fiber.join(collector.reader).pipe(
+              Effect.ignore,
+              Effect.timeoutOption(COLLECT_GRACE),
+            );
+            if (Option.isNone(done)) {
+              yield* Fiber.interrupt(collector.reader);
+            }
+            return render(yield* Ref.get(collector.buffer));
+          });
+        const [out, err] = yield* Effect.all([settle(stdout), settle(stderr)], { concurrency: 2 });
         const finished = yield* Clock.currentTimeMillis;
         return {
           exitCode: Option.isSome(exit) ? Number(exit.value) : null,

@@ -1,9 +1,8 @@
 import { Config, Effect, Path } from "effect";
 
 /**
- * Where the gateway keeps its files. The CLI reads the same two directories
- * for the plugins it hosts itself, through `@magentic/gateway/paths`, so it
- * need not load the server to learn them.
+ * Where magentic keeps its files. The gateway and the CLI read the same two
+ * directories, so the CLI need not load the server to learn them.
  */
 
 /** The configuration directory. `./magentic` beside where the gateway runs, unless told otherwise. */

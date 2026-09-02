@@ -1,12 +1,12 @@
 import { define } from "@magentic/plugin";
-import { Effect, type Path } from "effect";
+import { Effect, type FileSystem, type Path } from "effect";
 import type { ChildProcessSpawner } from "effect/unstable/process";
 import { shellToolHandlers, ShellTools } from "./ShellTool.ts";
 import type { WorkspaceRoot } from "./WorkspaceRoot.ts";
 
 /** The shell tool, its own plugin so a team can disable it without losing the file tools. */
 export const shellToolPlugin = define<
-  ChildProcessSpawner.ChildProcessSpawner | Path.Path | WorkspaceRoot
+  ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path | WorkspaceRoot
 >({
   id: "shell",
   description: "Run shell commands inside the workspace.",

@@ -74,7 +74,7 @@ export class CodexAuth extends Context.Service<
       const transient = (message: string) => new CodexAuthError({ reason: "Transient", message });
 
       const classify = (status: number, text: string): CodexAuthError => {
-        const code = Schema.decodeUnknownOption(Schema.fromJsonString(RefreshErrorBody))(text).pipe(
+        const code = Schema.decodeOption(Schema.fromJsonString(RefreshErrorBody))(text).pipe(
           Option.map(errorCode),
           Option.getOrUndefined,
         );

@@ -6,3 +6,4 @@ export * from "./Plugin.ts";
 export * from "./Principal.ts";
 export * from "./Run.ts";
 export * from "./Conversation.ts";
+export * from "./ConversationId.ts";

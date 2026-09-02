@@ -5,7 +5,7 @@ import {
   specName,
   specOptions,
 } from "@magentic/core";
-import { type Plugin, type PluginServices, PluginSetupError } from "@magentic/plugin";
+import { messageOf, type Plugin, type PluginServices, PluginSetupError } from "@magentic/plugin";
 import type { PluginSource } from "@magentic/protocol";
 import { Config, Effect, FileSystem, Path, Predicate, Schema } from "effect";
 
@@ -26,7 +26,7 @@ export const loadGatewayConfig = Effect.fn("Gateway.loadConfig")(function* (dir:
   const text = yield* fs.readFileString(file).pipe(Effect.mapError(failed));
   const parsed = yield* Effect.try({
     try: () => Bun.YAML.parse(text),
-    catch: (error) => failed({ message: error instanceof Error ? error.message : String(error) }),
+    catch: (error) => failed({ message: messageOf(error) }),
   });
   return yield* Schema.decodeUnknownEffect(GatewayConfig)(parsed).pipe(Effect.mapError(failed));
 });
@@ -56,7 +56,7 @@ const unloadable = (id: string, source: PluginSource, message: string): LoadedPl
 const resolveFrom = (specifier: string, from: string) =>
   Effect.try({
     try: () => Bun.resolveSync(specifier, from),
-    catch: (error) => (error instanceof Error ? error.message : String(error)),
+    catch: (error) => messageOf(error),
   });
 
 /**
@@ -89,7 +89,7 @@ export const loadExternalPlugin = Effect.fn("Gateway.loadPlugin")(function* (
     }
     const mod = yield* Effect.tryPromise({
       try: () => import(target),
-      catch: (error) => (error instanceof Error ? error.message : String(error)),
+      catch: (error) => messageOf(error),
     });
     const decoded = yield* Schema.decodeUnknownEffect(PluginModule)(mod).pipe(
       Effect.mapError(() => "default export is not a plugin (needs id, description, setup)"),

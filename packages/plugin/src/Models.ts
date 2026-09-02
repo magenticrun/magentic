@@ -61,8 +61,8 @@ export class ModelInfo extends Schema.Class<ModelInfo>("magentic/plugin/ModelInf
   reasoning: Schema.Boolean,
   toolCall: Schema.Boolean,
   /** Token limits; 0 when the catalog does not say. */
-  context: Schema.Number,
-  output: Schema.Number,
+  context: Schema.Finite,
+  output: Schema.Finite,
 }) {
   static readonly fromCatalog = (model: CatalogModel): ModelInfo =>
     new ModelInfo({
@@ -102,14 +102,18 @@ export const formatModelRef = (provider: string, model: string): string => `${pr
  */
 export interface ModelProviderRegistration extends Choice {
   readonly methods: ReadonlyArray<LoginMethod>;
-  /** A one-line summary when signed in, none otherwise. */
+  /**
+   * A one-line summary when signed in, none otherwise. It should name the
+   * credential (a key hint, an account): the host rebuilds a provider's
+   * models when this line changes, and drops them when it goes to none.
+   */
   readonly status: Effect.Effect<Option.Option<string>, LoginError>;
   readonly logout: Effect.Effect<void, LoginError>;
   /** The models this provider can serve, in the order a picker should show them. */
   readonly models: Effect.Effect<ReadonlyArray<ModelInfo>>;
   /** Used when an agent names the provider alone. One of `models`. */
   readonly defaultModel: string;
-  /** The layer for one of `models`; None when not signed in. Built once per gateway. */
+  /** The layer for one of `models`; None when not signed in. Built once per credential state. */
   model(
     id: string,
   ): Effect.Effect<

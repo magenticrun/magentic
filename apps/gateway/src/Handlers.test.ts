@@ -8,7 +8,7 @@ import { AgentDefinition, define, ModelCatalog } from "@magentic/plugin";
 import { Policy } from "@magentic/policy";
 import { Api, RPC_PATH } from "@magentic/protocol";
 import { fileToolsPlugin, WorkspaceRoot } from "@magentic/tools";
-import { DateTime, Effect, FileSystem, Layer, Ref, Stream } from "effect";
+import { DateTime, Effect, Exit, FileSystem, Layer, Ref, Stream } from "effect";
 import {
   FetchHttpClient,
   HttpClient,
@@ -26,6 +26,7 @@ import {
 } from "effect/unstable/rpc";
 import { ToolCallGuardLive } from "./Guard.ts";
 import { RpcHandlers } from "./Handlers.ts";
+import { assistant, builtinPlugins, checkBind } from "./Server.ts";
 
 /** The handlers called directly, no server or serialization between. */
 const makeClient = RpcTest.makeClient(Api);
@@ -96,28 +97,47 @@ const scripted: FakeScript = ({ options }) => {
   return [{ type: "text", text: `echo: ${text}` }];
 };
 
-const AdmissionLayer = Layer.mergeAll(Identity.layerLocal, Policy.layerAllowAll, Audit.layerMemory);
-
-const HostLayer = PluginHost.layer({
-  plugins: [builtin(fileToolsPlugin), builtin(fakeProviderPlugin(scripted)), builtin(triagePlugin)],
-  paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
-}).pipe(Layer.provide([WorkspaceLayer, ToolCallGuardLive.pipe(Layer.provide(AdmissionLayer))]));
-
-const RunnerLayer = Runner.layer.pipe(Layer.provideMerge(ConversationStore.layerMemory));
-
-const ServicesLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer).pipe(
-  Layer.provideMerge(HostLayer),
-);
-
-const HandlersLayer = RpcHandlers.pipe(Layer.provideMerge(ServicesLayer));
-
 const PlatformLayer = Layer.mergeAll(
   BunServices.layer,
   FetchHttpClient.layer,
   ModelCatalog.layerSnapshot,
 );
 
-const TestLayer = HandlersLayer.pipe(Layer.provideMerge(PlatformLayer));
+/** The handlers over the plugins above, admitted by the given identity, policy, and audit. */
+const handlersWith = (policy: Layer.Layer<Policy>) => {
+  const AdmissionLayer = Layer.mergeAll(Identity.layerLocal, policy, Audit.layerMemory);
+  const HostLayer = PluginHost.layer({
+    plugins: [
+      builtin(fileToolsPlugin),
+      builtin(fakeProviderPlugin(scripted)),
+      builtin(triagePlugin),
+    ],
+    paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
+  }).pipe(Layer.provide([WorkspaceLayer, ToolCallGuardLive.pipe(Layer.provide(AdmissionLayer))]));
+  const RunnerLayer = Runner.layer.pipe(Layer.provideMerge(ConversationStore.layerMemory));
+  const ServicesLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer).pipe(
+    Layer.provideMerge(HostLayer),
+  );
+  return RpcHandlers.pipe(Layer.provideMerge(ServicesLayer), Layer.provideMerge(PlatformLayer));
+};
+
+const TestLayer = handlersWith(Policy.layerAllowAll);
+
+/** Reading needs an approver nobody can be yet; the rest is allowed. */
+const approvalPolicy = Layer.succeed(
+  Policy,
+  Policy.of({
+    evaluate: () => Effect.succeed({ _tag: "Allow" }),
+    evaluateToolCall: (call) =>
+      Effect.succeed(
+        call.tool === "read_file"
+          ? { _tag: "RequireApproval", reason: "read_file needs an approver", approvers: [] }
+          : { _tag: "Allow" },
+      ),
+  }),
+);
+
+const GuardedLayer = handlersWith(approvalPolicy);
 
 layer(TestLayer)("gateway api", (it) => {
   it.effect("answers health", () =>
@@ -208,6 +228,26 @@ layer(TestLayer)("gateway api", (it) => {
       );
       const failure = unknown.at(-1);
       assert.isTrue(failure?._tag === "RunFailed" && failure.message.includes('no model "nope"'));
+    }),
+  );
+
+  it.effect("refuses a conversation id that is not a path-safe token", () =>
+    Effect.gen(function* () {
+      const client = yield* makeClient;
+      // The client encodes the payload before sending, so a bad id never leaves it.
+      for (const id of ["../escape", "a/b", "..", "with space", ""]) {
+        const got = yield* Effect.exit(client.getConversation({ id }));
+        assert.isTrue(Exit.isFailure(got), id);
+        // A streaming call encodes when the stream is made, so even making it can throw.
+        const ran = yield* Effect.try(() =>
+          client.run({ agent: "triage", input: "x", conversationId: id }),
+        ).pipe(Effect.flatMap(Stream.runDrain), Effect.exit);
+        assert.isTrue(Exit.isFailure(ran), id);
+      }
+      const ok = yield* client
+        .getConversation({ id: "0f0f0f0f-0000-4000-8000-000000000000" })
+        .pipe(Effect.flip);
+      assert.strictEqual(ok._tag, "ConversationNotFound");
     }),
   );
 
@@ -334,6 +374,70 @@ layer(TestLayer)("gateway api", (it) => {
         Effect.flip,
       );
       assert.strictEqual(missing._tag, "AgentNotFound");
+    }),
+  );
+});
+
+layer(GuardedLayer)("gateway guard", (it) => {
+  it.effect("refuses a call policy does not allow, audits it, and lets the run go on", () =>
+    Effect.gen(function* () {
+      const client = yield* makeClient;
+      const events = yield* Stream.runCollect(client.run({ agent: "triage", input: "read notes" }));
+      assert.deepStrictEqual(
+        events.map((e) => e._tag),
+        [
+          "RunStarted",
+          "ToolCall",
+          "ToolResult",
+          "TokenUsage",
+          "TextDelta",
+          "TokenUsage",
+          "RunFinished",
+        ],
+      );
+      // The model sees a refusal with the reason, never the file.
+      const result = events[2];
+      assert.isTrue(result?._tag === "ToolResult" && result.isFailure);
+      const refused = result?._tag === "ToolResult" ? JSON.stringify(result.result) : "";
+      assert.include(refused, "ToolCallRefused");
+      assert.include(refused, "read_file needs an approver");
+      assert.notInclude(refused, "remember the milk");
+      // An approval that cannot be given yet is a denial, recorded as one.
+      const recorded = yield* Ref.get(yield* AuditMemory);
+      assert.deepStrictEqual(
+        recorded.map((e) => e.action),
+        ["run.started", "tool.denied"],
+      );
+      const denied = recorded[1];
+      assert.include(JSON.stringify(denied?.detail), "read_file needs an approver");
+      assert.include(JSON.stringify(denied?.detail), '"tool":"read_file"');
+    }),
+  );
+});
+
+layer(Layer.empty)("checkBind", (it) => {
+  it.effect("accepts loopback without acknowledgement", () =>
+    Effect.gen(function* () {
+      assert.strictEqual(yield* checkBind("127.0.0.1", false), "127.0.0.1");
+      assert.strictEqual(yield* checkBind("localhost", false), "localhost");
+    }),
+  );
+  it.effect("refuses another address until IDENTITY_LOCAL acknowledges it", () =>
+    Effect.gen(function* () {
+      const refused = yield* checkBind("0.0.0.0", false).pipe(Effect.flip);
+      assert.strictEqual(refused._tag, "UnsafeBind");
+      assert.strictEqual(yield* checkBind("0.0.0.0", true), "0.0.0.0");
+    }),
+  );
+});
+
+layer(Layer.empty)("built-in plugins", (it) => {
+  it.effect("host a plugin for every tool the assistant lists", () =>
+    Effect.sync(() => {
+      const ids = new Set(builtinPlugins.map((loaded) => loaded.plugin.id));
+      assert.isTrue(ids.has("file-tools"));
+      assert.isTrue(ids.has("shell"));
+      assert.isTrue(assistant.tools.includes("shell"));
     }),
   );
 });
