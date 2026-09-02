@@ -221,12 +221,25 @@ layer(TestLayer)("gateway api", (it) => {
             JSON.stringify({ path: "notes.txt", content: "remember the milk" }),
       );
 
+      // A rename changes the title and nothing else; a later run keeps it.
+      const renamed = yield* client.conversations.rename({
+        params: { id },
+        payload: { title: "milk run" },
+      });
+      assert.strictEqual(renamed.title, "milk run");
+      assert.strictEqual(renamed.messages, 5);
+      const unknown = yield* client.conversations
+        .rename({ params: { id: "nope" }, payload: { title: "x" } })
+        .pipe(Effect.flip);
+      assert.strictEqual(unknown._tag, "ConversationNotFound");
+
       // Continuing it carries the history: the fake answers a tool result with "read it".
       const again = yield* client.agents
         .run({ params: { name: "triage" }, payload: { input: "more", conversationId: id } })
         .pipe(Effect.flatMap(Stream.runCollect));
       const continued = yield* client.conversations.get({ params: { id } });
       assert.strictEqual(continued.messages, 7);
+      assert.strictEqual(continued.title, "milk run");
 
       // Compacting folds the context into a summary; the fake writes back the request's last text.
       const compacted = yield* client.conversations.compact({ params: { id } });

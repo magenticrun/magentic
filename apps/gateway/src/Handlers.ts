@@ -15,7 +15,7 @@ import {
   AgentRequest,
   Api,
   CompactionFailed,
-  type Conversation,
+  Conversation,
   ConversationNotFound,
   RunDenied,
   type RunRequest,
@@ -168,6 +168,14 @@ export const ConversationsApiHandlersNoDeps = HttpApiBuilder.group(
       return yield* transcriptFromJson(history.value).pipe(Effect.orElseSucceed(() => []));
     });
 
+    const rename = Effect.fn("Gateway.conversations.rename")(function* (id: string, title: string) {
+      const principal = yield* caller;
+      const info = yield* owned(store, principal.id, id);
+      const renamed = new Conversation({ ...info, title });
+      yield* store.update(renamed).pipe(Effect.orDie);
+      return renamed;
+    });
+
     const remove = Effect.fn("Gateway.conversations.remove")(function* (id: string) {
       const principal = yield* caller;
       yield* owned(store, principal.id, id);
@@ -190,6 +198,7 @@ export const ConversationsApiHandlersNoDeps = HttpApiBuilder.group(
       list: ({ query }) => list(query.agent, query.directory),
       get: ({ params }) => Effect.flatMap(caller, (p) => owned(store, p.id, params.id)),
       transcript: ({ params }) => transcript(params.id),
+      rename: ({ params, payload }) => rename(params.id, payload.title),
       remove: ({ params }) => remove(params.id),
       compact: ({ params }) => compact(params.id),
     });
