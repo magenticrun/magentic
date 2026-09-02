@@ -22,6 +22,8 @@ export interface Palette {
   readonly comment: string;
   /** Types, and inline code in prose. */
   readonly type: string;
+  /** Behind what floats over the transcript: the command popover. */
+  readonly panel: string;
 }
 
 /** The orange of the dot in the logo. */
@@ -39,6 +41,7 @@ const dark: Palette = {
   string: "#a5d6a7",
   comment: "#6b7280",
   type: "#7dd3fc",
+  panel: "#262626",
 };
 
 const light: Palette = {
@@ -53,6 +56,7 @@ const light: Palette = {
   string: "#15803d",
   comment: "#9ca3af",
   type: "#0369a1",
+  panel: "#e5e7eb",
 };
 
 /** Dark when the terminal never answered the theme query, as most terminals are dark. */

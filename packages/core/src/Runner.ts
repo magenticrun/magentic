@@ -143,6 +143,60 @@ export const DEFAULT_MAX_STEPS = 50;
 /** The `RunFinished` reason for a run that stopped at its step limit. */
 export const STEP_LIMIT_REASON = "step-limit";
 
+/** The `RunFinished` reason for a run the surface stopped before it was done. */
+export const INTERRUPTED_REASON = "interrupted";
+
+/** What the model reads in place of a result its tool call never got. */
+const INTERRUPTED_RESULT = {
+  error:
+    "The run was interrupted before this tool finished. Call it again if its result is still needed.",
+};
+
+/**
+ * The history of an interrupted run as the next call can send it. The chat
+ * keeps what the model said up to the interruption, so a tool call it made
+ * may be left without a result, which the providers reject. Each such call
+ * gets a failed result saying why, so the next call goes through and the
+ * model knows it was cut off.
+ */
+const settleInterrupted = (history: Prompt.Prompt): Prompt.Prompt => {
+  const answered = new Set<string>();
+  const calls: Array<Prompt.ToolCallPart> = [];
+  for (const message of history.content) {
+    if (message.role === "assistant") {
+      for (const part of message.content) {
+        if (part.type === "tool-call" && !part.providerExecuted) {
+          calls.push(part);
+        } else if (part.type === "tool-result") {
+          answered.add(part.id);
+        }
+      }
+    } else if (message.role === "tool") {
+      for (const part of message.content) {
+        if (part.type === "tool-result") {
+          answered.add(part.id);
+        }
+      }
+    }
+  }
+  const open = calls.filter((call) => !answered.has(call.id));
+  if (open.length === 0) {
+    return history;
+  }
+  const results = Prompt.makeMessage("tool", {
+    content: open.map((call) =>
+      Prompt.makePart("tool-result", {
+        id: call.id,
+        name: call.name,
+        isFailure: true,
+        result: INTERRUPTED_RESULT,
+        providerExecuted: false,
+      }),
+    ),
+  });
+  return Prompt.fromMessages([...history.content, results]);
+};
+
 /**
  * Tool calls one run may have thrown out for bad parameters before it fails
  * with the provider's complaint. A model that cannot match a tool's schema
@@ -537,9 +591,8 @@ export class Runner extends Context.Service<
               }
             });
 
-            const outcome = yield* Effect.exit(loop);
             // Keep whatever history we got, even after a failure, so the person can retry.
-            yield* Effect.gen(function* () {
+            const save = Effect.gen(function* () {
               const now = yield* DateTime.now;
               const context = yield* Ref.get(chat.history);
               const resolved = yield* models.resolve(choice).pipe(Effect.option);
@@ -572,6 +625,23 @@ export class Runner extends Context.Service<
                 Effect.logWarning(`conversation ${conversationId} not saved`, cause),
               ),
             );
+
+            // A surface that stops the run interrupts this fiber, and an
+            // interrupted fiber runs nothing past the loop but its finalizers.
+            // The turn is saved all the same, with what the model said so far,
+            // so the next input follows it rather than a history in which the
+            // stopped input was never sent.
+            const outcome = yield* Effect.exit(loop).pipe(
+              Effect.onInterrupt(() =>
+                Effect.gen(function* () {
+                  yield* Ref.update(chat.history, settleInterrupted);
+                  yield* save;
+                  yield* emit({ _tag: "RunFinished", reason: INTERRUPTED_REASON });
+                  yield* Queue.end(queue);
+                }),
+              ),
+            );
+            yield* save;
             if (outcome._tag === "Failure") {
               yield* emit({ _tag: "RunFailed", message: describeCause(outcome.cause) });
             } else {

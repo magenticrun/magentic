@@ -31,9 +31,9 @@ const failed = (message: string) => new CommandError({ command: NAME, message })
 
 /**
  * `/model`: pick the model the chat runs on. Favourites come first, then the
- * signed-in providers; choosing a provider lists its models. `f` on a model row keeps
- * it in the favourites file for next time. `/model provider/model` sets it
- * outright.
+ * signed-in providers; choosing a provider lists its models, and typing at
+ * the top finds any model across them. `ctrl+f` on a model row keeps it in
+ * the favourites file for next time. `/model provider/model` sets it outright.
  */
 export const modelCommandPlugin = define<FileSystem.FileSystem | Path.Path>({
   id: "model-command",
@@ -118,25 +118,31 @@ export const modelCommandPlugin = define<FileSystem.FileSystem | Path.Path>({
       const current = yield* session.model;
       const isCurrent = (ref: string) => Option.contains(current, ref);
 
+      /** A model as a picker row with its provider at the right, starred when favourited. */
+      const modelItem = (
+        view: ProviderView,
+        model: ModelInfo,
+        refs: ReadonlyArray<string>,
+      ): PickItem => {
+        const ref = formatModelRef(view.provider.id, model.id);
+        return {
+          id: ref,
+          label: model.name,
+          detail: view.provider.name,
+          marked: refs.includes(ref),
+        };
+      };
+
       /** Favourites that still name a known provider and model, as picker rows. */
-      const favouriteItems = Effect.map(Ref.get(favourites), (refs) =>
+      const favouriteItems = (refs: ReadonlyArray<string>) =>
         refs.flatMap((ref): ReadonlyArray<PickItem> => {
           const found = lookup(all, ref);
-          return Option.isNone(found)
-            ? []
-            : [
-                {
-                  id: ref,
-                  label: found.value.model.name,
-                  detail: found.value.view.provider.name,
-                  marked: true,
-                },
-              ];
-        }),
-      );
+          return Option.isNone(found) ? [] : [modelItem(found.value.view, found.value.model, refs)];
+        });
 
       const topPicker = Effect.fn("model.topPicker")(function* (cursor: Option.Option<string>) {
-        const items = yield* favouriteItems;
+        const refs = yield* Ref.get(favourites);
+        const items = favouriteItems(refs);
         const providers: ReadonlyArray<PickItem> = all.map((v) => ({
           id: `provider:${v.provider.id}`,
           label: v.provider.name,
@@ -147,6 +153,8 @@ export const modelCommandPlugin = define<FileSystem.FileSystem | Path.Path>({
             ...(items.length > 0 ? [{ title: "Favourites", items }] : []),
             { title: "Providers", items: providers },
           ],
+          // Every model, so typing reaches one without opening its provider first.
+          unlisted: all.flatMap((v) => v.models.map((model) => modelItem(v, model, refs))),
           actions: [FAVOURITE],
           cursor: Option.getOrUndefined(
             Option.orElse(cursor, () =>

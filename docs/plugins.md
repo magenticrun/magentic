@@ -219,8 +219,11 @@ instead of one per registry. `AgentRegistry` keeps its interface and reads the c
 
 A slash command in a chat, `/name args`, is a plugin contribution too. The command never
 draws anything: it describes a picker (sections of rows, a detail column, action keys such as
-`f`) and loops on the answer, the way a login method reports through `LoginUi`. Any surface
-that can show a list can host one.
+`f`, bound with ctrl by the surface since a bare letter types into the filter) and loops on
+the answer, the way a login method reports through `LoginUi`. Any surface that can show a
+list can host one. Typing filters the rows by label and detail, every word typed matching
+somewhere; a picker may also carry `unlisted` rows that only a filter finds, the level below
+flattened so typing at the top reaches it.
 
 ```ts
 export interface CommandRegistration {
@@ -258,8 +261,9 @@ the ones signed in on the CLI's machine, the same limit `auth login` has today.
 
 `/model` is the first: favourites (kept in `favourites.json` under `paths.data`) at the top
 with the provider at the right, the signed-in providers below (one nobody signed in to has
-nothing to offer, so it is not listed), a provider's models on selection, `f` to favourite
-or unfavourite, and `/model provider/model` to set it outright. The CLI remembers the choice
+nothing to offer, so it is not listed), a provider's models on selection, every model as an
+unlisted row so typing at the top finds one across providers, `ctrl+f` to favourite or
+unfavourite, and `/model provider/model` to set it outright. The CLI remembers the choice
 in `chat.json` under its data directory and starts the next chat on it while the machine can
 still run it; a resumed conversation's model does not overwrite it. `/context` reads
 `session.usage`, folded by the surface from the runner's `TokenUsage` events, and prints
@@ -404,8 +408,10 @@ What the plugin does with a server, following opencode's `MCP` service:
   suffix, logged), a `Tool.dynamic` carrying the server's own JSON Schema, so the model sees
   the schema the server published and the server validates the arguments. Strict schema mode
   is off for these: OpenAI's rejects any optional property, and servers rarely write for it.
-  The arguments decode as any object, since the provider derives a codec from the decoder
-  when a call comes back and cannot from the `Schema.Unknown` a JSON-Schema tool carries.
+  The arguments decode through a struct with one optional JSON slot per declared property,
+  since the OpenAI provider derives a codec from the decoder when a call comes back and cannot
+  from the `Schema.Unknown` a JSON-Schema tool carries; a key the server did not declare is
+  dropped there.
   Every one declares the `mcp` capability: the gateway cannot tell what a foreign tool does,
   so policy rules say `mcp: approval` rather than reasoning per tool. MCP's `readOnlyHint`
   and the other hints become Effect's `Tool.Readonly`, `Destructive`, `Idempotent`, and
