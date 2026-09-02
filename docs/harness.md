@@ -107,6 +107,16 @@ Each is a `Context.Service` with static layers. Ids are `magentic/core/<Name>`.
   is for tests. This is the opencode session model without the generated title.
 - **Runner**: the loop above. `run(request): Stream<RunEvent, RunError>`. Owns the tool
   wrapping. Depends on `LanguageModel`, `Policy`, `Audit`, `ApprovalService`.
+  `compact(conversation)` folds the context into a summary on request; the loop does the
+  same on its own after a model call whose usage reaches the window less a reserve
+  (`Compaction.ts`, after opencode: 20k tokens or the model's output limit, whichever is
+  smaller), keeping up to a quarter of the room in recent turns word for word and emitting
+  `CompactionStarted` and `Compacted`. The summary is a user message marked in its
+  `options.magentic`; the model sees the system prompt, the latest summary, and what
+  follows it, while `history.json` keeps everything before as well, so transcripts still
+  show it. `POST /conversations/:id/compact` is the manual route. Compaction is core, not a
+  plugin: a plugin command runs in the surface and only reaches the gateway through the
+  protocol, so it cannot read the history or call the model.
 - **ModelProvider** (`@magentic/model`): picks the `LanguageModel` layer from
   `magentic.yaml`. Decision: Effect AI (`effect/unstable/ai`) is the model interface, not the
   Vercel AI SDK. The runner, `Toolkit`, `Chat`, `McpServer`, and the policy wrapper all sit
@@ -219,6 +229,9 @@ auth login|list|logout` (exists, inline `@clack/prompts` like opencode's, not th
   OpenTUI with the Solid renderer (see `research/opentui-solid.md`): Effect parses arguments
   and owns the renderer lifecycle, OpenTUI's own signal and console handling is disabled, and
   the embedded gateway runs with request logging off so nothing prints over the screen.
+  The header is one row beside the mark (`tui/Logo.tsx`, dot `#d95f21`): the name on the
+  left, the working directory and the CLI version (`Version.ts`, read from the package)
+  on the right.
   Assistant text is drawn with OpenTUI's `<markdown>` element, streaming while the run is
   in flight; the syntax style (`tui/Markdown.ts`) follows the light or dark palette.
   Pasting follows opencode (`tui/Paste.ts`): a paste over 150 characters or three lines
@@ -228,6 +241,9 @@ auth login|list|logout` (exists, inline `@clack/prompts` like opencode's, not th
   goes along as a `RunRequest.attachments` entry, base64 on the wire. The runner hands the
   model bytes, since Effect's provider clients base64-encode a byte array but encode a
   string a second time, and stores them as base64 in `history.json`, which cannot hold bytes.
+  `/compact` (in the conversation commands plugin, over `ChatSession.compact`) asks the
+  gateway to fold the conversation into a summary; the transcript keeps every earlier line
+  and shows the summary where the compaction happened, on resume too.
 - **Slack** (`packages/surface-slack`): Events API subscription for mentions and DMs;
   interactivity endpoint for approval buttons. Signature verification is the auth. Thread id
   becomes the conversation id. Replies are posted then edited as text streams in.

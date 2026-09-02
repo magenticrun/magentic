@@ -116,7 +116,9 @@ export const layerServer = (port: number, options: { readonly quiet?: boolean } 
     disableLogger: options.quiet === true,
     disableListenLog: options.quiet === true,
   }).pipe(
-    Layer.provide(BunHttpServer.layer({ port })),
+    // Bun closes a request that sends nothing for ten seconds; compacting a
+    // conversation waits on the model longer than that. 255 is Bun's most.
+    Layer.provide(BunHttpServer.layer({ port, idleTimeout: 255 })),
     Layer.provide([BunServices.layer, FetchHttpClient.layer]),
   );
 

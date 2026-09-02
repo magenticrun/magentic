@@ -4,6 +4,7 @@ import { DateTime, Effect, Option } from "effect";
 
 const RESUME = "resume";
 const NEW = "new";
+const COMPACT = "compact";
 
 /** `just now`, `5m ago`, `3h ago`, `2d ago`: enough to tell conversations apart. */
 export const ago = (at: DateTime.Utc, now: DateTime.Utc): string => {
@@ -53,11 +54,13 @@ const resume = Effect.fn("resume.run")(function* ({ ui, session, args }: Command
 /**
  * `/resume`: pick one of this agent's earlier conversations and carry on
  * from it, the transcript restored; `/resume <id>` names one outright.
- * `/new` puts the current one aside and starts fresh.
+ * `/new` puts the current one aside and starts fresh. `/compact` folds the
+ * current one into a summary the model continues from.
  */
 export const conversationCommandsPlugin = define({
   id: "conversation-commands",
-  description: "The /resume and /new commands: pick up an earlier conversation, or start one.",
+  description:
+    "The /resume, /new and /compact commands: pick up an earlier conversation, start one, or fold one into a summary.",
   setup: Effect.fn("conversationCommandsPlugin.setup")(function* (ctx) {
     yield* ctx.command.register({
       name: RESUME,
@@ -75,6 +78,11 @@ export const conversationCommandsPlugin = define({
       name: NEW,
       description: "Start a new conversation",
       run: ({ session }) => session.startNew,
+    });
+    yield* ctx.command.register({
+      name: COMPACT,
+      description: "Fold the conversation so far into a summary",
+      run: ({ session }) => session.compact,
     });
   }),
 });

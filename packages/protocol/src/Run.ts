@@ -72,6 +72,16 @@ export const TokenUsage = Schema.TaggedStruct("TokenUsage", {
   breakdown: ContextBreakdown,
 });
 export type TokenUsage = typeof TokenUsage.Type;
+/** The context neared the model's window; a summary is being written. */
+export const CompactionStarted = Schema.TaggedStruct("CompactionStarted", {});
+/** The conversation so far was folded into a summary the model continues from. */
+export const Compacted = Schema.TaggedStruct("Compacted", {
+  summary: Schema.String,
+  /** Messages the model saw before, and after; the system prompt included. */
+  messagesBefore: Schema.Number,
+  messagesAfter: Schema.Number,
+});
+export type Compacted = typeof Compacted.Type;
 export const RunFinished = Schema.TaggedStruct("RunFinished", { reason: Schema.String });
 export const RunFailed = Schema.TaggedStruct("RunFailed", { message: Schema.String });
 
@@ -83,6 +93,8 @@ export const RunEvent = Schema.Union([
   ToolCall,
   ToolResult,
   TokenUsage,
+  CompactionStarted,
+  Compacted,
   RunFinished,
   RunFailed,
 ]);

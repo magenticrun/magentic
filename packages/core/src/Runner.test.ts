@@ -10,6 +10,7 @@ import { ConversationStore } from "./ConversationStore.ts";
 import { builtin, PluginHost } from "./plugin/PluginHost.ts";
 import { ToolCallGuard } from "./plugin/ToolRegistry.ts";
 import { Runner } from "./Runner.ts";
+import { transcriptFromJson } from "./Transcript.ts";
 
 const reader = new AgentDefinition({
   name: "reader",
@@ -174,6 +175,140 @@ layer(TestLayer)("Runner", (it) => {
       assert.deepStrictEqual(
         listed.map((c) => c.id),
         [conversationId],
+      );
+
+      // On request the whole context folds into one summary the model wrote; the
+      // fake's summary is its usual readout of what it was sent: two messages,
+      // the summariser's own system prompt and the request.
+      const compacted = yield* runner.compact({
+        agent: reader,
+        conversationId,
+        model: Option.none(),
+      });
+      assert.deepStrictEqual(compacted, {
+        _tag: "Compacted",
+        summary: "messages=2 files=",
+        messagesBefore: 7,
+        messagesAfter: 2,
+      });
+      const after = yield* store.get(conversationId);
+      assert.strictEqual(Option.isSome(after) ? after.value.messages : 0, 2);
+      // The stored history still holds everything: what was said, then the summary.
+      const history = yield* store.history(conversationId);
+      const transcript = yield* transcriptFromJson(Option.getOrElse(history, () => ""));
+      assert.deepStrictEqual(
+        transcript.map((e) => e._tag),
+        ["User", "Tool", "Assistant", "User", "Assistant", "Summary"],
+      );
+      const summary = transcript.at(-1);
+      assert.strictEqual(summary?._tag === "Summary" ? summary.text : summary, "messages=2 files=");
+      // The next run continues from the summary alone: system, summary, and its input.
+      const third = yield* Stream.runCollect(
+        runner.run({
+          agent: reader,
+          principal: alice,
+          input: "still there?",
+          attachments: [],
+          conversationId: Option.some(conversationId),
+          model: Option.none(),
+          directory: Option.none(),
+        }),
+      );
+      const continued = third.find((e) => e._tag === "TextDelta");
+      assert.strictEqual(
+        continued?._tag === "TextDelta" ? continued.text : continued,
+        "messages=3 files=",
+      );
+      assert.strictEqual(
+        (yield* transcriptFromJson(
+          Option.getOrElse(yield* store.history(conversationId), () => ""),
+        )).length,
+        8,
+      );
+    }),
+  );
+});
+
+/** Every call answers with the history size; the model claims a window the first call fills. */
+const tight: FakeScript = ({ options }) => [
+  { type: "text", text: `messages=${options.prompt.content.length}` },
+];
+
+const TightLayer = Runner.layer.pipe(
+  Layer.provideMerge(
+    Layer.mergeAll(
+      PluginHost.layer({
+        plugins: [builtin(fakeProviderPlugin(tight, { context: 12, output: 4 }))],
+        paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
+      }).pipe(Layer.provide(ToolCallGuard.layerAllowAll)),
+      ConversationStore.layerMemory,
+    ),
+  ),
+  Layer.provideMerge(
+    Layer.mergeAll(BunServices.layer, FetchHttpClient.layer, ModelCatalog.layerSnapshot),
+  ),
+);
+
+const talker = new AgentDefinition({
+  name: "talker",
+  description: "Talks",
+  prompt: "You talk.",
+  tools: [],
+});
+
+layer(TightLayer)("Runner auto compaction", (it) => {
+  it.effect("compacts when a call reaches the window and continues from the summary", () =>
+    Effect.gen(function* () {
+      const runner = yield* Runner;
+      // The fake counts 10 input and 1 output token a call; usable room is 12 - 4 = 8.
+      const events = yield* Stream.runCollect(
+        runner.run({
+          agent: talker,
+          principal: alice,
+          input: "hello",
+          attachments: [],
+          conversationId: Option.none(),
+          model: Option.none(),
+          directory: Option.none(),
+        }),
+      );
+      assert.deepStrictEqual(
+        events.map((e) => e._tag),
+        ["RunStarted", "TextDelta", "TokenUsage", "CompactionStarted", "Compacted", "RunFinished"],
+      );
+      const compacted = events[4];
+      // system, user, assistant fold into system and summary; the summary is the fake's readout.
+      assert.deepStrictEqual(compacted, {
+        _tag: "Compacted",
+        summary: "messages=2",
+        messagesBefore: 3,
+        messagesAfter: 2,
+      });
+      const started = events[0];
+      const id = started?._tag === "RunStarted" ? started.conversationId : "";
+      const second = yield* Stream.runCollect(
+        runner.run({
+          agent: talker,
+          principal: alice,
+          input: "again",
+          attachments: [],
+          conversationId: Option.some(id),
+          model: Option.none(),
+          directory: Option.none(),
+        }),
+      );
+      const reply = second.find((e) => e._tag === "TextDelta");
+      assert.strictEqual(reply?._tag === "TextDelta" ? reply.text : reply, "messages=3");
+      // Compacted again at the end of this run, carrying the earlier summary into the new one.
+      const again = second.find((e) => e._tag === "Compacted");
+      assert.strictEqual(again?._tag === "Compacted" ? again.messagesBefore : 0, 4);
+      const store = yield* ConversationStore;
+      const transcript = yield* transcriptFromJson(
+        Option.getOrElse(yield* store.history(id), () => ""),
+      );
+      assert.deepStrictEqual(
+        transcript.map((e) => e._tag),
+        ["User", "Assistant", "Summary", "User", "Assistant", "Summary"],
       );
     }),
   );

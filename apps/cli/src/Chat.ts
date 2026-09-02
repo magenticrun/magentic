@@ -10,6 +10,7 @@ import type { Attachment, Conversation } from "@magentic/protocol";
 import { render } from "@opentui/solid";
 import {
   Cause,
+  Config,
   DateTime,
   Deferred,
   Effect,
@@ -27,6 +28,7 @@ import { ago } from "./commands/Conversations.ts";
 import { ensureGateway, type GatewayClient } from "./Gateway.ts";
 import { createChatTui } from "./tui/ChatView.tsx";
 import { acquireRenderer } from "./tui/Tui.ts";
+import { VERSION } from "./Version.ts";
 
 export interface ChatOptions {
   readonly baseUrl: string;
@@ -147,7 +149,7 @@ const startingConversation = Effect.fn("Cli.chat.startingConversation")(function
  * the run in flight; ctrl+c twice ends the session.
  */
 export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
-  const { client, embedded } = yield* ensureGateway(options.baseUrl);
+  const { client } = yield* ensureGateway(options.baseUrl);
   const starting = yield* startingConversation(client, options);
   const agent = yield* resolveAgent(
     client,
@@ -196,9 +198,17 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   // The conversation the next input continues; the gateway names it on the first run.
   const conversation = yield* Ref.make(Option.none<string>());
 
+  // The header shows where the chat runs, with the home directory as `~`.
+  const home = yield* Config.string("HOME").pipe(Config.withDefault(""));
+  const cwd = process.cwd();
+  const directory =
+    home.length > 0 && (cwd === home || cwd.startsWith(`${home}/`))
+      ? `~${cwd.slice(home.length)}`
+      : cwd;
+
   const tui = createChatTui({
-    agent: agent.name,
-    gateway: embedded ? `${options.baseUrl} (started here)` : options.baseUrl,
+    directory,
+    version: VERSION,
     model: initialModel,
     contextWindow: Option.isSome(initialModel)
       ? yield* contextWindow(models, initialModel.value)
@@ -280,6 +290,10 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
               if (event._tag === "RunStarted") {
                 yield* Ref.set(conversation, Option.some(event.conversationId));
               }
+              if (event._tag === "Compacted") {
+                // What the model holds is the summary now; the next call says how much that is.
+                yield* Ref.set(usage, Option.none());
+              }
               if (event._tag === "TokenUsage") {
                 yield* Ref.update(usage, (previous) =>
                   Option.some({
@@ -354,6 +368,20 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
       yield* Ref.set(usage, Option.none());
       tui.reset();
       tui.note("New conversation");
+    }),
+    compact: Effect.gen(function* () {
+      const id = yield* Ref.get(conversation);
+      if (Option.isNone(id)) {
+        return yield* new CommandError({
+          command: "compact",
+          message: "Nothing to compact yet; this conversation has not started.",
+        });
+      }
+      const done = yield* client.conversations
+        .compact({ params: { id: id.value } })
+        .pipe(Effect.catchCause((cause) => gatewayFailed("compact")(cause)));
+      yield* Ref.set(usage, Option.none());
+      tui.apply(done);
     }),
   };
 

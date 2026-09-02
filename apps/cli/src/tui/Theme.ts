@@ -2,7 +2,7 @@ import type { ThemeMode } from "@opentui/core";
 
 /**
  * The colours the chat draws with. Text and chrome follow the terminal's
- * theme; the accent is the same warm orange on both so the chat is
+ * theme; the accent is the brand orange on both so the chat is
  * recognisable at a glance.
  */
 export interface Palette {
@@ -10,7 +10,7 @@ export interface Palette {
   readonly muted: string;
   readonly border: string;
   readonly placeholder: string;
-  /** Logo, spinner and the welcome frame. */
+  /** The dot in the logo, the spinner and the welcome frame. */
   readonly accent: string;
   readonly success: string;
   readonly error: string;
@@ -24,12 +24,15 @@ export interface Palette {
   readonly type: string;
 }
 
+/** The orange of the dot in the logo. */
+const BRAND = "#d95f21";
+
 const dark: Palette = {
   text: "#e5e7eb",
   muted: "#9ca3af",
   border: "#4b5563",
   placeholder: "#6b7280",
-  accent: "#d97757",
+  accent: BRAND,
   success: "#86efac",
   error: "#fca5a5",
   keyword: "#c4b5fd",
@@ -43,7 +46,7 @@ const light: Palette = {
   muted: "#6b7280",
   border: "#9ca3af",
   placeholder: "#9ca3af",
-  accent: "#c2410c",
+  accent: BRAND,
   success: "#15803d",
   error: "#b91c1c",
   keyword: "#6d28d9",

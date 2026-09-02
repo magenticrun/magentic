@@ -22,7 +22,10 @@ export const run = Effect.fn("Cli.run")(function* (options: RunOptions) {
       case "RunStarted":
       case "ReasoningDelta":
       case "TokenUsage":
+      case "CompactionStarted":
         return Effect.void;
+      case "Compacted":
+        return Console.log(`\n(compacted ${event.messagesBefore} messages into a summary)`);
       case "TextDelta":
         return terminal.display(event.text).pipe(Effect.orDie);
       case "ToolCall":

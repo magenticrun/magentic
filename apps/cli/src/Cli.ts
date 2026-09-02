@@ -7,6 +7,7 @@ import { chat } from "./Chat.ts";
 import { ensureGateway, gatewayClient } from "./Gateway.ts";
 import { LocalHost } from "./Host.ts";
 import { run } from "./Run.ts";
+import { VERSION } from "./Version.ts";
 
 const gateway = Flag.string("gateway").pipe(
   Flag.withAlias("g"),
@@ -102,7 +103,7 @@ const plugin = Command.make("plugin").pipe(
 
 magentic.pipe(
   Command.withSubcommands([agents, runCommand, plugin, auth]),
-  Command.run({ version: "0.0.0" }),
+  Command.run({ version: VERSION }),
   Effect.provide([BunServices.layer, FetchHttpClient.layer]),
   BunRuntime.runMain,
 );

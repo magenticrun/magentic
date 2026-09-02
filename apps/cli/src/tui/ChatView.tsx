@@ -20,6 +20,7 @@ import {
   Switch,
 } from "solid-js";
 import { createStore, produce } from "solid-js/store";
+import { Logo } from "./Logo.tsx";
 import { markdownStyleFor } from "./Markdown.ts";
 import {
   attached,
@@ -39,8 +40,11 @@ import { PickerView } from "./Picker.tsx";
 import { type Palette, paletteFor } from "./Theme.ts";
 
 export type TextLine = {
-  /** A note is what a command reports, in the transcript but not from the agent. */
-  readonly kind: "user" | "assistant" | "error" | "note";
+  /**
+   * A note is what a command reports, in the transcript but not from the
+   * agent. A summary is what a compaction left for the model to continue from.
+   */
+  readonly kind: "user" | "assistant" | "error" | "note" | "summary";
   readonly text: string;
 };
 
@@ -58,8 +62,6 @@ export type Line = TextLine | ToolLine;
 
 /** Mutable on purpose: Solid's store setters address fields by name. */
 type State = {
-  agent: string;
-  gateway: string;
   /** The `provider/model` runs use, when known. */
   model: Option.Option<string>;
   /** Tokens the latest model call held, input and output; 0 before the first reply. */
@@ -165,8 +167,9 @@ export interface ChatTui {
 }
 
 export const createChatTui = (options: {
-  readonly agent: string;
-  readonly gateway: string;
+  /** Where the chat runs, as the header shows it. */
+  readonly directory: string;
+  readonly version: string;
   /** The `provider/model` the agent runs on, when the gateway could tell. */
   readonly model: Option.Option<string>;
   /** How many tokens the model can hold; 0 when unknown. */
@@ -180,8 +183,6 @@ export const createChatTui = (options: {
   readonly onExit: () => void;
 }): ChatTui => {
   const [state, setState] = createStore<State>({
-    agent: options.agent,
-    gateway: options.gateway,
     model: options.model,
     contextTokens: 0,
     contextWindow: options.contextWindow,
@@ -271,6 +272,18 @@ export const createChatTui = (options: {
         case "TokenUsage":
           setState("contextTokens", event.inputTokens + event.outputTokens);
           return;
+        case "CompactionStarted":
+          setState("status", "Compacting…");
+          return;
+        case "Compacted":
+          // Earlier lines stay on screen; the model continues from the summary.
+          push({ kind: "summary", text: event.summary });
+          push({
+            kind: "note",
+            text: `Compacted ${event.messagesBefore} messages into a summary`,
+          });
+          setState({ contextTokens: 0, status: state.busy ? "Thinking…" : "" });
+          return;
         case "RunFinished":
           setState("status", "");
           return;
@@ -288,6 +301,8 @@ export const createChatTui = (options: {
         return { kind: "user", text: entry.text };
       case "Assistant":
         return { kind: "assistant", text: entry.text };
+      case "Summary":
+        return { kind: "summary", text: entry.text };
       case "Tool": {
         const call: ToolLine = {
           kind: "tool",
@@ -537,21 +552,24 @@ export const createChatTui = (options: {
     return (
       <box flexDirection="column" width="100%" height="100%" paddingLeft={1} paddingRight={1}>
         <scrollbox stickyScroll stickyStart="bottom" flexGrow={1} flexShrink={1} marginTop={1}>
-          <box
-            border
-            borderStyle="rounded"
-            borderColor={palette().accent}
-            alignSelf="flex-start"
-            flexDirection="column"
-            paddingLeft={1}
-            paddingRight={1}
-            marginBottom={1}
-          >
-            <text fg={palette().text}>
-              <span style={{ fg: palette().accent }}>✻</span> <strong>magentic</strong> ·{" "}
-              {state.agent}
-            </text>
-            <text fg={palette().muted}>{state.gateway}</text>
+          <box flexDirection="row" flexShrink={0} marginBottom={1}>
+            <Logo palette={palette()} />
+            {/* One row beside a three-row mark, level with the dot. */}
+            <box
+              flexDirection="row"
+              justifyContent="space-between"
+              alignItems="center"
+              flexGrow={1}
+              flexShrink={1}
+              marginLeft={2}
+            >
+              <text fg={palette().text} wrapMode="none" flexShrink={0}>
+                <strong>magentic</strong>
+              </text>
+              <text fg={palette().muted} wrapMode="none" truncate flexShrink={1} marginLeft={2}>
+                {options.directory} · v{options.version}
+              </text>
+            </box>
           </box>
           <For each={state.lines}>
             {(line) => (
@@ -590,11 +608,14 @@ export const createChatTui = (options: {
                           </box>
                         </box>
                       </Match>
-                      <Match when={text().kind === "assistant"}>
+                      <Match when={text().kind === "assistant" || text().kind === "summary"}>
                         <box flexDirection="row" marginBottom={1}>
                           {/* The markdown box grows; the bullet must not shrink to fit. */}
-                          <text fg={palette().text} flexShrink={0}>
-                            {"⏺"}
+                          <text
+                            fg={text().kind === "summary" ? palette().muted : palette().text}
+                            flexShrink={0}
+                          >
+                            {text().kind === "summary" ? "◐" : "⏺"}
                           </text>
                           <box flexGrow={1} flexShrink={1} marginLeft={1}>
                             <markdown
@@ -702,9 +723,8 @@ export const createChatTui = (options: {
                 </text>
               ),
               onSome: ({ provider, model }) => (
-                <text fg={palette().accent} wrapMode="none" truncate>
-                  <span style={{ fg: palette().muted }}>{provider} · </span>
-                  {model}
+                <text fg={palette().muted} wrapMode="none" truncate>
+                  {provider} · <strong style={{ fg: palette().text }}>{model}</strong>
                 </text>
               ),
             })}
