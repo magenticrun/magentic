@@ -127,16 +127,17 @@ job definition. Policy gets both, audit records both.
 ```ts
 class CurrentPrincipal extends Context.Service<CurrentPrincipal, Principal>()("magentic/identity/CurrentPrincipal") {}
 
-class Unauthorized extends Schema.TaggedError<Unauthorized>()("Unauthorized", { reason: ... }, { httpApiStatus: 401 }) {}
+class Unauthorized extends Schema.TaggedError<Unauthorized>()("Unauthorized", { reason: ... }) {}
 
-class Authentication extends HttpApiMiddleware.Service<Authentication, { provides: CurrentPrincipal }>()(
+class Authentication extends RpcMiddleware.Service<Authentication, { provides: CurrentPrincipal }>()(
   "magentic/gateway/Authentication",
-  { security: { bearer: HttpApiSecurity.bearer }, error: Unauthorized, requiredForClient: true },
+  { error: Unauthorized, requiredForClient: true },
 ) {}
 ```
 
-- `Authentication` is attached to every group except `system.health`, `sessions.login`, and
-  `slack`. The middleware's `bearer` handler calls `Identity.authenticate(BearerToken)` and
+- `Authentication` is attached to every RPC except `health` and the login ones; the Slack
+  and MCP HTTP routes check their own signatures. The middleware reads the bearer token from
+  the request headers, calls `Identity.authenticate(BearerToken)` and
   provides `CurrentPrincipal` to the handler. `requiredForClient: true` means the CLI's
   generated client must supply the token, so it cannot be forgotten.
 - `SlackSignature` is a second middleware on the `slack` group with no security scheme. It
@@ -180,8 +181,8 @@ with a body the surfaces can render as "link your account".
 
 ## Testing
 
-- `HttpApiTest.groups` with `Authentication` provided by a memory `SessionStore` seeded with a
-  known token.
+- `RpcTest.makeClient(Api)` with `Authentication` provided by a memory `SessionStore` seeded
+  with a known token.
 - Slack signature tests sign fixture bodies with a known secret and assert both the happy path
   and each `reason`.
 - OIDC tests use a fake issuer served by an in-process `HttpApi` with a generated JWKS, so no

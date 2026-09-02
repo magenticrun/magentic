@@ -1,18 +1,22 @@
 import { layerServer } from "@magentic/gateway";
-import { Api } from "@magentic/protocol";
-import { Effect, flow, Layer, Schedule, Schema } from "effect";
-import { HttpClient, HttpClientRequest } from "effect/unstable/http";
-import { HttpApiClient } from "effect/unstable/httpapi";
+import { Api, RPC_PATH } from "@magentic/protocol";
+import { Effect, Layer, Schedule, Schema } from "effect";
+import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 
 export class GatewayUnreachable extends Schema.TaggedError<GatewayUnreachable>()(
   "GatewayUnreachable",
   { url: Schema.String, message: Schema.String },
 ) {}
 
+/** A typed client for the gateway at `baseUrl`, alive as long as the scope. */
 export const gatewayClient = (baseUrl: string) =>
-  HttpApiClient.make(Api, {
-    transformClient: HttpClient.mapRequest(flow(HttpClientRequest.prependUrl(baseUrl))),
-  });
+  RpcClient.make(Api).pipe(
+    Effect.provide(
+      RpcClient.layerProtocolHttp({ url: `${baseUrl}${RPC_PATH}` }).pipe(
+        Layer.provide(RpcSerialization.layerNdjson),
+      ),
+    ),
+  );
 
 const isLocal = (url: URL) => url.hostname === "localhost" || url.hostname === "127.0.0.1";
 

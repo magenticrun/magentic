@@ -6,20 +6,58 @@ import { Identity } from "@magentic/identity";
 import { fakeProviderPlugin, type FakeScript } from "@magentic/model";
 import { AgentDefinition, define, ModelCatalog } from "@magentic/plugin";
 import { Policy } from "@magentic/policy";
-import { Api } from "@magentic/protocol";
+import { Api, RPC_PATH } from "@magentic/protocol";
 import { fileToolsPlugin, WorkspaceRoot } from "@magentic/tools";
-import { Effect, FileSystem, Layer, Ref, Stream } from "effect";
-import { FetchHttpClient, HttpServer } from "effect/unstable/http";
-import { HttpApiTest } from "effect/unstable/httpapi";
-import { ToolCallGuardLive } from "./Guard.ts";
+import { DateTime, Effect, FileSystem, Layer, Ref, Stream } from "effect";
 import {
-  AgentsApiHandlersNoDeps,
-  ConversationsApiHandlersNoDeps,
-  PluginsApiHandlers,
-  SystemApiHandlers,
-} from "./Handlers.ts";
+  FetchHttpClient,
+  HttpClient,
+  HttpClientRequest,
+  HttpClientResponse,
+  HttpRouter,
+} from "effect/unstable/http";
+import {
+  type Rpc,
+  RpcClient,
+  type RpcGroup,
+  RpcSerialization,
+  RpcServer,
+  RpcTest,
+} from "effect/unstable/rpc";
+import { ToolCallGuardLive } from "./Guard.ts";
+import { RpcHandlers } from "./Handlers.ts";
 
-const makeClient = HttpApiTest.groups(Api, ["system", "agents", "conversations", "plugins"]);
+/** The handlers called directly, no server or serialization between. */
+const makeClient = RpcTest.makeClient(Api);
+
+/**
+ * The whole way a surface goes: RpcClient, newline-delimited JSON over HTTP,
+ * RpcServer, the handlers.
+ */
+const overTheWire = Effect.gen(function* () {
+  const handlers = yield* Effect.context<Rpc.ToHandler<RpcGroup.Rpcs<typeof Api>>>();
+  const { handler, dispose } = HttpRouter.toWebHandler(
+    RpcServer.layerHttp({ group: Api, path: RPC_PATH, protocol: "http" }).pipe(
+      Layer.provide([Layer.succeedContext(handlers), RpcSerialization.layerNdjson]),
+    ),
+  );
+  yield* Effect.addFinalizer(() => Effect.promise(dispose));
+  // The server's web handler stands in for the network, so no port is opened.
+  const http = HttpClient.make((request, _url, signal) =>
+    HttpClientRequest.toWeb(request, { signal }).pipe(
+      Effect.flatMap((web) => Effect.promise(() => handler(web))),
+      Effect.map((response) => HttpClientResponse.fromWeb(request, response)),
+      Effect.orDie,
+    ),
+  );
+  return yield* RpcClient.make(Api).pipe(
+    Effect.provide(
+      RpcClient.layerProtocolHttp({ url: `http://gateway${RPC_PATH}` }).pipe(
+        Layer.provide([RpcSerialization.layerNdjson, Layer.succeed(HttpClient.HttpClient, http)]),
+      ),
+    ),
+  );
+});
 
 const triage = new AgentDefinition({
   name: "triage",
@@ -71,12 +109,7 @@ const ServicesLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer).pipe(
   Layer.provideMerge(HostLayer),
 );
 
-const HandlersLayer = Layer.mergeAll(
-  SystemApiHandlers,
-  Layer.mergeAll(AgentsApiHandlersNoDeps, ConversationsApiHandlersNoDeps, PluginsApiHandlers).pipe(
-    Layer.provideMerge(ServicesLayer),
-  ),
-);
+const HandlersLayer = RpcHandlers.pipe(Layer.provideMerge(ServicesLayer));
 
 const PlatformLayer = Layer.mergeAll(
   BunServices.layer,
@@ -84,14 +117,10 @@ const PlatformLayer = Layer.mergeAll(
   ModelCatalog.layerSnapshot,
 );
 
-/** The handlers on the real platform; the HTTP test services beside them, not under them. */
-const TestLayer = Layer.mergeAll(
-  HandlersLayer.pipe(Layer.provideMerge(PlatformLayer)),
-  HttpServer.layerServices,
-);
+const TestLayer = HandlersLayer.pipe(Layer.provideMerge(PlatformLayer));
 
 layer(TestLayer)("gateway api", (it) => {
-  it.effect("GET /health", () =>
+  it.effect("answers health", () =>
     Effect.gen(function* () {
       const client = yield* makeClient;
       yield* client.health();
@@ -101,23 +130,23 @@ layer(TestLayer)("gateway api", (it) => {
   it.effect("lists registered agents", () =>
     Effect.gen(function* () {
       const client = yield* makeClient;
-      const agents = yield* client.agents.list();
+      const agents = yield* client.listAgents();
       assert.deepStrictEqual(
         agents.map((a) => a.name),
         ["triage"],
       );
 
-      const found = yield* client.agents.get({ params: { name: "triage" } });
+      const found = yield* client.getAgent({ name: "triage" });
       assert.deepStrictEqual([...found.tools], ["read_file"]);
       // No model configured, so the first signed-in provider's default.
       assert.strictEqual(found.model, "fake/fake");
     }),
   );
 
-  it.effect("returns 404 for unknown agents", () =>
+  it.effect("fails for unknown agents", () =>
     Effect.gen(function* () {
       const client = yield* makeClient;
-      const error = yield* client.agents.get({ params: { name: "nope" } }).pipe(Effect.flip);
+      const error = yield* client.getAgent({ name: "nope" }).pipe(Effect.flip);
       assert.strictEqual(error._tag, "AgentNotFound");
     }),
   );
@@ -125,7 +154,7 @@ layer(TestLayer)("gateway api", (it) => {
   it.effect("lists plugins with what each contributed", () =>
     Effect.gen(function* () {
       const client = yield* makeClient;
-      const plugins = yield* client.plugins.list();
+      const plugins = yield* client.listPlugins();
       assert.deepStrictEqual(
         plugins.map((p) => [p.id, p.status, [...p.tools], [...p.agents]]),
         [
@@ -142,14 +171,12 @@ layer(TestLayer)("gateway api", (it) => {
     }),
   );
 
-  it.effect("streams run events over SSE and audits the run", () =>
+  it.effect("streams run events and audits the run", () =>
     Effect.gen(function* () {
       const client = yield* makeClient;
-      const stream = yield* client.agents.run({
-        params: { name: "triage" },
-        payload: { input: "hello there" },
-      });
-      const events = yield* Stream.runCollect(stream);
+      const events = yield* Stream.runCollect(
+        client.run({ agent: "triage", input: "hello there" }),
+      );
       assert.deepStrictEqual(
         events.map((e) => e._tag),
         ["RunStarted", "TextDelta", "TokenUsage", "RunFinished"],
@@ -168,17 +195,17 @@ layer(TestLayer)("gateway api", (it) => {
   it.effect("runs on the model the request names", () =>
     Effect.gen(function* () {
       const client = yield* makeClient;
-      const chosen = yield* client.agents
-        .run({ params: { name: "triage" }, payload: { input: "hi", model: "fake/fake" } })
-        .pipe(Effect.flatMap(Stream.runCollect));
+      const chosen = yield* Stream.runCollect(
+        client.run({ agent: "triage", input: "hi", model: "fake/fake" }),
+      );
       assert.deepStrictEqual(
         chosen.map((e) => e._tag),
         ["RunStarted", "TextDelta", "TokenUsage", "RunFinished"],
       );
 
-      const unknown = yield* client.agents
-        .run({ params: { name: "triage" }, payload: { input: "hi", model: "fake/nope" } })
-        .pipe(Effect.flatMap(Stream.runCollect));
+      const unknown = yield* Stream.runCollect(
+        client.run({ agent: "triage", input: "hi", model: "fake/nope" }),
+      );
       const failure = unknown.at(-1);
       assert.isTrue(failure?._tag === "RunFailed" && failure.message.includes('no model "nope"'));
     }),
@@ -187,27 +214,24 @@ layer(TestLayer)("gateway api", (it) => {
   it.effect("keeps conversations to list, replay, and delete", () =>
     Effect.gen(function* () {
       const client = yield* makeClient;
-      const events = yield* client.agents
-        .run({
-          params: { name: "triage" },
-          payload: { input: "read notes", directory: "/work/here" },
-        })
-        .pipe(Effect.flatMap(Stream.runCollect));
+      const events = yield* Stream.runCollect(
+        client.run({ agent: "triage", input: "read notes", directory: "/work/here" }),
+      );
       const started = events[0];
       const id = started?._tag === "RunStarted" ? started.conversationId : "";
 
-      const listed = yield* client.conversations.list({ query: { agent: "triage" } });
+      const listed = yield* client.listConversations({ agent: "triage" });
       const found = listed.find((c) => c.id === id);
       assert.isTrue(found !== undefined && found.title === "read notes" && found.messages === 5);
       assert.strictEqual(found?.usage?.calls, 2);
-      const none = yield* client.conversations.list({ query: { agent: "nobody" } });
+      const none = yield* client.listConversations({ agent: "nobody" });
       assert.deepStrictEqual(none, []);
-      const here = yield* client.conversations.list({ query: { directory: "/work/here" } });
+      const here = yield* client.listConversations({ directory: "/work/here" });
       assert.isTrue(here.some((c) => c.id === id));
-      const elsewhere = yield* client.conversations.list({ query: { directory: "/work/there" } });
+      const elsewhere = yield* client.listConversations({ directory: "/work/there" });
       assert.isFalse(elsewhere.some((c) => c.id === id));
 
-      const transcript = yield* client.conversations.transcript({ params: { id } });
+      const transcript = yield* client.transcript({ id });
       assert.deepStrictEqual(
         transcript.map((e) => e._tag),
         ["User", "Tool", "Assistant"],
@@ -222,46 +246,39 @@ layer(TestLayer)("gateway api", (it) => {
       );
 
       // A rename changes the title and nothing else; a later run keeps it.
-      const renamed = yield* client.conversations.rename({
-        params: { id },
-        payload: { title: "milk run" },
-      });
+      const renamed = yield* client.rename({ id, title: "milk run" });
       assert.strictEqual(renamed.title, "milk run");
       assert.strictEqual(renamed.messages, 5);
-      const unknown = yield* client.conversations
-        .rename({ params: { id: "nope" }, payload: { title: "x" } })
-        .pipe(Effect.flip);
+      const unknown = yield* client.rename({ id: "nope", title: "x" }).pipe(Effect.flip);
       assert.strictEqual(unknown._tag, "ConversationNotFound");
 
       // Continuing it carries the history: the fake answers a tool result with "read it".
-      const again = yield* client.agents
-        .run({ params: { name: "triage" }, payload: { input: "more", conversationId: id } })
-        .pipe(Effect.flatMap(Stream.runCollect));
-      const continued = yield* client.conversations.get({ params: { id } });
+      const again = yield* Stream.runCollect(
+        client.run({ agent: "triage", input: "more", conversationId: id }),
+      );
+      const continued = yield* client.getConversation({ id });
       assert.strictEqual(continued.messages, 7);
       assert.strictEqual(continued.title, "milk run");
 
       // Compacting folds the context into a summary; the fake writes back the request's last text.
-      const compacted = yield* client.conversations.compact({ params: { id } });
+      const compacted = yield* client.compact({ id });
       assert.strictEqual(compacted.messagesBefore, 7);
       assert.strictEqual(compacted.messagesAfter, 2);
       assert.match(compacted.summary, /^echo: /);
-      const folded = yield* client.conversations.transcript({ params: { id } });
+      const folded = yield* client.transcript({ id });
       assert.deepStrictEqual(
         folded.map((e) => e._tag),
         ["User", "Tool", "Assistant", "User", "Assistant", "Summary"],
       );
       // Nothing new since the summary, so a second compaction has nothing to fold.
-      const nothing = yield* client.conversations.compact({ params: { id } }).pipe(Effect.flip);
+      const nothing = yield* client.compact({ id }).pipe(Effect.flip);
       assert.strictEqual(nothing._tag, "CompactionFailed");
-      const missing = yield* client.conversations
-        .compact({ params: { id: "nope" } })
-        .pipe(Effect.flip);
+      const missing = yield* client.compact({ id: "nope" }).pipe(Effect.flip);
       assert.strictEqual(missing._tag, "ConversationNotFound");
       assert.strictEqual(again.at(-1)?._tag, "RunFinished");
 
-      yield* client.conversations.remove({ params: { id } });
-      const gone = yield* client.conversations.get({ params: { id } }).pipe(Effect.flip);
+      yield* client.removeConversation({ id });
+      const gone = yield* client.getConversation({ id }).pipe(Effect.flip);
       assert.strictEqual(gone._tag, "ConversationNotFound");
     }),
   );
@@ -269,11 +286,7 @@ layer(TestLayer)("gateway api", (it) => {
   it.effect("audits every tool call the run makes", () =>
     Effect.gen(function* () {
       const client = yield* makeClient;
-      const stream = yield* client.agents.run({
-        params: { name: "triage" },
-        payload: { input: "read notes" },
-      });
-      const events = yield* Stream.runCollect(stream);
+      const events = yield* Stream.runCollect(client.run({ agent: "triage", input: "read notes" }));
       assert.deepStrictEqual(
         events.map((e) => e._tag),
         [
@@ -291,6 +304,36 @@ layer(TestLayer)("gateway api", (it) => {
         recorded.slice(-2).map((e) => e.action),
         ["run.started", "tool.called"],
       );
+    }),
+  );
+
+  it.effect("carries streams, dates, bytes, and errors over the wire", () =>
+    Effect.gen(function* () {
+      const client = yield* overTheWire;
+      yield* client.health();
+      const events = yield* Stream.runCollect(
+        client.run({
+          agent: "triage",
+          input: "hello there",
+          attachments: [{ mediaType: "image/png", data: new Uint8Array([137, 80, 78, 71]) }],
+        }),
+      );
+      assert.deepStrictEqual(
+        events.map((e) => e._tag),
+        ["RunStarted", "TextDelta", "TokenUsage", "RunFinished"],
+      );
+      const started = events[0];
+      const id = started?._tag === "RunStarted" ? started.conversationId : "";
+      const found = yield* client.getConversation({ id });
+      assert.isTrue(DateTime.isDateTime(found.updatedAt));
+      assert.strictEqual(found.title, "hello there");
+
+      const error = yield* client.getAgent({ name: "nope" }).pipe(Effect.flip);
+      assert.strictEqual(error._tag, "AgentNotFound");
+      const missing = yield* Stream.runCollect(client.run({ agent: "nobody", input: "x" })).pipe(
+        Effect.flip,
+      );
+      assert.strictEqual(missing._tag, "AgentNotFound");
     }),
   );
 });

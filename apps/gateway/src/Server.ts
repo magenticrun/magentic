@@ -5,19 +5,14 @@ import { Identity } from "@magentic/identity";
 import { layerCredentialStores, modelPlugins } from "@magentic/model";
 import { define, ModelCatalog } from "@magentic/plugin";
 import { Policy } from "@magentic/policy";
-import { Api } from "@magentic/protocol";
+import { Api, RPC_PATH } from "@magentic/protocol";
 import { fileToolsPlugin, WorkspaceRoot } from "@magentic/tools";
 import { Config, Effect, Layer } from "effect";
-import { HttpRouter, FetchHttpClient } from "effect/unstable/http";
-import { HttpApiBuilder, HttpApiScalar } from "effect/unstable/httpapi";
+import { FetchHttpClient, HttpRouter, HttpServerResponse } from "effect/unstable/http";
+import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import { configAgentsPlugin } from "./ConfigAgents.ts";
 import { ToolCallGuardLive } from "./Guard.ts";
-import {
-  AgentsApiHandlersNoDeps,
-  ConversationsApiHandlersNoDeps,
-  PluginsApiHandlers,
-  SystemApiHandlers,
-} from "./Handlers.ts";
+import { RpcHandlers } from "./Handlers.ts";
 import { configDir, dataDir, loadExternalPlugin, loadGatewayConfig } from "./Plugins.ts";
 
 /** The one agent every gateway has until `agents/*.yaml` exists. */
@@ -95,20 +90,15 @@ export const ServicesLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer).pipe(
   ),
 );
 
-export const ApiRoutes = HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
-  Layer.provide([
-    SystemApiHandlers,
-    Layer.mergeAll(
-      AgentsApiHandlersNoDeps,
-      ConversationsApiHandlersNoDeps,
-      PluginsApiHandlers,
-    ).pipe(Layer.provide(ServicesLayer)),
-  ]),
+/** The RPCs at `/rpc`: newline-delimited JSON, a run's events streamed in the response body. */
+export const RpcRoute = RpcServer.layerHttp({ group: Api, path: RPC_PATH, protocol: "http" }).pipe(
+  Layer.provide([RpcHandlers.pipe(Layer.provide(ServicesLayer)), RpcSerialization.layerNdjson]),
 );
 
-export const DocsRoute = HttpApiScalar.layer(Api, { path: "/docs" });
+/** For anything that only wants to know the gateway is up, curl included. */
+export const HealthRoute = HttpRouter.add("GET", "/health", HttpServerResponse.empty());
 
-export const AllRoutes = Layer.mergeAll(ApiRoutes, DocsRoute);
+export const AllRoutes = Layer.mergeAll(RpcRoute, HealthRoute);
 
 /** The whole gateway on one port. Building the layer starts serving. `quiet` drops request logs. */
 export const layerServer = (port: number, options: { readonly quiet?: boolean } = {}) =>

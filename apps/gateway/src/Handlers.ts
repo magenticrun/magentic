@@ -20,25 +20,7 @@ import {
   RunDenied,
   type RunRequest,
 } from "@magentic/protocol";
-import { Config, DateTime, Effect, Option } from "effect";
-import { HttpApiBuilder } from "effect/unstable/httpapi";
-
-export const SystemApiHandlers = HttpApiBuilder.group(
-  Api,
-  "system",
-  Effect.fn(function* (handlers) {
-    return handlers.handleAll({ health: () => Effect.void });
-  }),
-);
-
-export const PluginsApiHandlers = HttpApiBuilder.group(
-  Api,
-  "plugins",
-  Effect.fn(function* (handlers) {
-    const host = yield* PluginHost;
-    return handlers.handleAll({ list: () => host.plugins });
-  }),
-);
+import { Config, DateTime, Effect, Option, Stream } from "effect";
 
 /** Until sessions exist, the OS user is the caller. */
 const localSubject = Config.string("USER").pipe(Config.withDefault("local"));
@@ -63,14 +45,17 @@ const owned = Effect.fn("Gateway.ownedConversation")(function* (
   return found.value;
 });
 
-/** Handlers without their dependencies, so tests can supply their own registry and runner. */
-export const AgentsApiHandlersNoDeps = HttpApiBuilder.group(
-  Api,
-  "agents",
-  Effect.fn(function* (handlers) {
+/** Every RPC the gateway answers. Needs the runner, the registries, and identity, policy, and audit. */
+export const RpcHandlers = Api.toLayer(
+  Effect.gen(function* () {
+    const host = yield* PluginHost;
     const registry = yield* AgentRegistry;
     const models = yield* ModelRegistry;
     const runner = yield* Runner;
+    const store = yield* ConversationStore;
+    const caller = callerVia(yield* Identity);
+    const policy = yield* Policy;
+    const audit = yield* Audit;
 
     /** What a surface may know, with the model the agent would run on today. */
     const toInfo = Effect.fn("Gateway.toInfo")(function* (agent: AgentDefinition) {
@@ -78,10 +63,6 @@ export const AgentsApiHandlersNoDeps = HttpApiBuilder.group(
       const base = { name: agent.name, description: agent.description, tools: agent.tools };
       return new AgentInfo(Option.isSome(resolved) ? { ...base, model: resolved.value.ref } : base);
     });
-    const caller = callerVia(yield* Identity);
-    const policy = yield* Policy;
-    const audit = yield* Audit;
-    const conversations = yield* ConversationStore;
 
     const run = Effect.fn("Gateway.run")(function* (name: string, payload: RunRequest) {
       const { input, attachments, conversationId, model, directory } = payload;
@@ -89,7 +70,7 @@ export const AgentsApiHandlersNoDeps = HttpApiBuilder.group(
       const principal = yield* caller;
       // Continuing a conversation means one of the caller's own. An unknown id starts one.
       if (conversationId !== undefined) {
-        const found = yield* conversations.get(conversationId);
+        const found = yield* store.get(conversationId);
         if (Option.isSome(found) && found.value.principal !== principal.id) {
           return yield* new ConversationNotFound({ id: conversationId });
         }
@@ -124,24 +105,6 @@ export const AgentsApiHandlersNoDeps = HttpApiBuilder.group(
         directory: Option.fromNullishOr(directory),
       });
     });
-
-    return handlers.handleAll({
-      list: () => registry.list.pipe(Effect.flatMap(Effect.forEach(toInfo))),
-      get: ({ params }) => registry.get(params.name).pipe(Effect.flatMap(toInfo)),
-      run: ({ params, payload }) => run(params.name, payload),
-    });
-  }),
-);
-
-/** Handlers without their dependencies, so tests can supply their own store and runner. */
-export const ConversationsApiHandlersNoDeps = HttpApiBuilder.group(
-  Api,
-  "conversations",
-  Effect.fn(function* (handlers) {
-    const store = yield* ConversationStore;
-    const registry = yield* AgentRegistry;
-    const runner = yield* Runner;
-    const caller = callerVia(yield* Identity);
 
     const list = Effect.fn("Gateway.conversations.list")(function* (
       agent: string | undefined,
@@ -194,13 +157,18 @@ export const ConversationsApiHandlersNoDeps = HttpApiBuilder.group(
         .pipe(Effect.mapError((error) => new CompactionFailed({ id, message: error.message })));
     });
 
-    return handlers.handleAll({
-      list: ({ query }) => list(query.agent, query.directory),
-      get: ({ params }) => Effect.flatMap(caller, (p) => owned(store, p.id, params.id)),
-      transcript: ({ params }) => transcript(params.id),
-      rename: ({ params, payload }) => rename(params.id, payload.title),
-      remove: ({ params }) => remove(params.id),
-      compact: ({ params }) => compact(params.id),
+    return Api.of({
+      health: () => Effect.void,
+      listAgents: () => registry.list.pipe(Effect.flatMap(Effect.forEach(toInfo))),
+      getAgent: ({ name }) => registry.get(name).pipe(Effect.flatMap(toInfo)),
+      run: ({ agent, ...request }) => Stream.unwrap(run(agent, request)),
+      listConversations: ({ agent, directory }) => list(agent, directory),
+      getConversation: ({ id }) => Effect.flatMap(caller, (p) => owned(store, p.id, id)),
+      transcript: ({ id }) => transcript(id),
+      rename: ({ id, title }) => rename(id, title),
+      removeConversation: ({ id }) => remove(id),
+      compact: ({ id }) => compact(id),
+      listPlugins: () => host.plugins,
     });
   }),
 );

@@ -7,7 +7,7 @@ export const resolveAgent = Effect.fn("Cli.resolveAgent")(function* (
   client: GatewayClient,
   wanted: Option.Option<string>,
 ) {
-  const agents = yield* client.agents.list();
+  const agents = yield* client.listAgents();
   if (Option.isSome(wanted)) {
     const found = agents.find((agent) => agent.name === wanted.value);
     return found ?? (yield* new AgentNotFound({ name: wanted.value }));

@@ -57,14 +57,14 @@ const agents = Command.make(
   Effect.fn(function* () {
     const root = yield* magentic;
     const client = yield* gatewayClient(root.gateway);
-    const list = yield* client.agents.list();
+    const list = yield* client.listAgents();
     if (list.length === 0) {
       return yield* Console.log("no agents registered");
     }
     for (const agent of list) {
       yield* Console.log(`${agent.name}\t${agent.description}`);
     }
-  }),
+  }, Effect.scoped),
 ).pipe(Command.withDescription("List agents hosted by the gateway"));
 
 const runCommand = Command.make(
@@ -82,7 +82,7 @@ const pluginList = Command.make(
   Effect.fn(function* () {
     const root = yield* magentic;
     const { client } = yield* ensureGateway(root.gateway);
-    const plugins = yield* client.plugins.list();
+    const plugins = yield* client.listPlugins();
     for (const plugin of plugins) {
       const contributed = [
         ...plugin.tools.map((t) => `tool ${t}`),
