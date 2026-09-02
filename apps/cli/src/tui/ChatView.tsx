@@ -1,7 +1,12 @@
-import type { TextareaOptions, TextareaRenderable, ThemeMode } from "@opentui/core";
+import {
+  decodePasteBytes,
+  type TextareaOptions,
+  type TextareaRenderable,
+  type ThemeMode,
+} from "@opentui/core";
 import { parseModelRef, type Picked, type Picker } from "@magentic/plugin";
-import type { RunEvent, TranscriptEntry } from "@magentic/protocol";
-import { type JSX, useKeyboard, useRenderer } from "@opentui/solid";
+import type { Attachment, RunEvent, TranscriptEntry } from "@magentic/protocol";
+import { type JSX, useKeyboard, usePaste, useRenderer } from "@opentui/solid";
 import { Option, Predicate, type Schema } from "effect";
 import {
   batch,
@@ -15,6 +20,21 @@ import {
   Switch,
 } from "solid-js";
 import { createStore, produce } from "solid-js/store";
+import { markdownStyleFor } from "./Markdown.ts";
+import {
+  attached,
+  composerStyleFor,
+  FOLD_STYLE,
+  type Folded,
+  imageAtPath,
+  imagePlaceholder,
+  normalise,
+  readClipboard,
+  shouldFold,
+  textPlaceholder,
+  toAttachment,
+  unfold,
+} from "./Paste.ts";
 import { PickerView } from "./Picker.tsx";
 import { type Palette, paletteFor } from "./Theme.ts";
 
@@ -153,7 +173,8 @@ export const createChatTui = (options: {
   readonly contextWindow: number;
   /** Slash commands the composer completes. */
   readonly commands: ReadonlyArray<CommandInfo>;
-  readonly onSubmit: (text: string) => void;
+  /** The message with pasted text unfolded, and the images pasted into it. */
+  readonly onSubmit: (text: string, attachments: ReadonlyArray<Attachment>) => void;
   /** Esc, or ctrl+c, while a run is in flight. */
   readonly onInterrupt: () => void;
   readonly onExit: () => void;
@@ -297,7 +318,7 @@ export const createChatTui = (options: {
         } else if (key.name === "tab" && chosen !== undefined) {
           complete(chosen);
         } else if (isEnter(key.name) && chosen !== undefined && !state.busy) {
-          options.onSubmit(`/${chosen.name}`);
+          options.onSubmit(`/${chosen.name}`, []);
           clear();
         } else if (key.name === "escape") {
           setDismissed(true);
@@ -312,6 +333,12 @@ export const createChatTui = (options: {
         if (state.busy && dialog() === undefined) {
           options.onInterrupt();
         }
+        return;
+      }
+      if (key.ctrl && key.name === "v" && dialog() === undefined) {
+        // The terminal pastes text itself; ctrl+v is for what it cannot paste, an image.
+        key.preventDefault();
+        void pasteClipboard();
         return;
       }
       if (key.ctrl && key.name === "c") {
@@ -335,6 +362,7 @@ export const createChatTui = (options: {
     renderer.on("theme_mode", onMode);
     onCleanup(() => renderer.off("theme_mode", onMode));
     const palette = () => paletteFor(mode());
+    const markdownStyle = () => markdownStyleFor(palette());
 
     // Ticks since the run began; drives the spinner and the elapsed seconds.
     const [ticks, setTicks] = createSignal(0);
@@ -369,8 +397,12 @@ export const createChatTui = (options: {
         editor.setViewport(viewport.offsetX, top, viewport.width, viewport.height, false);
       }
     };
+    // What the composer's placeholders stand for; cleared with the text.
+    let folds: Array<Folded> = [];
     const clear = () => {
+      composer?.extmarks.clear();
       composer?.setText("");
+      folds = [];
       setRows(1);
       setDraft("");
     };
@@ -378,13 +410,67 @@ export const createChatTui = (options: {
       if (composer === undefined) {
         return;
       }
-      const text = composer.plainText.trim();
-      if (text.length === 0 || state.busy || dialog() !== undefined) {
+      const draft = composer.plainText.trim();
+      if (draft.length === 0 || state.busy || dialog() !== undefined) {
         return;
       }
-      options.onSubmit(text);
+      options.onSubmit(unfold(draft, folds), attached(draft, folds));
       clear();
     };
+
+    /** Put a placeholder at the cursor, styled and moved over as one unit. */
+    const fold = (entry: Folded) => {
+      if (composer === undefined) {
+        return;
+      }
+      const start = composer.cursorOffset;
+      composer.insertText(`${entry.placeholder} `);
+      const range = { start, end: start + entry.placeholder.length, virtual: true };
+      const styleId = composerStyleFor(palette()).getStyleId(FOLD_STYLE);
+      composer.extmarks.create(styleId === null ? range : { ...range, styleId });
+      folds = [...folds, entry];
+    };
+    /** Long pastes fold; a placeholder pasted back unfolds first so it never nests. */
+    const pasteText = (raw: string) => {
+      const text = unfold(normalise(raw), folds);
+      if (!shouldFold(text)) {
+        composer?.insertText(text);
+        return;
+      }
+      const index = folds.filter((f) => f.kind === "text").length + 1;
+      fold({ kind: "text", placeholder: textPlaceholder(index, text), text });
+    };
+    const attach = (attachment: Attachment) => {
+      const index = folds.filter((f) => f.kind === "file").length + 1;
+      fold({ kind: "file", placeholder: imagePlaceholder(index), attachment });
+    };
+    /** Pasted text is an image when it is the path of one; a dropped file pastes its path. */
+    const pasteTextOrPath = async (text: string) => {
+      const image = await imageAtPath(text);
+      if (image === undefined) {
+        pasteText(text);
+      } else {
+        attach(image);
+      }
+    };
+    const pasteClipboard = async () => {
+      const held = await readClipboard();
+      if (held.kind === "image") {
+        attach(toAttachment(held.mediaType, held.bytes));
+      } else if (held.kind === "text") {
+        await pasteTextOrPath(held.text);
+      }
+    };
+    // Bracketed paste from the terminal. An empty one is how some terminals
+    // paste an image, so the clipboard is read directly then.
+    usePaste((event) => {
+      if (dialog() !== undefined) {
+        return;
+      }
+      event.preventDefault();
+      const text = decodePasteBytes(event.bytes);
+      void (text.trim().length === 0 ? pasteClipboard() : pasteTextOrPath(text));
+    });
 
     // While the draft is one word starting with a slash, the commands it could
     // become are listed under the composer: tab completes, enter runs.
@@ -495,17 +581,29 @@ export const createChatTui = (options: {
                   {(text) => (
                     <Switch>
                       <Match when={text().kind === "user"}>
-                        <box
-                          alignSelf="flex-start"
-                          backgroundColor={palette().surface}
-                          paddingLeft={1}
-                          paddingRight={1}
-                          marginBottom={1}
-                        >
-                          <text fg={palette().muted}>
-                            {"> "}
-                            {text().text}
+                        <box flexDirection="row" marginBottom={1}>
+                          <text fg={palette().muted} flexShrink={0}>
+                            {">"}
                           </text>
+                          <box flexGrow={1} flexShrink={1} marginLeft={1}>
+                            <text fg={palette().muted}>{text().text}</text>
+                          </box>
+                        </box>
+                      </Match>
+                      <Match when={text().kind === "assistant"}>
+                        <box flexDirection="row" marginBottom={1}>
+                          {/* The markdown box grows; the bullet must not shrink to fit. */}
+                          <text fg={palette().text} flexShrink={0}>
+                            {"⏺"}
+                          </text>
+                          <box flexGrow={1} flexShrink={1} marginLeft={1}>
+                            <markdown
+                              content={text().text}
+                              syntaxStyle={markdownStyle()}
+                              fg={palette().text}
+                              streaming={state.busy && line === state.lines.at(-1)}
+                            />
+                          </box>
                         </box>
                       </Match>
                       <Match when={true}>
@@ -585,6 +683,7 @@ export const createChatTui = (options: {
             height={rows()}
             wrapMode="word"
             keyBindings={COMPOSER_KEYS}
+            syntaxStyle={composerStyleFor(palette())}
             textColor={palette().text}
             focusedTextColor={palette().text}
             cursorColor={palette().text}

@@ -1,12 +1,26 @@
 import type { AgentDefinition } from "@magentic/plugin";
 import {
+  type Attachment,
   Conversation,
   type ConversationUsage,
   type Principal,
   type RunEvent,
   type TokenUsage,
 } from "@magentic/protocol";
-import { Context, DateTime, Effect, Layer, Option, Queue, Ref, type Schema, Stream } from "effect";
+import {
+  Context,
+  DateTime,
+  Effect,
+  Encoding,
+  Layer,
+  Option,
+  Predicate,
+  Queue,
+  Ref,
+  Result,
+  type Schema,
+  Stream,
+} from "effect";
 import { Chat, LanguageModel, Prompt, type Response, type Tool } from "effect/unstable/ai";
 import { estimateContext } from "./ContextEstimate.ts";
 import { ConversationStore } from "./ConversationStore.ts";
@@ -19,6 +33,8 @@ export interface RunOptions {
   readonly agent: AgentDefinition;
   readonly principal: Principal;
   readonly input: string;
+  /** Files that go with the input, as parts of the same user message. */
+  readonly attachments: ReadonlyArray<Attachment>;
   /** Continue this conversation; a fresh one starts otherwise. */
   readonly conversationId: Option.Option<string>;
   /** A `provider/model` reference to run on instead of the agent's own. */
@@ -26,6 +42,65 @@ export interface RunOptions {
   /** Where the surface is working; kept on the conversation from its first run. */
   readonly directory: Option.Option<string>;
 }
+
+/** The input as the model sees it: bare text, or one user message carrying the files too. */
+const promptOf = (input: string, attachments: ReadonlyArray<Attachment>): Prompt.RawInput => {
+  if (attachments.length === 0) {
+    return input;
+  }
+  const message: Prompt.UserMessageEncoded = {
+    role: "user",
+    content: [
+      { type: "text", text: input },
+      ...attachments.map((file): Prompt.FilePartEncoded => ({
+        type: "file",
+        mediaType: file.mediaType,
+        data: file.data,
+        fileName: file.fileName,
+      })),
+    ],
+  };
+  return [message];
+};
+
+/** The prompt with every file part of a user message passed through `f`. */
+const mapFileParts = (
+  prompt: Prompt.Prompt,
+  f: (part: Prompt.FilePart) => Prompt.FilePart,
+): Prompt.Prompt =>
+  Prompt.fromMessages(
+    prompt.content.map((message) =>
+      message.role === "user"
+        ? Prompt.makeMessage("user", {
+            ...message,
+            content: message.content.map((part) => (part.type === "file" ? f(part) : part)),
+          })
+        : message,
+    ),
+  );
+
+/**
+ * Images reach the model as bytes: Effect's clients base64-encode a byte
+ * array but encode a string that already is base64 once more. The history's
+ * JSON cannot hold bytes, so on disk they are base64 and bytes again on load.
+ */
+const forDisk = (prompt: Prompt.Prompt): Prompt.Prompt =>
+  mapFileParts(prompt, (part) =>
+    Predicate.isUint8Array(part.data)
+      ? Prompt.makePart("file", { ...part, data: Encoding.encodeBase64(part.data) })
+      : part,
+  );
+
+const forModel = (prompt: Prompt.Prompt): Prompt.Prompt =>
+  mapFileParts(prompt, (part) => {
+    if (!part.mediaType.startsWith("image/") || !Predicate.isString(part.data)) {
+      return part;
+    }
+    return Result.match(Encoding.decodeBase64(part.data), {
+      onFailure: () => part,
+      onSuccess: (bytes) => Prompt.makePart("file", { ...part, data: bytes }),
+    });
+  });
 
 /** How much of the first input names the conversation. */
 const TITLE_LENGTH = 80;
@@ -79,6 +154,7 @@ export class Runner extends Context.Service<
         if (Option.isSome(saved)) {
           const restored = yield* Effect.option(Chat.fromJson(saved.value));
           if (Option.isSome(restored)) {
+            yield* Ref.update(restored.value.history, forModel);
             return restored.value;
           }
         }
@@ -150,7 +226,7 @@ export class Runner extends Context.Service<
             const loop = Effect.gen(function* () {
               // Resolved per run so a provider signed in after boot is picked up.
               const model = yield* models.languageModel(choice);
-              let prompt: Prompt.RawInput = options.input;
+              let prompt = promptOf(options.input, options.attachments);
               while (true) {
                 const calledTool = yield* Ref.make(false);
                 const usage = yield* Ref.make(Option.none<Response.Usage>());
@@ -226,6 +302,7 @@ export class Runner extends Context.Service<
                 messages: history.content.length,
                 usage: Option.getOrUndefined(usage),
               });
+              yield* Ref.update(chat.history, forDisk);
               yield* conversations.save(info, yield* chat.exportJson);
             }).pipe(
               Effect.catchCause((cause) =>

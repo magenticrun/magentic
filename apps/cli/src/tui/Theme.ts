@@ -12,10 +12,16 @@ export interface Palette {
   readonly placeholder: string;
   /** Logo, spinner and the welcome frame. */
   readonly accent: string;
-  /** Background behind what the person typed. */
-  readonly surface: string;
   readonly success: string;
   readonly error: string;
+  /** Keywords in fenced code. */
+  readonly keyword: string;
+  /** String literals in fenced code. */
+  readonly string: string;
+  /** Comments in fenced code. */
+  readonly comment: string;
+  /** Types, and inline code in prose. */
+  readonly type: string;
 }
 
 const dark: Palette = {
@@ -24,9 +30,12 @@ const dark: Palette = {
   border: "#4b5563",
   placeholder: "#6b7280",
   accent: "#d97757",
-  surface: "#27272a",
   success: "#86efac",
   error: "#fca5a5",
+  keyword: "#c4b5fd",
+  string: "#a5d6a7",
+  comment: "#6b7280",
+  type: "#7dd3fc",
 };
 
 const light: Palette = {
@@ -35,9 +44,12 @@ const light: Palette = {
   border: "#9ca3af",
   placeholder: "#9ca3af",
   accent: "#c2410c",
-  surface: "#e5e7eb",
   success: "#15803d",
   error: "#b91c1c",
+  keyword: "#6d28d9",
+  string: "#15803d",
+  comment: "#9ca3af",
+  type: "#0369a1",
 };
 
 /** Dark when the terminal never answered the theme query, as most terminals are dark. */

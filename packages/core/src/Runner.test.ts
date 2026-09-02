@@ -36,7 +36,15 @@ const script: FakeScript = ({ index, options }) => {
   if (index === 1) {
     return [{ type: "text", text: `tools=${toolNames.join(",")}` }];
   }
-  return [{ type: "text", text: `messages=${options.prompt.content.length}` }];
+  const files = options.prompt.content.flatMap((message) =>
+    message.role === "user" ? message.content.filter((part) => part.type === "file") : [],
+  );
+  return [
+    {
+      type: "text",
+      text: `messages=${options.prompt.content.length} files=${files.map((f) => f.mediaType).join(",")}`,
+    },
+  ];
 };
 
 const WorkspaceLayer = Layer.unwrap(
@@ -78,6 +86,13 @@ layer(TestLayer)("Runner", (it) => {
           agent: reader,
           principal: alice,
           input: "what does hello.txt say?",
+          attachments: [
+            {
+              mediaType: "image/png",
+              data: new Uint8Array([137, 80, 78, 71]),
+              fileName: "shot.png",
+            },
+          ],
           conversationId: Option.none(),
           model: Option.none(),
           directory: Option.some("/work/here"),
@@ -126,14 +141,19 @@ layer(TestLayer)("Runner", (it) => {
           agent: reader,
           principal: alice,
           input: "and again?",
+          attachments: [],
           conversationId: Option.some(conversationId),
           model: Option.none(),
           directory: Option.some("/work/elsewhere"),
         }),
       );
       const reply = second.find((e) => e._tag === "TextDelta");
-      // system + user + assistant(tool call) + tool result + assistant + user = 6 before this turn
-      assert.isTrue(reply?._tag === "TextDelta" && reply.text === "messages=6");
+      // system + user + assistant(tool call) + tool result + assistant + user = 6 before this turn,
+      // and the image sent with the first input is still in the history.
+      assert.strictEqual(
+        reply?._tag === "TextDelta" ? reply.text : reply,
+        "messages=6 files=image/png",
+      );
 
       // What the conversation is, kept on disk beside its history.
       const store = yield* ConversationStore;

@@ -1,8 +1,18 @@
 import { Schema } from "effect";
 
+/** A file sent along with the input, such as an image pasted into a chat. */
+export const Attachment = Schema.Struct({
+  mediaType: Schema.String,
+  /** The bytes; base64 on the wire. */
+  data: Schema.Uint8ArrayFromBase64,
+  fileName: Schema.optional(Schema.String),
+});
+export type Attachment = typeof Attachment.Type;
+
 /** Ask an agent to handle one input, optionally continuing an earlier conversation. */
 export const RunRequest = Schema.Struct({
   input: Schema.NonEmptyString,
+  attachments: Schema.optional(Schema.Array(Attachment)),
   conversationId: Schema.optional(Schema.String),
   /** A `provider/model` reference to run on instead of the agent's own. */
   model: Schema.optional(Schema.String),
