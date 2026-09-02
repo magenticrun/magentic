@@ -1,5 +1,3 @@
-import { AnthropicClient, AnthropicLanguageModel } from "@effect/ai-anthropic";
-import { OpenAiClient, OpenAiLanguageModel } from "@effect/ai-openai";
 import {
   type CatalogModel,
   define,
@@ -14,6 +12,7 @@ import { Effect, Layer, Option, type Redacted } from "effect";
 import { LanguageModel } from "effect/unstable/ai";
 import { HttpClient } from "effect/unstable/http";
 import { apiKeyHint, type ApiKeyProvider, ApiKeyStore } from "../ApiKeys.ts";
+import * as Clients from "../Clients.ts";
 import {
   DEFAULT_ANTHROPIC_MODEL,
   DEFAULT_OPENAI_MODEL,
@@ -51,6 +50,7 @@ interface ApiKeyPluginOptions {
 
 const hidden = (model: CatalogModel) => model.status === "deprecated" || model.status === "alpha";
 
+/** The client for the route's protocol is loaded when the layer is first built. */
 const layerFor = (
   route: ModelRoute,
   model: string,
@@ -60,19 +60,27 @@ const layerFor = (
   const withHttp = Layer.succeed(HttpClient.HttpClient, http);
   switch (route.protocol) {
     case "anthropic":
-      return AnthropicLanguageModel.layer({ model }).pipe(
-        Layer.provide(
-          AnthropicClient.layer({
-            apiKey,
-            apiUrl: route.url,
-            transformClient: route.compatible === true ? anthropicCompatibleClient : undefined,
-          }).pipe(Layer.provide(withHttp)),
+      return Layer.unwrap(
+        Effect.map(Clients.anthropic, ({ AnthropicClient, AnthropicLanguageModel }) =>
+          AnthropicLanguageModel.layer({ model }).pipe(
+            Layer.provide(
+              AnthropicClient.layer({
+                apiKey,
+                apiUrl: route.url,
+                transformClient: route.compatible === true ? anthropicCompatibleClient : undefined,
+              }).pipe(Layer.provide(withHttp)),
+            ),
+          ),
         ),
       );
     case "openai-responses":
-      return OpenAiLanguageModel.layer({ model }).pipe(
-        Layer.provide(
-          OpenAiClient.layer({ apiKey, apiUrl: route.url }).pipe(Layer.provide(withHttp)),
+      return Layer.unwrap(
+        Effect.map(Clients.openai, ({ OpenAiClient, OpenAiLanguageModel }) =>
+          OpenAiLanguageModel.layer({ model }).pipe(
+            Layer.provide(
+              OpenAiClient.layer({ apiKey, apiUrl: route.url }).pipe(Layer.provide(withHttp)),
+            ),
+          ),
         ),
       );
   }

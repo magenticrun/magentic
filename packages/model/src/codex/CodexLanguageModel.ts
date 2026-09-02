@@ -1,7 +1,7 @@
-import { OpenAiLanguageModel } from "@effect/ai-openai";
-import { Layer } from "effect";
+import { Effect, Layer } from "effect";
 import type { LanguageModel } from "effect/unstable/ai";
 import type { HttpClient } from "effect/unstable/http";
+import * as Clients from "../Clients.ts";
 import type { CodexAuth } from "./CodexAuth.ts";
 import { layerClient } from "./CodexClient.ts";
 
@@ -23,11 +23,15 @@ export interface CodexModelOptions {
 export const layer = (
   options: CodexModelOptions = {},
 ): Layer.Layer<LanguageModel.LanguageModel, never, CodexAuth | HttpClient.HttpClient> =>
-  OpenAiLanguageModel.layer({
-    model: options.model ?? DEFAULT_MODEL,
-    config: {
-      store: false,
-      include: ["reasoning.encrypted_content"],
-      reasoning: { effort: options.reasoningEffort ?? "medium", summary: "auto" },
-    },
-  }).pipe(Layer.provide(layerClient));
+  Layer.unwrap(
+    Effect.map(Clients.openai, ({ OpenAiLanguageModel }) =>
+      OpenAiLanguageModel.layer({
+        model: options.model ?? DEFAULT_MODEL,
+        config: {
+          store: false,
+          include: ["reasoning.encrypted_content"],
+          reasoning: { effort: options.reasoningEffort ?? "medium", summary: "auto" },
+        },
+      }).pipe(Layer.provide(layerClient)),
+    ),
+  );

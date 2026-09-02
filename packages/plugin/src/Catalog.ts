@@ -54,29 +54,62 @@ export class CatalogProvider extends Schema.Class<CatalogProvider>(
 /** Providers keyed by models.dev id ("opencode", "zai", ...). */
 export type Catalog = ReadonlyMap<string, CatalogProvider>;
 
+/** A feed's providers, each decoded the first time it is asked for. */
+interface Feed {
+  readonly provider: (id: string) => Effect.Effect<Option.Option<CatalogProvider>>;
+  readonly all: Effect.Effect<Catalog>;
+}
+
 export class CatalogError extends Schema.TaggedError<CatalogError>()("CatalogError", {
   message: Schema.String,
 }) {}
 
 const Entries = Schema.Record(Schema.String, Schema.Unknown);
 
-/** Decodes one provider at a time, so a change in one entry never hides the rest. */
-const decodeCatalog = Effect.fn("ModelCatalog.decode")(function* (input: Schema.Json) {
+/**
+ * The feed with each provider decoded when first asked for, and then kept.
+ * models.dev lists a couple of hundred providers and a chat reads three or
+ * four; decoding them all up front costs more than everything else a chat
+ * does before its first paint. A provider that fails to decode is skipped
+ * with a warning and hides only itself.
+ */
+const feed = Effect.fn("ModelCatalog.feed")(function* (input: Schema.Json) {
   const entries = yield* Schema.decodeUnknownEffect(Entries)(input).pipe(
     Effect.mapError((error) => new CatalogError({ message: error.message })),
   );
-  const catalog = new Map<string, CatalogProvider>();
-  for (const [id, entry] of Object.entries(entries)) {
-    const decoded = yield* Effect.result(Schema.decodeUnknownEffect(CatalogProvider)(entry));
-    if (Result.isFailure(decoded)) {
-      yield* Effect.logWarning(
-        `models catalog: skipping provider "${id}": ${decoded.failure.message}`,
-      );
-      continue;
+  const decoded = new Map<string, Option.Option<CatalogProvider>>();
+  const provider = Effect.fnUntraced(function* (id: string) {
+    const known = decoded.get(id);
+    if (known !== undefined) {
+      return known;
     }
-    catalog.set(id, decoded.success);
-  }
-  return catalog;
+    if (!Object.hasOwn(entries, id)) {
+      return Option.none<CatalogProvider>();
+    }
+    const result = yield* Effect.result(Schema.decodeUnknownEffect(CatalogProvider)(entries[id]));
+    if (Result.isFailure(result)) {
+      yield* Effect.logWarning(
+        `models catalog: skipping provider "${id}": ${result.failure.message}`,
+      );
+    }
+    const found = Result.match(result, {
+      onFailure: () => Option.none<CatalogProvider>(),
+      onSuccess: Option.some,
+    });
+    decoded.set(id, found);
+    return found;
+  });
+  const all = Effect.gen(function* () {
+    const catalog = new Map<string, CatalogProvider>();
+    for (const id of Object.keys(entries)) {
+      const found = yield* provider(id);
+      if (Option.isSome(found)) {
+        catalog.set(id, found.value);
+      }
+    }
+    return catalog;
+  });
+  return { provider, all } satisfies Feed;
 });
 
 const parseJson = (text: string) =>
@@ -119,20 +152,21 @@ export class ModelCatalog extends Context.Service<
     readonly refresh: Effect.Effect<void>;
   }
 >()("magentic/plugin/ModelCatalog") {
-  private static readonly bundled = decodeCatalog(snapshot);
+  /** The snapshot cannot fail to be a record; it is checked in. */
+  private static readonly bundled = feed(snapshot).pipe(Effect.orDie);
 
-  private static readonly over = (all: Effect.Effect<Catalog>, refresh: Effect.Effect<void>) =>
+  private static readonly over = (source: Effect.Effect<Feed>, refresh: Effect.Effect<void>) =>
     ModelCatalog.of({
-      all,
-      provider: (id) => Effect.map(all, (catalog) => Option.fromNullishOr(catalog.get(id))),
+      all: Effect.flatMap(source, (found) => found.all),
+      provider: (id) => Effect.flatMap(source, (found) => found.provider(id)),
       refresh,
     });
 
   /** The bundled snapshot only. For tests and for hosts that must not touch the network. */
   static readonly layerSnapshot = Layer.effect(
     ModelCatalog,
-    Effect.map(ModelCatalog.bundled, (catalog) =>
-      ModelCatalog.over(Effect.succeed(catalog), Effect.void),
+    Effect.map(ModelCatalog.bundled, (bundled) =>
+      ModelCatalog.over(Effect.succeed(bundled), Effect.void),
     ),
   );
 
@@ -155,33 +189,34 @@ export class ModelCatalog extends Context.Service<
       const url = yield* modelsUrl;
       const file = yield* modelsCacheFile;
       const offline = yield* modelsOffline;
-      const bundled = yield* ModelCatalog.bundled;
-      const current = yield* Ref.make(Option.none<Catalog>());
+      const current = yield* Ref.make(Option.none<Feed>());
       const lock = yield* Semaphore.make(1);
 
       const readCache = Effect.gen(function* () {
         if (!(yield* fs.exists(file))) {
-          return Option.none<Catalog>();
+          return Option.none<Feed>();
         }
         const text = yield* fs.readFileString(file);
-        return Option.some(yield* decodeCatalog(yield* parseJson(text)));
+        return Option.some(yield* feed(yield* parseJson(text)));
       }).pipe(
         Effect.catch((error) =>
           Effect.logWarning(`models catalog: ignoring ${file}: ${error.message}`).pipe(
-            Effect.as(Option.none<Catalog>()),
+            Effect.as(Option.none<Feed>()),
           ),
         ),
       );
 
-      const all = lock.withPermit(
+      /** The cache file the first time, read once; the snapshot when there is none. */
+      const source = lock.withPermit(
         Effect.gen(function* () {
           const loaded = yield* Ref.get(current);
           if (Option.isSome(loaded)) {
             return loaded.value;
           }
-          const catalog = Option.getOrElse(yield* readCache, () => bundled);
-          yield* Ref.set(current, Option.some(catalog));
-          return catalog;
+          const cached = yield* readCache;
+          const found = Option.isSome(cached) ? cached.value : yield* ModelCatalog.bundled;
+          yield* Ref.set(current, Option.some(found));
+          return found;
         }),
       );
 
@@ -200,10 +235,10 @@ export class ModelCatalog extends Context.Service<
           Effect.flatMap((response) => response.text),
           Effect.timeout("10 seconds"),
         );
-        const catalog = yield* decodeCatalog(yield* parseJson(text));
+        const fetched = yield* feed(yield* parseJson(text));
         yield* fs.makeDirectory(path.dirname(file), { recursive: true });
         yield* fs.writeFileString(file, text);
-        yield* Ref.set(current, Option.some(catalog));
+        yield* Ref.set(current, Option.some(fetched));
       });
 
       const refresh = lock
@@ -222,7 +257,7 @@ export class ModelCatalog extends Context.Service<
         }).pipe(Effect.repeat(Schedule.spaced(CACHE_TTL)), Effect.forkScoped);
       }
 
-      return ModelCatalog.over(all, offline ? Effect.void : refresh);
+      return ModelCatalog.over(source, offline ? Effect.void : refresh);
     }),
   );
 }

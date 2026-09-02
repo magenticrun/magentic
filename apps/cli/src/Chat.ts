@@ -14,6 +14,7 @@ import {
   DateTime,
   Deferred,
   Effect,
+  Fiber,
   FileSystem,
   Option,
   Path,
@@ -147,6 +148,11 @@ const startingConversation = Effect.fn("Cli.chat.startingConversation")(function
  * the run in flight; ctrl+c twice ends the session.
  */
 export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
+  // The terminal reports light or dark within a few milliseconds, or never;
+  // drawing before the answer would flash the wrong palette. The gateway and
+  // the agent are found while the answer is awaited, not after.
+  const renderer = yield* acquireRenderer;
+  const themed = yield* Effect.forkChild(Effect.promise(() => renderer.waitForThemeMode(300)));
   const { client } = yield* ensureGateway(options.baseUrl);
   const starting = yield* startingConversation(client, options);
   const agent = yield* resolveAgent(
@@ -161,10 +167,6 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   const commands = yield* CommandRegistry;
   const models = yield* ModelRegistry;
 
-  const renderer = yield* acquireRenderer;
-  // The terminal reports light or dark within a few milliseconds; drawing
-  // before the answer would flash the wrong palette.
-  yield* Effect.promise(() => renderer.waitForThemeMode(300));
   /** What the person sent: the text, and any images pasted into it. */
   interface Input {
     readonly text: string;
@@ -208,9 +210,8 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     directory,
     version: VERSION,
     model: initialModel,
-    contextWindow: Option.isSome(initialModel)
-      ? yield* contextWindow(models, initialModel.value)
-      : 0,
+    // Filled in below: the catalog is first read for it, and the screen need not wait.
+    contextWindow: 0,
     commands: (yield* commands.list).map(({ name, description }) => ({ name, description })),
     onSubmit: (text, attachments) => {
       Queue.offerUnsafe(inputs, { text, attachments });
@@ -222,12 +223,16 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     },
     onExit: quit,
   });
+  yield* Fiber.join(themed);
   yield* Effect.promise(() => render(tui.view, renderer));
 
   const setModel = Effect.fn("Cli.chat.setModel")(function* (ref: string) {
     yield* Ref.set(model, Option.some(ref));
     tui.setModel(ref, yield* contextWindow(models, ref));
   });
+  if (Option.isSome(initialModel)) {
+    yield* setModel(initialModel.value);
+  }
   // Commands run without the platform in their context; hand it over for the file write.
   const platform = yield* Effect.context<FileSystem.FileSystem | Path.Path>();
   /** A choice made here is the one the next chat starts on; a resumed conversation's is not. */
