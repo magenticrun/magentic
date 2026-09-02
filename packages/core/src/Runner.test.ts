@@ -50,7 +50,7 @@ const WorkspaceLayer = Layer.unwrap(
 
 const HostLayer = PluginHost.layer({
   plugins: [builtin(fileToolsPlugin), builtin(fakeProviderPlugin(script))],
-  paths: { config: "/nonexistent", workspace: "/nonexistent" },
+  paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
 }).pipe(Layer.provide([WorkspaceLayer, ToolCallGuard.layerAllowAll]));
 
 const TestLayer = Runner.layer.pipe(
@@ -70,6 +70,7 @@ layer(TestLayer)("Runner", (it) => {
           principal: alice,
           input: "what does hello.txt say?",
           conversationId: Option.none(),
+          model: Option.none(),
         }),
       );
       assert.deepStrictEqual(
@@ -97,6 +98,7 @@ layer(TestLayer)("Runner", (it) => {
           principal: alice,
           input: "and again?",
           conversationId: Option.some(conversationId),
+          model: Option.none(),
         }),
       );
       const reply = second.find((e) => e._tag === "TextDelta");

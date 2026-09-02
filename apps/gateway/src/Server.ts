@@ -13,7 +13,7 @@ import { HttpApiBuilder, HttpApiScalar } from "effect/unstable/httpapi";
 import { configAgentsPlugin } from "./ConfigAgents.ts";
 import { ToolCallGuardLive } from "./Guard.ts";
 import { AgentsApiHandlersNoDeps, PluginsApiHandlers, SystemApiHandlers } from "./Handlers.ts";
-import { configDir, loadExternalPlugin, loadGatewayConfig } from "./Plugins.ts";
+import { configDir, dataDir, loadExternalPlugin, loadGatewayConfig } from "./Plugins.ts";
 
 /** The one agent every gateway has until `agents/*.yaml` exists. */
 export const assistant = new AgentDefinition({
@@ -52,6 +52,7 @@ export const HostLayer = Layer.unwrap(
     const dir = yield* configDir;
     const config = yield* loadGatewayConfig(dir);
     const workspace = yield* workspaceRoot;
+    const data = yield* dataDir;
     const external = yield* Effect.forEach(config.externalPlugins, (spec) =>
       loadExternalPlugin(dir, spec),
     );
@@ -60,7 +61,7 @@ export const HostLayer = Layer.unwrap(
       plugins: [...builtinPlugins, fromConfig, ...external],
       disabled: config.disabledPlugins,
       disabledTools: config.disabledTools,
-      paths: { config: dir, workspace },
+      paths: { config: dir, workspace, data },
     });
   }),
 );

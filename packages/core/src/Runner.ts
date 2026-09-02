@@ -14,6 +14,8 @@ export interface RunOptions {
   readonly input: string;
   /** Continue this conversation; a fresh one starts otherwise. */
   readonly conversationId: Option.Option<string>;
+  /** A `provider/model` reference to run on instead of the agent's own. */
+  readonly model: Option.Option<string>;
 }
 
 /**
@@ -107,7 +109,9 @@ export class Runner extends Context.Service<
 
             const loop = Effect.gen(function* () {
               // Resolved per run so a provider signed in after boot is picked up.
-              const model = yield* models.languageModel(Option.fromNullishOr(options.agent.model));
+              const model = yield* models.languageModel(
+                Option.orElse(options.model, () => Option.fromNullishOr(options.agent.model)),
+              );
               let prompt: Prompt.RawInput = options.input;
               while (true) {
                 const calledTool = yield* Ref.make(false);

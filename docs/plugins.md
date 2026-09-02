@@ -26,8 +26,9 @@ importing core.
 
 We take v2 wholesale: `define`, scoped registrations, transform versus hook, domain rebuilds,
 same API for built-ins. We drop: zod tool arguments (Effect `Schema` is the only schema
-here), the promise wrapper, on-demand npm installs into a global cache, auto-discovered loose
-`tools/*.ts` files, and TUI plugins.
+here), the promise wrapper, on-demand npm installs into a global cache, and auto-discovered
+loose `tools/*.ts` files. TUI plugins are narrowed to slash commands that describe a picker
+rather than draw one (see Commands).
 
 ## Contract (`@magentic/plugin`)
 
@@ -66,6 +67,7 @@ export interface PluginContext {
   readonly tool: ToolDomain;
   readonly model: ModelDomain;
   readonly agent: AgentDomain;
+  readonly command: CommandDomain;
   readonly event: EventDomain;
 }
 ```
@@ -154,6 +156,8 @@ export interface ModelProviderRegistration {
 }
 export interface ModelDomain {
   register(provider: ModelProviderRegistration): Effect.Effect<Registration, never, Scope.Scope>;
+  /** Every provider registered so far, in plugin order. */
+  readonly providers: Effect.Effect<ReadonlyArray<ModelProviderRegistration>>;
 }
 ```
 
@@ -196,6 +200,45 @@ from `harness.md` is a plugin too: its transform decodes `agents/*.yaml` into th
 its file watcher calls `ctx.agent.rebuild`. That is the "registries subscribe to LoadedConfig"
 mechanism from the harness doc, now with one implementation for every rebuildable domain
 instead of one per registry. `AgentRegistry` keeps its interface and reads the committed state.
+
+### Commands
+
+A slash command in a chat, `/name args`, is a plugin contribution too. The command never
+draws anything: it describes a picker (sections of rows, a detail column, action keys such as
+`f`) and loops on the answer, the way a login method reports through `LoginUi`. Any surface
+that can show a list can host one.
+
+```ts
+export interface CommandRegistration {
+  readonly name: string; // without the slash, unique across plugins
+  readonly description: string;
+  run(input: {
+    ui: CommandUi;
+    session: ChatSession;
+    args: string;
+  }): Effect.Effect<void, CommandError>;
+}
+export interface CommandUi {
+  pick(picker: Picker): Effect.Effect<Option.Option<Picked>>; // none when the person backs out
+  notify(message: string): Effect.Effect<void>;
+}
+export interface ChatSession {
+  readonly agent: string;
+  readonly model: Effect.Effect<Option.Option<string>>;
+  setModel(ref: string): Effect.Effect<void>;
+}
+```
+
+Commands run where the surface is. The CLI hosts them in the same local `PluginHost` that
+`auth login` uses, beside the provider plugins, so a command can read `ctx.model.providers`
+without a gateway. What a command changes about the session travels with the next request:
+`setModel` makes the CLI send `model` in every `RunRequest`, and the runner takes that over the
+agent's own `model:` for that run. Against a remote gateway the providers a command sees are
+the ones signed in on the CLI's machine, the same limit `auth login` has today.
+
+`/model` is the first: favourites (kept in `favourites.json` under `paths.data`) at the top
+with the provider at the right, providers below, a provider's models on selection, `f` to
+favourite or unfavourite, and `/model provider/model` to set it outright.
 
 ### Events
 
@@ -330,6 +373,9 @@ Done, with tests beside the code:
   `reload: watch` in `magentic.yaml`, on file changes.
 - `model:` on an agent picks a provider by id; `ModelRegistry.languageModel` builds each
   provider's model once and falls back to the first signed-in provider.
+- Commands: `ctx.command.register`, `CommandRegistry` from the host, `commands` on
+  `PluginInfo`, `model` on `RunRequest`. `modelCommandPlugin` in `@magentic/model` is `/model`;
+  the CLI chat runs it from its local host and draws the picker in the TUI.
 
 Still open: `magentic plugin add|remove` and a reload endpoint, both waiting on a decision
 about the CLI surface.

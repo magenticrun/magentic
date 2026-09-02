@@ -20,6 +20,8 @@ export class PluginInfo extends Schema.Class<PluginInfo>("magentic/protocol/Plug
   tools: Schema.Array(Schema.String),
   providers: Schema.Array(Schema.String),
   agents: Schema.Array(Schema.String),
+  /** Slash commands, without the slash. */
+  commands: Schema.Array(Schema.String),
 }) {}
 
 /** One tool call about to run, as policy sees it. */

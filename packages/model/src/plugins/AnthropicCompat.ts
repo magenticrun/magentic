@@ -21,12 +21,27 @@ const DELTA_USAGE_KEYS = [
   "input_tokens",
 ] as const;
 
+/** Both counters are required once `server_tool_use` is present; Z.AI sends only the one it used. */
+const SERVER_TOOL_KEYS = ["web_fetch_requests", "web_search_requests"] as const;
+
 const isJsonObject = (value: Schema.Json | undefined): value is Schema.JsonObject =>
   Predicate.isObject(value) && !Array.isArray(value);
 
+const withDefaults = (
+  object: Schema.JsonObject,
+  keys: ReadonlyArray<string>,
+  fallback: Schema.Json,
+): Schema.JsonObject => {
+  const missing = keys.filter((key) => !(key in object)).map((key) => [key, fallback] as const);
+  return missing.length === 0 ? object : { ...object, ...Object.fromEntries(missing) };
+};
+
 const withNulls = (usage: Schema.JsonObject, keys: ReadonlyArray<string>): Schema.JsonObject => {
-  const missing = keys.filter((key) => !(key in usage)).map((key) => [key, null] as const);
-  return missing.length === 0 ? usage : { ...usage, ...Object.fromEntries(missing) };
+  const serverTools = usage["server_tool_use"];
+  const filled = withDefaults(usage, keys, null);
+  return isJsonObject(serverTools)
+    ? { ...filled, server_tool_use: withDefaults(serverTools, SERVER_TOOL_KEYS, 0) }
+    : filled;
 };
 
 /** A message, `message_start`, or `message_delta` payload with usage keys the schema needs. */

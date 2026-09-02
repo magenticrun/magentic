@@ -15,6 +15,7 @@ import { Deferred, Effect, Layer, Schema, Stream } from "effect";
 import { Tool, Toolkit } from "effect/unstable/ai";
 import { FetchHttpClient } from "effect/unstable/http";
 import { AgentRegistry } from "../AgentRegistry.ts";
+import { CommandRegistry } from "./CommandRegistry.ts";
 import { builtin, PluginHost } from "./PluginHost.ts";
 import { ToolCallGuard, ToolRegistry } from "./ToolRegistry.ts";
 
@@ -115,7 +116,7 @@ const host = (plugins: ReadonlyArray<Plugin>, disabled: ReadonlyArray<string> = 
     plugins: plugins.map(builtin),
     disabled,
     disabledTools: ["hidden"],
-    paths: { config: "/nonexistent", workspace: "/nonexistent" },
+    paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
   }).pipe(
     Layer.provide(ToolCallGuard.layerAllowAll),
     Layer.provideMerge(
@@ -228,6 +229,49 @@ layer(host([echoPlugin("echo")], ["echo"]))("PluginHost with a disabled plugin",
     }),
   );
 });
+
+/** A plugin contributing the `/hello` command. */
+const commandPlugin = (id: string) =>
+  define({
+    id,
+    description: "greets",
+    setup: (ctx) =>
+      Effect.asVoid(
+        ctx.command.register({
+          name: "hello",
+          description: "Say hello",
+          run: ({ ui }) => ui.notify(`hello from ${id}`),
+        }),
+      ),
+  });
+
+layer(host([commandPlugin("greeter"), commandPlugin("greeter-again")]))(
+  "PluginHost commands",
+  (it) => {
+    it.effect("are listed once per name; a second plugin claiming it fails", () =>
+      Effect.gen(function* () {
+        const commands = yield* CommandRegistry;
+        assert.deepStrictEqual(
+          (yield* commands.list).map((c) => c.name),
+          ["hello"],
+        );
+        const plugins = yield* (yield* PluginHost).plugins;
+        assert.deepStrictEqual(
+          plugins.map((p) => [p.id, p.status, p.error, [...p.commands]]),
+          [
+            ["greeter", "active", undefined, ["hello"]],
+            [
+              "greeter-again",
+              "failed",
+              "command /hello is already registered by another plugin",
+              [],
+            ],
+          ],
+        );
+      }),
+    );
+  },
+);
 
 /** A plugin that hands its registration to the test so it can be disposed early. */
 const scoped = (handle: Deferred.Deferred<Registration>) =>

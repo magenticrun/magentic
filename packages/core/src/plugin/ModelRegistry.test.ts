@@ -10,7 +10,7 @@ import { ToolCallGuard } from "./ToolRegistry.ts";
 
 const HostLayer = PluginHost.layer({
   plugins: [builtin(fakeProviderPlugin(() => [{ type: "text", text: "ok" }]))],
-  paths: { config: "/nonexistent/magentic", workspace: "/nonexistent" },
+  paths: { config: "/nonexistent/magentic", workspace: "/nonexistent", data: "/nonexistent" },
 }).pipe(
   Layer.provide(ToolCallGuard.layerAllowAll),
   Layer.provideMerge(

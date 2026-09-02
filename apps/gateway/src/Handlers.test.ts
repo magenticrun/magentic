@@ -57,7 +57,7 @@ const AdmissionLayer = Layer.mergeAll(Identity.layerLocal, Policy.layerAllowAll,
 
 const HostLayer = PluginHost.layer({
   plugins: [builtin(fileToolsPlugin), builtin(fakeProviderPlugin(scripted)), builtin(triagePlugin)],
-  paths: { config: "/nonexistent", workspace: "/nonexistent" },
+  paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
 }).pipe(Layer.provide([WorkspaceLayer, ToolCallGuardLive.pipe(Layer.provide(AdmissionLayer))]));
 
 const RunnerLayer = Runner.layer.pipe(Layer.provide(ConversationStore.layerMemory));
@@ -73,10 +73,16 @@ const HandlersLayer = Layer.mergeAll(
   ),
 );
 
-const TestLayer = Layer.mergeAll(HandlersLayer, HttpServer.layerServices).pipe(
-  Layer.provideMerge(
-    Layer.mergeAll(BunServices.layer, FetchHttpClient.layer, ModelCatalog.layerSnapshot),
-  ),
+const PlatformLayer = Layer.mergeAll(
+  BunServices.layer,
+  FetchHttpClient.layer,
+  ModelCatalog.layerSnapshot,
+);
+
+/** The handlers on the real platform; the HTTP test services beside them, not under them. */
+const TestLayer = Layer.mergeAll(
+  HandlersLayer.pipe(Layer.provideMerge(PlatformLayer)),
+  HttpServer.layerServices,
 );
 
 layer(TestLayer)("gateway api", (it) => {
@@ -146,6 +152,25 @@ layer(TestLayer)("gateway api", (it) => {
         recorded.map((e) => e.action),
         ["run.started"],
       );
+    }),
+  );
+
+  it.effect("runs on the model the request names", () =>
+    Effect.gen(function* () {
+      const client = yield* makeClient;
+      const chosen = yield* client.agents
+        .run({ params: { name: "triage" }, payload: { input: "hi", model: "fake/fake" } })
+        .pipe(Effect.flatMap(Stream.runCollect));
+      assert.deepStrictEqual(
+        chosen.map((e) => e._tag),
+        ["RunStarted", "TextDelta", "RunFinished"],
+      );
+
+      const unknown = yield* client.agents
+        .run({ params: { name: "triage" }, payload: { input: "hi", model: "fake/nope" } })
+        .pipe(Effect.flatMap(Stream.runCollect));
+      const failure = unknown.at(-1);
+      assert.isTrue(failure?._tag === "RunFailed" && failure.message.includes('no model "nope"'));
     }),
   );
 

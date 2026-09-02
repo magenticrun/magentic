@@ -120,4 +120,6 @@ export interface ModelProviderRegistration extends Choice {
 
 export interface ModelDomain {
   register(provider: ModelProviderRegistration): Effect.Effect<Registration, never, Scope.Scope>;
+  /** Every provider registered so far, in plugin order. */
+  readonly providers: Effect.Effect<ReadonlyArray<ModelProviderRegistration>>;
 }

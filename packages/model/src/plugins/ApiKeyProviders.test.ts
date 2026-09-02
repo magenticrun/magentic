@@ -61,7 +61,8 @@ const streamedReply = sse([
   {
     type: "message_delta",
     delta: { stop_reason: "end_turn", stop_sequence: null },
-    usage: { output_tokens: 2 },
+    // Z.AI reports only the server tool it used; Anthropic's schema wants both counters.
+    usage: { output_tokens: 2, server_tool_use: { web_search_requests: 0 } },
   },
   { type: "message_stop" },
 ]);
@@ -75,13 +76,15 @@ const registered = Effect.fn("registered")(function* (plugin: ApiKeyPlugin) {
   const seen = yield* Ref.make(Option.none<ModelProviderRegistration>());
   const ctx: PluginContext = {
     options: {},
-    paths: { config: "/nonexistent/magentic", workspace: "/nonexistent" },
+    paths: { config: "/nonexistent/magentic", workspace: "/nonexistent", data: "/nonexistent" },
     tool: { registerToolkit: () => unused, hook: () => unused },
     model: {
       register: (provider) =>
         Ref.set(seen, Option.some(provider)).pipe(Effect.as({ dispose: Effect.void })),
+      providers: Effect.map(Ref.get(seen), Option.toArray),
     },
     agent: { transform: () => unused, rebuild: Effect.void },
+    command: { register: () => unused },
     event: { subscribe: () => Stream.empty },
   };
   yield* plugin.setup(ctx);

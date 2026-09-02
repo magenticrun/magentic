@@ -32,7 +32,7 @@ const HostLayer = Layer.unwrap(
     yield* fs.writeFileString(`${dir}/agents/notes.txt`, "not an agent\n");
     return PluginHost.layer({
       plugins: [builtin(configAgentsPlugin({ dir, watch: false }))],
-      paths: { config: dir, workspace: dir },
+      paths: { config: dir, workspace: dir, data: dir },
     });
   }),
 ).pipe(
