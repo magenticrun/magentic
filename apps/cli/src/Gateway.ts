@@ -1,4 +1,3 @@
-import { layerServer } from "@magentic/gateway";
 import { Api, RPC_PATH } from "@magentic/protocol";
 import { Effect, Layer, Schedule, Schema } from "effect";
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
@@ -38,6 +37,8 @@ export const ensureGateway = Effect.fn("Cli.ensureGateway")(function* (baseUrl: 
     });
   }
   const port = url.port === "" ? 80 : Number.parseInt(url.port, 10);
+  // The server is loaded only now: most starts find a gateway already running.
+  const { layerServer } = yield* Effect.promise(() => import("@magentic/gateway"));
   // Request logs would land in the transcript, or on top of the full-screen chat.
   yield* Layer.build(layerServer(port, { quiet: true }));
   yield* client.health().pipe(Effect.retry({ times: 50, schedule: Schedule.spaced("100 millis") }));

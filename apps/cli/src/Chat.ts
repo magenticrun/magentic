@@ -1,5 +1,5 @@
 import { CommandRegistry, ModelRegistry } from "@magentic/core";
-import { dataDir } from "@magentic/gateway";
+import { dataDir } from "@magentic/gateway/paths";
 import {
   CommandError,
   type ChatSession,

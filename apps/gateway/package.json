@@ -5,7 +5,8 @@
   "description": "The magentic gateway: hosts agents and runs every request through identity, policy, and audit.",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./paths": "./src/Paths.ts"
   },
   "scripts": {
     "dev": "bun --watch src/main.ts",
