@@ -121,7 +121,9 @@ export type Retrying = typeof Retrying.Type;
 /**
  * The model's finish reason (`stop`, `tool-calls`, `length`, …), or
  * `step-limit` when the run stopped at the agent's step limit, tool results
- * still in the history for the next input to continue from.
+ * still in the history for the next input to continue from, or
+ * `interrupted` when the surface stopped it, what the model said so far
+ * kept the same way.
  */
 export const RunFinished = Schema.TaggedStruct("RunFinished", { reason: Schema.String });
 export const RunFailed = Schema.TaggedStruct("RunFailed", { message: Schema.String });

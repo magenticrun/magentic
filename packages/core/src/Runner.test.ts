@@ -493,24 +493,28 @@ const steerable: FakeScript = ({ index, options, reasoning }) => {
 };
 
 /** A tool that returns when the test says so, holding the run between its model calls. */
-const gate = Deferred.makeUnsafe<void>();
 const Wait = Tool.make("wait", {
   description: "Waits for the test.",
   parameters: Schema.Struct({}),
   success: Schema.Struct({ ok: Schema.Boolean }),
 }).annotate(CapabilityAnnotation, "fs:read");
 const WaitTools = Toolkit.make(Wait);
-const waitPlugin = define({
-  id: "wait",
-  description: "The wait tool.",
-  setup: (ctx) =>
-    Effect.gen(function* () {
-      const handlers = yield* WaitTools.toHandlers(
-        Effect.succeed(WaitTools.of({ wait: () => Effect.as(Deferred.await(gate), { ok: true }) })),
-      );
-      yield* ctx.tool.registerToolkit(yield* WaitTools.pipe(Effect.provideContext(handlers)));
-    }),
-});
+const waitingOn = (gate: Deferred.Deferred<void>) =>
+  define({
+    id: "wait",
+    description: "The wait tool.",
+    setup: (ctx) =>
+      Effect.gen(function* () {
+        const handlers = yield* WaitTools.toHandlers(
+          Effect.succeed(
+            WaitTools.of({ wait: () => Effect.as(Deferred.await(gate), { ok: true }) }),
+          ),
+        );
+        yield* ctx.tool.registerToolkit(yield* WaitTools.pipe(Effect.provideContext(handlers)));
+      }),
+  });
+const gate = Deferred.makeUnsafe<void>();
+const waitPlugin = waitingOn(gate);
 
 const waiter = new AgentDefinition({
   name: "waiter",
@@ -648,5 +652,107 @@ layer(SteeringLayer)("Runner steering, thinking, and cost", (it) => {
         "saw start; thinking default",
       );
     }),
+  );
+});
+
+/** Calls `wait` first; answers every later call with the roles of what it was sent. */
+const stoppable: FakeScript = ({ index, options }) =>
+  index === 0
+    ? [{ type: "tool-call", id: "call-1", name: "wait", params: {} }]
+    : [{ type: "text", text: options.prompt.content.map((message) => message.role).join(",") }];
+
+/** A gate nothing opens: the run holds in the tool until it is stopped. */
+const shut = Deferred.makeUnsafe<void>();
+
+const InterruptLayer = Runner.layer.pipe(
+  Layer.provideMerge(
+    Layer.mergeAll(
+      PluginHost.layer({
+        plugins: [builtin(waitingOn(shut)), builtin(fakeProviderPlugin(stoppable))],
+        paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
+      }).pipe(Layer.provide(ToolCallGuard.layerAllowAll)),
+      ConversationStore.layerMemory,
+      Steering.layer,
+    ),
+  ),
+  Layer.provideMerge(
+    Layer.mergeAll(BunServices.layer, FetchHttpClient.layer, ModelCatalog.layerSnapshot),
+  ),
+);
+
+layer(InterruptLayer)("Runner interruption", (it) => {
+  it.effect(
+    "keeps the turn of a run stopped inside a tool, the call answered, for the next input",
+    () =>
+      Effect.gen(function* () {
+        const runner = yield* Runner;
+        const store = yield* ConversationStore;
+        const conversationId = yield* Ref.make("");
+        const called = yield* Deferred.make<void>();
+        const running = yield* Effect.forkChild(
+          runner
+            .run({
+              agent: waiter,
+              principal: alice,
+              input: "start",
+              attachments: [],
+              conversationId: Option.none(),
+              model: Option.none(),
+              directory: Option.none(),
+              reasoning: Option.none(),
+            })
+            .pipe(
+              Stream.runForEach((event) =>
+                Effect.gen(function* () {
+                  if (event._tag === "RunStarted") {
+                    yield* Ref.set(conversationId, event.conversationId);
+                  }
+                  if (event._tag === "ToolCall") {
+                    yield* Deferred.succeed(called, undefined);
+                  }
+                }),
+              ),
+            ),
+        );
+        yield* Deferred.await(called);
+        yield* Fiber.interrupt(running);
+
+        // The input, the call, and a failed result for it are on disk.
+        const id = yield* Ref.get(conversationId);
+        const transcript = yield* transcriptFromJson(
+          Option.getOrElse(yield* store.history(id), () => ""),
+        );
+        assert.deepStrictEqual(
+          transcript.map((e) => (e._tag === "User" ? `User:${e.text}` : e._tag)),
+          ["User:start", "Tool"],
+        );
+        const call = transcript[1];
+        assert.isTrue(
+          call?._tag === "Tool" &&
+            call.isFailure &&
+            JSON.stringify(call.result).includes("interrupted before this tool finished"),
+        );
+        const saved = yield* store.get(id);
+        assert.strictEqual(Option.isSome(saved) ? saved.value.messages : 0, 4);
+
+        // The next input follows that turn, as the model sees it.
+        const events = yield* Stream.runCollect(
+          runner.run({
+            agent: waiter,
+            principal: alice,
+            input: "again",
+            attachments: [],
+            conversationId: Option.some(id),
+            model: Option.none(),
+            directory: Option.none(),
+            reasoning: Option.none(),
+          }),
+        );
+        const reply = events.find((e) => e._tag === "TextDelta");
+        assert.strictEqual(
+          reply?._tag === "TextDelta" ? reply.text : reply,
+          "system,user,assistant,tool,user",
+        );
+      }),
   );
 });
