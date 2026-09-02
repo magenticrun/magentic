@@ -11,7 +11,8 @@ import {
   Glob,
   Grep,
   ListDir,
-  READ_MAX_BYTES,
+  GREP_FILE_MAX_BYTES,
+  READ_LINE_LIMIT,
   ReadFile,
   WriteFile,
 } from "./FileTools.ts";
@@ -329,12 +330,12 @@ layer(TestLayer)("file tools", (it) => {
 });
 
 layer(TestLayer)("file tools size limits", (it) => {
-  it.effect("cuts a huge file at the read limit and leaves it out of a search", () =>
+  it.effect("pages a huge file by lines and leaves it out of a search", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const root = yield* WorkspaceRoot;
       const line = "needle-in-a-huge-file\n";
-      const lines = Math.ceil((READ_MAX_BYTES + 4096) / line.length);
+      const lines = Math.ceil((GREP_FILE_MAX_BYTES + 4096) / line.length);
       yield* fs.writeFileString(`${root}/huge.txt`, line.repeat(lines));
       yield* fs.writeFileString(`${root}/small.txt`, line);
       const toolkit = yield* FileTools;
@@ -347,8 +348,21 @@ layer(TestLayer)("file tools size limits", (it) => {
       if (content instanceof FileToolError || content instanceof AiError.AiError) {
         return assert.fail(`expected content, got ${content.message}`);
       }
-      assert.strictEqual(new TextEncoder().encode(content.content).byteLength, READ_MAX_BYTES);
+      // The first page: the line limit's worth, without the break that starts the next line.
+      assert.strictEqual(content.content, line.repeat(READ_LINE_LIMIT).slice(0, -1));
       assert.isTrue(content.truncated);
+      assert.deepStrictEqual(content.lines, { from: 1, to: READ_LINE_LIMIT, total: lines });
+
+      // The last page keeps the file's final line break, and says it is the end.
+      const tail = yield* toolkit
+        .handle("read_file", { path: "huge.txt", offset: lines - 1, limit: 10 })
+        .pipe(Effect.flatMap(lastResult));
+      const rest = tail.result;
+      if (rest instanceof FileToolError || rest instanceof AiError.AiError) {
+        return assert.fail(`expected content, got ${rest.message}`);
+      }
+      assert.strictEqual(rest.content, line.repeat(2));
+      assert.deepStrictEqual(rest.lines, { from: lines - 1, to: lines, total: lines });
 
       const found = yield* toolkit
         .handle("grep", { pattern: "needle-in-a-huge" })

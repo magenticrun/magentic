@@ -165,7 +165,7 @@ const serve = Effect.fn("mcpPlugin.serve")(function* (
         const names = yield* Ref.get(published);
         for (const agent of draft.list()) {
           const visible = names.filter((name) =>
-            agent.tools.some((pattern) => toolMatches(pattern, name)),
+            agent.tools.some((pattern) => toolMatches(pattern, { name, capability: "mcp" })),
           );
           if (visible.length === 0) {
             continue;

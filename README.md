@@ -49,7 +49,9 @@ bun apps/cli/src/main.ts
 bun apps/cli/src/main.ts run "Explain this repository"
 ```
 
-The built-in `assistant` can inspect, edit, and run commands in the current workspace. While it works you can keep typing: a message sent then is queued above the composer and goes out when the turn ends, consecutive messages as one. `↑` on an empty composer takes the queue back for editing; `Esc` stops the run and does the same.
+The built-in `assistant` can inspect, edit, and run commands in the current workspace. While it works you can keep typing: a message sent then is steered into the run, listed above the composer until the model reads it before its next call, so you can redirect the agent without stopping it. A slash command sent during a run waits for it to end. `↑` on an empty composer takes back what the model has not read yet for editing; `Esc` stops the run and does the same.
+
+A few keys shape the run. `ctrl+t` cycles the model's thinking level (the catalog's effort names, or `high` and `max` budgets) and the footer shows the level in force; `ctrl+o` opens every tool result in full under its call, where edits already show as a diff. The footer also shows how much of the context window is in use and, for metered models, what the session has cost so far at the catalog's prices.
 
 List the agents available to the gateway with:
 
@@ -107,6 +109,8 @@ tools: [read_file, glob, grep]
 maxSteps: 12
 ```
 
+`tools` is an allow-list. An entry names one tool, or ends in `*` to take every tool with that prefix (`github_*` for one MCP server), or is a capability followed by `:*` to take every tool declaring it (`mcp:*` for every MCP server, `fs:read:*` for every reader). A file named after the built-in `assistant` replaces it.
+
 An agent’s `prompt` can also load a file relative to the configuration directory:
 
 ```yaml
@@ -135,21 +139,21 @@ See [docs/plugins.md](docs/plugins.md) for plugin and MCP configuration. Treat e
 
 Bun loads `.env` from the working directory. Do not commit credentials.
 
-| Variable                   | Default                              | Purpose                                                                                |
-| -------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------- |
-| `PORT`                     | `4321`                               | Gateway port.                                                                          |
-| `MAGENTIC_HOST`            | `127.0.0.1`                          | Address on which the gateway listens.                                                  |
-| `IDENTITY_LOCAL`           | `false`                              | Explicitly permits a non-loopback bind with local identity. See [Security](#security). |
-| `MAGENTIC_HOME`            | `./magentic`                         | Configuration directory containing `magentic.yaml` and `agents/`.                      |
-| `MAGENTIC_DATA_DIR`        | `$HOME/.config/magentic`             | Local conversations, CLI state, and `gateway.log` from a gateway the CLI started.      |
-| `MAGENTIC_WORKSPACE`       | Current working directory            | Root available to built-in file and shell tools.                                       |
-| `MAGENTIC_API_KEYS_FILE`   | `$MAGENTIC_DATA_DIR/api-keys.json`   | Stored model API keys.                                                                 |
-| `MAGENTIC_CODEX_AUTH_FILE` | `$MAGENTIC_DATA_DIR/codex-auth.json` | Stored ChatGPT/Codex login.                                                            |
-| `CODEX_HOME`               | `$HOME/.codex`                       | Codex CLI directory used when importing its login.                                     |
-| `MAGENTIC_MODELS_URL`      | `https://models.dev/api.json`        | Model catalog source.                                                                  |
-| `MAGENTIC_MODELS_CACHE`    | `$HOME/.cache/magentic/models.json`  | Cached model catalog.                                                                  |
-| `MAGENTIC_MODELS_OFFLINE`  | `false`                              | Use only the cached or bundled model catalog.                                          |
-| `USER`                     | `local`                              | Subject assigned by local identity.                                                    |
+| Variable                   | Default                              | Purpose                                                                                                                                                                   |
+| -------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PORT`                     | `4321`                               | Gateway port.                                                                                                                                                             |
+| `MAGENTIC_HOST`            | `127.0.0.1`                          | Address on which the gateway listens.                                                                                                                                     |
+| `IDENTITY_LOCAL`           | `false`                              | Explicitly permits a non-loopback bind with local identity. See [Security](#security).                                                                                    |
+| `MAGENTIC_HOME`            | `./magentic`                         | Configuration directory containing `magentic.yaml` and `agents/`.                                                                                                         |
+| `MAGENTIC_DATA_DIR`        | `$HOME/.config/magentic`             | Local conversations, CLI state, `gateway.log` from a gateway the CLI started, and `tool-output/` with the full output of shell commands too long to show the model whole. |
+| `MAGENTIC_WORKSPACE`       | Current working directory            | Root available to built-in file and shell tools.                                                                                                                          |
+| `MAGENTIC_API_KEYS_FILE`   | `$MAGENTIC_DATA_DIR/api-keys.json`   | Stored model API keys.                                                                                                                                                    |
+| `MAGENTIC_CODEX_AUTH_FILE` | `$MAGENTIC_DATA_DIR/codex-auth.json` | Stored ChatGPT/Codex login.                                                                                                                                               |
+| `CODEX_HOME`               | `$HOME/.codex`                       | Codex CLI directory used when importing its login.                                                                                                                        |
+| `MAGENTIC_MODELS_URL`      | `https://models.dev/api.json`        | Model catalog source.                                                                                                                                                     |
+| `MAGENTIC_MODELS_CACHE`    | `$HOME/.cache/magentic/models.json`  | Cached model catalog.                                                                                                                                                     |
+| `MAGENTIC_MODELS_OFFLINE`  | `false`                              | Use only the cached or bundled model catalog.                                                                                                                             |
+| `USER`                     | `local`                              | Subject assigned by local identity.                                                                                                                                       |
 
 ## Security
 

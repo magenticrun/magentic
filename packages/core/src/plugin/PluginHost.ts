@@ -299,11 +299,14 @@ export class PluginHost extends Context.Service<
 
         // A tool an agent names that no plugin registered is a typo, a failed
         // plugin, or a server that did not connect; say so once, here.
-        const registered = (yield* tools.values).map((entry) => entry.tool.name);
+        const registered = (yield* tools.values).map((entry) => ({
+          name: entry.tool.name,
+          capability: entry.capability,
+        }));
         const hidden = new Set(options.disabledTools ?? []);
         for (const agent of (yield* Ref.get(agents)).values()) {
           for (const pattern of agent.tools) {
-            const matched = registered.some((name) => toolMatches(pattern, name));
+            const matched = registered.some((tool) => toolMatches(pattern, tool));
             if (!matched && !hidden.has(pattern)) {
               yield* Effect.logWarning(
                 `agent ${agent.name} lists tool ${pattern}, which no plugin registered`,

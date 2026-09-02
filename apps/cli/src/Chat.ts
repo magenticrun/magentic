@@ -53,52 +53,64 @@ const parseCommand = (input: string): { readonly name: string; readonly args: st
     : { name: body.slice(0, at), args: body.slice(at).trim() };
 };
 
-/** What the person last chose with `/model`, kept under the data directory for the next chat. */
+/**
+ * What the person last chose, kept under the data directory for the next
+ * chat: the model, and the thinking level for each model it was set on.
+ */
 const ChatPreferences = Schema.fromJsonString(
-  Schema.Struct({ version: Schema.Literal(1), model: Schema.optional(Schema.String) }),
+  Schema.Struct({
+    version: Schema.Literal(1),
+    model: Schema.optional(Schema.String),
+    reasoning: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  }),
 );
+type ChatPreferences = typeof ChatPreferences.Type;
 
 const preferencesFile = Effect.gen(function* () {
   const path = yield* Path.Path;
   return path.join(yield* dataDir, "chat.json");
 });
 
-/** The remembered model, when the file is there and readable; nothing here is worth failing for. */
-const loadLastModel = Effect.gen(function* () {
+/** What was remembered, when the file is there and readable; nothing here is worth failing for. */
+const loadPreferences = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const file = yield* preferencesFile;
   if (!(yield* fs.exists(file))) {
-    return Option.none<string>();
+    return { version: 1 } satisfies ChatPreferences;
   }
-  const stored = yield* Schema.decodeEffect(ChatPreferences)(yield* fs.readFileString(file));
-  return Option.fromNullishOr(stored.model);
-}).pipe(Effect.orElseSucceed(() => Option.none<string>()));
+  return yield* Schema.decodeEffect(ChatPreferences)(yield* fs.readFileString(file));
+}).pipe(Effect.orElseSucceed((): ChatPreferences => ({ version: 1 })));
 
-const saveLastModel = Effect.fn("Cli.chat.saveLastModel")(function* (ref: string) {
+const savePreferences = Effect.fn("Cli.chat.savePreferences")(function* (
+  preferences: ChatPreferences,
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const file = yield* preferencesFile;
   yield* fs.makeDirectory(path.dirname(file), { recursive: true });
-  yield* fs.writeFileString(
-    file,
-    yield* Schema.encodeEffect(ChatPreferences)({ version: 1, model: ref }),
-  );
+  yield* fs.writeFileString(file, yield* Schema.encodeEffect(ChatPreferences)(preferences));
 });
 
 /**
- * How many tokens a model can hold, when the providers on this machine know
- * the model and its catalog entry gives a limit; 0 otherwise.
+ * What the catalog says of a model, when the providers on this machine know
+ * it: how many tokens it can hold (0 when its entry gives no limit) and the
+ * thinking levels it can be set to (none when it cannot).
  */
-const contextWindow = Effect.fn("Cli.chat.contextWindow")(function* (
+const modelFacts = Effect.fn("Cli.chat.modelFacts")(function* (
   models: ModelRegistry["Service"],
   ref: string,
 ) {
+  const none: ReadonlyArray<string> = [];
+  const unknown = { contextWindow: 0, reasoningLevels: none };
   const resolved = yield* models.resolve(Option.some(ref)).pipe(Effect.option);
   if (Option.isNone(resolved)) {
-    return 0;
+    return unknown;
   }
   const known = yield* resolved.value.provider.models;
-  return known.find((m) => m.id === resolved.value.model)?.context ?? 0;
+  const info = known.find((m) => m.id === resolved.value.model);
+  return info === undefined
+    ? unknown
+    : { contextWindow: info.context, reasoningLevels: info.reasoningLevels };
 });
 
 /**
@@ -135,9 +147,9 @@ const startingConversation = Effect.fn("Cli.chat.startingConversation")(function
 /**
  * The full-screen chat. Inputs come from the view through a queue; each one
  * becomes a run whose events are folded back into the transcript, or, when
- * it starts with a slash, a command from the local plugin host. The view
- * holds back what is sent during a run until it ends. Esc stops the run in
- * flight; ctrl+c twice ends the session.
+ * it starts with a slash, a command from the local plugin host. What is sent
+ * during a run is steered into it: the model reads it before its next call.
+ * Esc stops the run in flight; ctrl+c twice ends the session.
  */
 export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   // The terminal reports light or dark within a few milliseconds, or never;
@@ -159,10 +171,12 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   const commands = yield* CommandRegistry;
   const models = yield* ModelRegistry;
 
-  /** What the person sent: the text, and any images pasted into it. */
+  /** What the person sent: the text, and any images pasted into it; or a key the loop acts on. */
   interface Input {
     readonly text: string;
     readonly attachments: ReadonlyArray<Attachment>;
+    /** ctrl+t: the next thinking level, not a message. */
+    readonly cycleReasoning?: boolean;
   }
   const inputs = yield* Queue.unbounded<Input>();
   const exit = yield* Deferred.make<void>();
@@ -171,20 +185,34 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   };
   renderer.once("destroy", quit);
 
-  // The run in flight, so Esc can stop it without ending the session.
-  let stop: Deferred.Deferred<void> | undefined;
+  // The run in flight, so Esc can stop it without ending the session, and
+  // so what is sent meanwhile can be steered into it once the gateway has
+  // named it.
+  interface InFlight {
+    readonly stop: Deferred.Deferred<void>;
+    readonly named: Deferred.Deferred<string>;
+    readonly ended: Deferred.Deferred<void>;
+    runId?: string;
+  }
+  let inFlight: InFlight | undefined;
 
   // What runs use: the model last chosen with /model when this machine can
   // still run it, otherwise what the gateway said the agent runs on.
-  const remembered = yield* loadLastModel.pipe(
-    Effect.flatMap((ref) =>
-      Option.isSome(ref)
-        ? models.resolve(ref).pipe(Effect.option, Effect.map(Option.map((r) => r.ref)))
-        : Effect.succeed(Option.none<string>()),
-    ),
+  const preferences = yield* loadPreferences;
+  const remembered = yield* Option.fromNullishOr(preferences.model).pipe(
+    Option.match({
+      onNone: () => Effect.succeed(Option.none<string>()),
+      onSome: (ref) =>
+        models.resolve(Option.some(ref)).pipe(Effect.option, Effect.map(Option.map((r) => r.ref))),
+    }),
   );
   const initialModel = Option.orElse(remembered, () => Option.fromNullishOr(agent.model));
   const model = yield* Ref.make(initialModel);
+  // How hard the model thinks, one of its levels; none for its default.
+  const reasoning = yield* Ref.make(Option.none<string>());
+  const reasoningLevels = yield* Ref.make<ReadonlyArray<string>>([]);
+  // The level chosen on each model, so switching back finds it again.
+  const chosenLevels = yield* Ref.make<Record<string, string>>(preferences.reasoning ?? {});
   // Folded from the usage events, for /context.
   const usage = yield* Ref.make(Option.none<SessionUsage>());
   // The conversation the next input continues; the gateway names it on the first run.
@@ -208,9 +236,51 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     onSubmit: (text, attachments) => {
       Queue.offerUnsafe(inputs, { text, attachments });
     },
+    // Steered once the gateway has named the run; a run that ends first, or
+    // refuses, leaves the message with the view to send after.
+    onSteer: (text, attachments) => {
+      const run = inFlight;
+      if (run === undefined) {
+        return Promise.resolve(false);
+      }
+      const named = Effect.race(
+        Effect.asSome(Deferred.await(run.named)),
+        Effect.as(Deferred.await(run.ended), Option.none<string>()),
+      );
+      return runPromise(
+        Effect.flatMap(named, (runId) =>
+          Option.isNone(runId)
+            ? Effect.succeed(false)
+            : client
+                .steer({
+                  runId: runId.value,
+                  input: text,
+                  attachments: attachments.length > 0 ? attachments : undefined,
+                })
+                .pipe(
+                  Effect.as(true),
+                  Effect.catchCause(() => Effect.succeed(false)),
+                ),
+        ),
+      );
+    },
+    onRetract: () => {
+      const runId = inFlight?.runId;
+      if (runId === undefined) {
+        return Promise.resolve([]);
+      }
+      return runPromise(
+        client
+          .unsteer({ runId })
+          .pipe(Effect.catchCause(() => Effect.succeed<ReadonlyArray<string>>([]))),
+      );
+    },
+    onCycleReasoning: () => {
+      Queue.offerUnsafe(inputs, { text: "", attachments: [], cycleReasoning: true });
+    },
     onInterrupt: () => {
-      if (stop !== undefined) {
-        Deferred.doneUnsafe(stop, Effect.void);
+      if (inFlight !== undefined) {
+        Deferred.doneUnsafe(inFlight.stop, Effect.void);
       }
     },
     onExit: quit,
@@ -218,22 +288,61 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   yield* Fiber.join(themed);
   yield* Effect.promise(() => render(tui.view, renderer));
 
+  // Commands run without the platform in their context; hand it over for the file write.
+  const platform = yield* Effect.context<FileSystem.FileSystem | Path.Path>();
+  const runPromise = Effect.runPromiseWith(platform);
+  const persist = Effect.gen(function* () {
+    const chosen = yield* Ref.get(model);
+    const levels = yield* Ref.get(chosenLevels);
+    yield* savePreferences(
+      Option.isSome(chosen)
+        ? { version: 1, reasoning: levels, model: chosen.value }
+        : { version: 1, reasoning: levels },
+    );
+  }).pipe(
+    Effect.provideContext(platform),
+    Effect.catchCause((cause) => Effect.sync(() => tui.error(describeCause(cause)))),
+  );
+
+  /** The model later runs use, with the thinking level last chosen on it when it still has one. */
   const setModel = Effect.fn("Cli.chat.setModel")(function* (ref: string) {
     yield* Ref.set(model, Option.some(ref));
-    tui.setModel(ref, yield* contextWindow(models, ref));
+    const facts = yield* modelFacts(models, ref);
+    yield* Ref.set(reasoningLevels, facts.reasoningLevels);
+    const level = Option.fromNullishOr((yield* Ref.get(chosenLevels))[ref]).pipe(
+      Option.filter((l) => facts.reasoningLevels.includes(l)),
+    );
+    yield* Ref.set(reasoning, level);
+    tui.setModel(ref, facts.contextWindow);
+    tui.setReasoning(level);
   });
   if (Option.isSome(initialModel)) {
     yield* setModel(initialModel.value);
   }
-  // Commands run without the platform in their context; hand it over for the file write.
-  const platform = yield* Effect.context<FileSystem.FileSystem | Path.Path>();
   /** A choice made here is the one the next chat starts on; a resumed conversation's is not. */
   const chooseModel = Effect.fn("Cli.chat.chooseModel")(function* (ref: string) {
     yield* setModel(ref);
-    yield* saveLastModel(ref).pipe(
-      Effect.provideContext(platform),
-      Effect.catchCause((cause) => Effect.sync(() => tui.error(describeCause(cause)))),
-    );
+    yield* persist;
+  });
+
+  /** ctrl+t: the next of the model's thinking levels, round to its default after the last, as opencode cycles variants. */
+  const cycleReasoning = Effect.gen(function* () {
+    const chosen = yield* Ref.get(model);
+    const levels = yield* Ref.get(reasoningLevels);
+    if (Option.isNone(chosen) || levels.length === 0) {
+      tui.flash("this model has no thinking levels");
+      return;
+    }
+    const current = yield* Ref.get(reasoning);
+    const at = Option.match(current, { onNone: () => -1, onSome: (l) => levels.indexOf(l) });
+    const next = at + 1 < levels.length ? Option.some(levels[at + 1] ?? "") : Option.none<string>();
+    yield* Ref.set(reasoning, next);
+    yield* Ref.update(chosenLevels, (all) => {
+      const { [chosen.value]: _, ...rest } = all;
+      return Option.isSome(next) ? { ...rest, [chosen.value]: next.value } : rest;
+    });
+    tui.setReasoning(next);
+    yield* persist;
   });
 
   /** Show an earlier conversation and make it the one the next input continues. */
@@ -251,6 +360,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
         onNone: () => 0,
         onSome: (u) => u.latest.inputTokens + u.latest.outputTokens,
       }),
+      Option.flatMap(latest, (u) => Option.fromNullishOr(u.totalCost)),
     );
     const now = yield* DateTime.now;
     tui.note(`Resumed "${info.title}" · ${info.messages} messages · ${ago(info.updatedAt, now)}`);
@@ -264,9 +374,13 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     tui.note("No conversation to continue; this is a new one.");
   }
 
-  const runOnce = Effect.fn("Cli.chat.runOnce")(function* ({ text, attachments }: Input) {
+  const runOnce = Effect.fn("Cli.chat.runOnce")(function* (
+    { text, attachments }: Input,
+    run: InFlight,
+  ) {
     const conversationId = Option.getOrUndefined(yield* Ref.get(conversation));
     const chosen = Option.getOrUndefined(yield* Ref.get(model));
+    const level = Option.getOrUndefined(yield* Ref.get(reasoning));
     const outcome = yield* client
       .run({
         agent: agent.name,
@@ -275,34 +389,32 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
         conversationId,
         model: chosen,
         directory: process.cwd(),
+        reasoning: level,
       })
       .pipe(
         Stream.runForEach((event) =>
           Effect.gen(function* () {
             if (event._tag === "RunStarted") {
               yield* Ref.set(conversation, Option.some(event.conversationId));
+              run.runId = event.runId;
+              yield* Deferred.succeed(run.named, event.runId);
             }
             if (event._tag === "Compacted") {
               // What the model holds is the summary now; the next call says how much that is.
               yield* Ref.set(usage, Option.none());
             }
             if (event._tag === "TokenUsage") {
-              yield* Ref.update(usage, (previous) =>
-                Option.some({
+              yield* Ref.update(usage, (previous) => {
+                const before = Option.getOrUndefined(previous);
+                const spent = before?.totalCost;
+                return Option.some({
                   latest: event,
-                  calls: Option.match(previous, { onNone: () => 1, onSome: (u) => u.calls + 1 }),
-                  totalInputTokens:
-                    Option.match(previous, {
-                      onNone: () => 0,
-                      onSome: (u) => u.totalInputTokens,
-                    }) + event.inputTokens,
-                  totalOutputTokens:
-                    Option.match(previous, {
-                      onNone: () => 0,
-                      onSome: (u) => u.totalOutputTokens,
-                    }) + event.outputTokens,
-                }),
-              );
+                  calls: (before?.calls ?? 0) + 1,
+                  totalInputTokens: (before?.totalInputTokens ?? 0) + event.inputTokens,
+                  totalOutputTokens: (before?.totalOutputTokens ?? 0) + event.outputTokens,
+                  totalCost: event.cost === undefined ? spent : (spent ?? 0) + event.cost,
+                });
+              });
             }
             tui.apply(event);
           }),
@@ -327,6 +439,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     agent: agent.name,
     model: Ref.get(model),
     setModel: chooseModel,
+    reasoning: Ref.get(reasoning),
     usage: Ref.get(usage),
     conversation: Effect.gen(function* () {
       const id = yield* Ref.get(conversation);
@@ -414,19 +527,28 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   const loop = Effect.gen(function* () {
     while (true) {
       const input = yield* Queue.take(inputs);
+      if (input.cycleReasoning === true) {
+        yield* cycleReasoning;
+        continue;
+      }
       if (input.text.startsWith("/")) {
         yield* runCommand(input.text);
         continue;
       }
-      const interrupt = yield* Deferred.make<void>();
-      stop = interrupt;
+      const run: InFlight = {
+        stop: yield* Deferred.make<void>(),
+        named: yield* Deferred.make<string>(),
+        ended: yield* Deferred.make<void>(),
+      };
+      inFlight = run;
       tui.addUser(input.text);
       tui.setBusy(true);
       const finished = yield* Effect.race(
-        Effect.as(runOnce(input), true),
-        Effect.as(Deferred.await(interrupt), false),
+        Effect.as(runOnce(input, run), true),
+        Effect.as(Deferred.await(run.stop), false),
       );
-      stop = undefined;
+      inFlight = undefined;
+      yield* Deferred.succeed(run.ended, undefined);
       if (!finished) {
         tui.interrupted();
       }

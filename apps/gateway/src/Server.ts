@@ -8,6 +8,7 @@ import {
   dataDir,
   PluginHost,
   Runner,
+  Steering,
 } from "@magentic/core";
 import { Identity } from "@magentic/identity";
 import { mcpPlugin, McpServers } from "@magentic/mcp";
@@ -145,8 +146,13 @@ export const ConversationStoreLayer = Layer.unwrap(
   Effect.map(dataDir, (data) => ConversationStore.layerFile(`${data}/conversations`)),
 );
 
-/** Conversations behind the runner, and beside it for listing; tools, models, and events come from the host. */
-export const RunnerLayer = Runner.layer.pipe(Layer.provideMerge(ConversationStoreLayer));
+/**
+ * Conversations behind the runner, and beside it for listing, as is the
+ * steering the handlers offer to; tools, models, and events come from the host.
+ */
+export const RunnerLayer = Runner.layer.pipe(
+  Layer.provideMerge(Layer.mergeAll(ConversationStoreLayer, Steering.layer)),
+);
 
 const AdmissionLayer = Layer.mergeAll(Identity.layerLocal, Policy.layerAllowAll, Audit.layerMemory);
 

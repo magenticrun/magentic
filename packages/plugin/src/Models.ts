@@ -1,4 +1,13 @@
-import { Data, type Effect, type Layer, Option, type Redacted, Schema, type Scope } from "effect";
+import {
+  type Context,
+  Data,
+  type Effect,
+  type Layer,
+  Option,
+  type Redacted,
+  Schema,
+  type Scope,
+} from "effect";
 import type { LanguageModel } from "effect/unstable/ai";
 import type { CatalogModel } from "./Catalog.ts";
 import type { Registration } from "./Plugin.ts";
@@ -54,6 +63,70 @@ export interface LoginMethod extends Choice {
   run(ui: LoginUi): Effect.Effect<string, LoginError | LoginCancelled>;
 }
 
+/** What a model charges, in US dollars per million tokens. */
+export const ModelCost = Schema.Struct({
+  input: Schema.Finite,
+  output: Schema.Finite,
+  /** Input served from the prompt cache; `input` when the catalog does not say. */
+  cacheRead: Schema.optional(Schema.Finite),
+  /** Input written to the prompt cache; `input` when the catalog does not say. */
+  cacheWrite: Schema.optional(Schema.Finite),
+});
+export type ModelCost = typeof ModelCost.Type;
+
+/**
+ * Thinking budgets do not go past this, whatever the model's output limit:
+ * past it the model spends minutes on a turn, and opencode draws the line
+ * here too.
+ */
+const BUDGET_CAP = 32_000;
+
+/**
+ * A thinking budget for a level name, on a model whose thinking is set by
+ * budget: `high` half of what the model allows, `max` all of it. None when
+ * the level is not one of those, or the model has no room to think.
+ */
+export const reasoningBudget = (
+  model: { readonly output: number },
+  level: string,
+  minimum = 0,
+): Option.Option<number> => {
+  const maximum = Math.min(model.output - 1, BUDGET_CAP - 1);
+  if (maximum <= 0) {
+    return Option.none();
+  }
+  switch (level) {
+    case "high":
+      return Option.some(Math.min(Math.max(minimum, Math.floor((maximum + 1) / 2)), maximum));
+    case "max":
+      return Option.some(maximum);
+    default:
+      return Option.none();
+  }
+};
+
+/**
+ * The level names a catalog model's thinking can be set to, least first,
+ * the way opencode lists its variants: the effort names when it takes an
+ * effort, `high` and `max` budgets when it takes a budget, nothing when it
+ * only turns on and off or cannot be set at all.
+ */
+export const reasoningLevelsOf = (model: CatalogModel): ReadonlyArray<string> => {
+  const options = model.reasoning_options ?? [];
+  const effort = options.find((option) => option.type === "effort");
+  if (effort !== undefined) {
+    return (effort.values ?? []).map((value) => value ?? "none");
+  }
+  const budget = options.find((option) => option.type === "budget_tokens");
+  if (budget === undefined) {
+    return [];
+  }
+  const output = model.limit?.output ?? 0;
+  return ["high", "max"].filter((level) =>
+    Option.isSome(reasoningBudget({ output }, level, budget.min ?? 0)),
+  );
+};
+
 /** One model a provider can serve. */
 export class ModelInfo extends Schema.Class<ModelInfo>("magentic/plugin/ModelInfo")({
   id: Schema.NonEmptyString,
@@ -63,6 +136,10 @@ export class ModelInfo extends Schema.Class<ModelInfo>("magentic/plugin/ModelInf
   /** Token limits; 0 when the catalog does not say. */
   context: Schema.Finite,
   output: Schema.Finite,
+  /** Names the model's thinking can be set to, least first; empty when it cannot be set. */
+  reasoningLevels: Schema.Array(Schema.String),
+  /** What it charges; absent when the catalog lists no price, or the plan is not metered. */
+  cost: Schema.optional(ModelCost),
 }) {
   static readonly fromCatalog = (model: CatalogModel): ModelInfo =>
     new ModelInfo({
@@ -72,6 +149,16 @@ export class ModelInfo extends Schema.Class<ModelInfo>("magentic/plugin/ModelInf
       toolCall: model.tool_call ?? true,
       context: model.limit?.context ?? 0,
       output: model.limit?.output ?? 0,
+      reasoningLevels: reasoningLevelsOf(model),
+      cost:
+        model.cost === undefined
+          ? undefined
+          : {
+              input: model.cost.input,
+              output: model.cost.output,
+              cacheRead: model.cost.cache_read,
+              cacheWrite: model.cost.cache_write,
+            },
     });
 }
 
@@ -120,6 +207,13 @@ export interface ModelProviderRegistration extends Choice {
     Option.Option<Layer.Layer<LanguageModel.LanguageModel, ModelProviderError>>,
     LoginError
   >;
+  /**
+   * What to give a model call so the model thinks at `level`, one of the
+   * model's `reasoningLevels`: the provider's request configuration, as a
+   * context the runner provides around the call. None when the model has no
+   * such level, and the call goes out as it would have.
+   */
+  reasoning?(model: string, level: string): Effect.Effect<Option.Option<Context.Context<never>>>;
 }
 
 export interface ModelDomain {

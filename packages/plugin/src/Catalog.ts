@@ -35,6 +35,29 @@ export class CatalogModel extends Schema.Class<CatalogModel>("magentic/plugin/Ca
   limit: Schema.optional(
     Schema.Struct({ context: Schema.Finite, output: Schema.optional(Schema.Finite) }),
   ),
+  /** US dollars per million tokens. */
+  cost: Schema.optional(
+    Schema.Struct({
+      input: Schema.Finite,
+      output: Schema.Finite,
+      cache_read: Schema.optional(Schema.Finite),
+      cache_write: Schema.optional(Schema.Finite),
+    }),
+  ),
+  /**
+   * How the model's thinking can be set, when it can: by an effort name
+   * (`values`), by a token budget (`min`, `max`), or only on and off.
+   */
+  reasoning_options: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        type: Schema.String,
+        values: Schema.optional(Schema.Array(Schema.NullOr(Schema.String))),
+        min: Schema.optional(Schema.Finite),
+        max: Schema.optional(Schema.Finite),
+      }),
+    ),
+  ),
   /** The protocol (an AI SDK package name) and base URL when they differ from the provider's. */
   provider: Schema.optional(
     Schema.Struct({ npm: Schema.optional(Schema.String), api: Schema.optional(Schema.String) }),

@@ -1,4 +1,4 @@
-import type { Principal } from "@magentic/protocol";
+import type { Capability, Principal } from "@magentic/protocol";
 import { Context, type Effect, type Schema, type Scope } from "effect";
 import type { Tool, Toolkit } from "effect/unstable/ai";
 import type { PluginSetupError, Registration } from "./Plugin.ts";
@@ -8,13 +8,25 @@ export type ToolServices<Tools extends Record<string, Tool.Any>> =
   | Tool.HandlerServices<Tools[keyof Tools]>
   | Tool.ResultDecodingServices<Tools[keyof Tools]>;
 
+/** What a `tools` entry is matched against: the registered name and the capability it declared. */
+export interface ToolIdentity {
+  readonly name: string;
+  readonly capability: Capability;
+}
+
 /**
- * Whether an entry of an agent's `tools` list names a tool. An entry ending in
- * `*` matches every tool with that prefix, so `linear_*` takes every tool an
- * MCP server called `linear` contributes.
+ * Whether an entry of an agent's `tools` list takes a tool. An entry is a
+ * name; a prefix ending in `*`, so `linear_*` takes every tool an MCP server
+ * called `linear` contributes; or a capability followed by `:*`, so `mcp:*`
+ * takes every tool from every MCP server and `fs:read:*` every reader,
+ * whichever plugin registered it. `*` alone takes everything.
  */
-export const toolMatches = (pattern: string, name: string): boolean =>
-  pattern.endsWith("*") ? name.startsWith(pattern.slice(0, -1)) : pattern === name;
+export const toolMatches = (pattern: string, tool: ToolIdentity): boolean => {
+  if (pattern.endsWith(":*")) {
+    return tool.capability === pattern.slice(0, -2);
+  }
+  return pattern.endsWith("*") ? tool.name.startsWith(pattern.slice(0, -1)) : pattern === tool.name;
+};
 
 /** Who is calling, from which run. Provided to every tool handler per call. */
 export class ToolCallContext extends Context.Service<

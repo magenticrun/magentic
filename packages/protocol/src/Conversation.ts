@@ -9,6 +9,8 @@ export const ConversationUsage = Schema.Struct({
   calls: Schema.Finite,
   totalInputTokens: Schema.Finite,
   totalOutputTokens: Schema.Finite,
+  /** Dollars spent so far at the catalog's prices; absent when no call had a price. */
+  totalCost: Schema.optional(Schema.Finite),
 });
 export type ConversationUsage = typeof ConversationUsage.Type;
 

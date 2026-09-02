@@ -9,6 +9,7 @@ import {
   type Plugin,
 } from "@magentic/plugin";
 import { Effect, Layer, Option, type Redacted } from "effect";
+import { reasoningContext } from "../Reasoning.ts";
 import { LanguageModel } from "effect/unstable/ai";
 import { HttpClient } from "effect/unstable/http";
 import { apiKeyHint, type ApiKeyProvider, ApiKeyStore } from "../ApiKeys.ts";
@@ -143,6 +144,15 @@ const apiKeyPlugin = (
             : Option.some(listed.route);
         });
 
+      /** The request configuration for a thinking level, in the protocol the model's route speaks. */
+      const reasoning = (modelId: string, level: string) =>
+        Effect.flatMap(routed, (all) => {
+          const listed = all.find((entry) => entry.model.id === modelId);
+          return listed === undefined
+            ? Effect.succeedNone
+            : reasoningContext(listed.route.protocol, listed.model, level);
+        });
+
       yield* ctx.model.register({
         id,
         name: options.name,
@@ -175,6 +185,7 @@ const apiKeyPlugin = (
             }
             return Option.some(layerFor(route.value, modelId, k.value, http));
           }),
+        reasoning,
       });
     }),
   });

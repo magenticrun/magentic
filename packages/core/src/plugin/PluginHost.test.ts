@@ -243,6 +243,22 @@ layer(
       assert.deepStrictEqual(Object.keys(kit.tools), ["echo"]);
     }),
   );
+
+  it.effect("a capability followed by :* lists every tool declaring it", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry;
+      const readers = yield* registry.forAgent(
+        new AgentDefinition({ name: "x", description: "", prompt: "", tools: ["fs:read:*"] }),
+        { runId: "run-4", principal: alice },
+      );
+      assert.deepStrictEqual(Object.keys(readers.tools), ["echo"]);
+      const shells = yield* registry.forAgent(
+        new AgentDefinition({ name: "x", description: "", prompt: "", tools: ["shell:*"] }),
+        { runId: "run-5", principal: alice },
+      );
+      assert.deepStrictEqual(Object.keys(shells.tools), []);
+    }),
+  );
 });
 
 layer(host([echoPlugin("echo")], ["echo"]))("PluginHost with a disabled plugin", (it) => {
@@ -401,6 +417,7 @@ const rotatingProvider = define({
             toolCall: true,
             context: 0,
             output: 0,
+            reasoningLevels: [],
           }),
         ]),
         defaultModel: "m",

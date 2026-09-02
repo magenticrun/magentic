@@ -55,6 +55,8 @@ export interface SessionUsage {
   readonly calls: number;
   readonly totalInputTokens: number;
   readonly totalOutputTokens: number;
+  /** Dollars spent since the chat opened, at the catalog's prices; absent when no call had a price. */
+  readonly totalCost?: number | undefined;
 }
 
 /** A command that could not do what was asked, in words for the transcript. */
@@ -69,6 +71,8 @@ export interface ChatSession {
   /** The `provider/model` runs use, when one was chosen. */
   readonly model: Effect.Effect<Option.Option<string>>;
   setModel(ref: string): Effect.Effect<void>;
+  /** How hard the model is asked to think, one of its `reasoningLevels`; none for its default. */
+  readonly reasoning: Effect.Effect<Option.Option<string>>;
   /** None before the first reply. */
   readonly usage: Effect.Effect<Option.Option<SessionUsage>>;
   /** The conversation the next input continues; none until the first run, or after `startNew`. */

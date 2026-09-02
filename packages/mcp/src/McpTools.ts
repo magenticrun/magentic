@@ -97,15 +97,36 @@ const annotate = <T extends Tool.Any>(tool: T, definition: McpToolDefinition): T
   return annotated;
 };
 
+/**
+ * A dynamic tool built from a JSON Schema decodes its arguments with
+ * `Schema.Unknown`, and the OpenAI provider cannot derive a codec from that
+ * when a call comes back: it wants an object at the root, so every call to
+ * the tool failed. The model still sees the server's schema, which
+ * `Tool.getJsonSchema` prefers over the decoder; only the decoder changes, to
+ * one that takes any object, which is all the server's validator gets anyway.
+ */
+const withObjectArguments = <T extends Tool.Any>(tool: T): T =>
+  // SAFETY: a clone with the prototype and every field of `tool`; the one field replaced is a
+  // schema of the same kind, and the handler already reads its decoded value as an object.
+  Object.assign(Object.create(Object.getPrototypeOf(tool)), tool, {
+    parametersSchema: ToolArguments,
+  }) as T;
+
 const makeTool = (name: string, definition: McpToolDefinition) =>
   annotate(
-    Tool.dynamic(name, {
-      description: definition.description ?? definition.title ?? definition.name,
-      parameters: definition.inputSchema,
-      success: Schema.Json,
-      failure: McpToolError,
-      failureMode: "return",
-    }).annotate(CapabilityAnnotation, "mcp"),
+    withObjectArguments(
+      Tool.dynamic(name, {
+        description: definition.description ?? definition.title ?? definition.name,
+        parameters: definition.inputSchema,
+        success: Schema.Json,
+        failure: McpToolError,
+        failureMode: "return",
+      })
+        .annotate(CapabilityAnnotation, "mcp")
+        // The server wrote the schema for its own validator, not for OpenAI's strict
+        // mode, which rejects any optional property; the server checks the arguments.
+        .annotate(Tool.Strict, false),
+    ),
     definition,
   );
 

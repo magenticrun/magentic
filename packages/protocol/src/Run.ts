@@ -19,8 +19,26 @@ export const RunRequest = Schema.Struct({
   model: Schema.optional(Schema.String),
   /** Where the surface is working; conversations are listed by it. */
   directory: Schema.optional(Schema.String),
+  /**
+   * How hard the model should think: one of its `reasoningLevels`. Absent
+   * means the provider's default.
+   */
+  reasoning: Schema.optional(Schema.String),
 });
 export type RunRequest = typeof RunRequest.Type;
+
+/**
+ * More for a run in flight: appended to the conversation and shown to the
+ * model at its next call, before it speaks again, without waiting for the
+ * run to end. What arrives while the model is speaking waits for its next
+ * call; what arrives after it has answered starts another.
+ */
+export const SteerRequest = Schema.Struct({
+  runId: Schema.String,
+  input: Schema.NonEmptyString,
+  attachments: Schema.optional(Schema.Array(Attachment)),
+});
+export type SteerRequest = typeof SteerRequest.Type;
 
 export const RunStarted = Schema.TaggedStruct("RunStarted", {
   runId: Schema.String,
@@ -40,6 +58,12 @@ export const ToolResult = Schema.TaggedStruct("ToolResult", {
   result: Schema.Json,
   isFailure: Schema.Boolean,
 });
+/**
+ * Inputs steered into the run reached the model: they are one user message
+ * in the history now, and the next model call sees them.
+ */
+export const Steered = Schema.TaggedStruct("Steered", { inputs: Schema.Array(Schema.String) });
+export type Steered = typeof Steered.Type;
 /**
  * Where the context goes, estimated at four characters a token from what the
  * runner sent, since providers report one total. `toolCalls` covers the
@@ -70,6 +94,8 @@ export const TokenUsage = Schema.TaggedStruct("TokenUsage", {
   cacheWriteTokens: Schema.optional(Schema.Finite),
   /** Output spent thinking; part of `outputTokens`. */
   reasoningTokens: Schema.optional(Schema.Finite),
+  /** What the call cost in US dollars at the catalog's prices; absent when the model has none listed. */
+  cost: Schema.optional(Schema.Finite),
   breakdown: ContextBreakdown,
 });
 export type TokenUsage = typeof TokenUsage.Type;
@@ -107,6 +133,7 @@ export const RunEvent = Schema.Union([
   ReasoningDelta,
   ToolCall,
   ToolResult,
+  Steered,
   TokenUsage,
   CompactionStarted,
   Compacted,
@@ -115,6 +142,11 @@ export const RunEvent = Schema.Union([
   RunFailed,
 ]);
 export type RunEvent = typeof RunEvent.Type;
+
+/** No run in flight has this id: it ended, or never was. */
+export class RunNotFound extends Schema.TaggedError<RunNotFound>()("RunNotFound", {
+  runId: Schema.String,
+}) {}
 
 export class RunDenied extends Schema.TaggedError<RunDenied>()("RunDenied", {
   agent: Schema.String,
