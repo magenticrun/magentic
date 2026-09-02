@@ -15,6 +15,12 @@ export const acquireRenderer: Effect.Effect<CliRenderer, never, Scope.Scope> =
         consoleMode: "disabled",
         // The wheel scrolls the transcript; without tracking, the terminal keeps the wheel.
         useMouse: true,
+        // A click would otherwise focus the nearest focusable renderable it
+        // landed on, and the transcript scrollbox is one, so clicking it (or
+        // clicking into the window from elsewhere, which terminals forward)
+        // took the keyboard away from the composer. The view decides what
+        // is focused.
+        autoFocus: false,
       }),
     ),
     (renderer) => Effect.sync(() => renderer.destroy()),
