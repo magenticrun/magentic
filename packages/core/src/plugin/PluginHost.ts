@@ -3,6 +3,7 @@ import {
   type AgentDraft,
   AgentAlreadyRegistered,
   capabilityOf,
+  type CommandRegistration,
   type ModelProviderRegistration,
   type Plugin,
   type PluginContext,
@@ -32,6 +33,7 @@ import type { Tool, Toolkit } from "effect/unstable/ai";
 import { AgentRegistry } from "../AgentRegistry.ts";
 import { describeCause } from "../Errors.ts";
 import { RunEventBus } from "../EventBus.ts";
+import { commandRegistryOver, CommandRegistry } from "./CommandRegistry.ts";
 import { modelRegistryOver, ModelRegistry } from "./ModelRegistry.ts";
 import { openRegistry, type PluginRef, type Registry } from "./Registry.ts";
 import {
@@ -91,7 +93,7 @@ export class PluginHost extends Context.Service<
   static readonly layer = <const Plugins extends ReadonlyArray<LoadedPlugin<any>>>(
     options: PluginHostOptions<Plugins>,
   ): Layer.Layer<
-    PluginHost | ToolRegistry | ModelRegistry | AgentRegistry | RunEventBus,
+    PluginHost | ToolRegistry | ModelRegistry | AgentRegistry | CommandRegistry | RunEventBus,
     never,
     PluginRequirements<Plugins> | PluginServices | ToolCallGuard
   > =>
@@ -147,6 +149,20 @@ export class PluginHost extends Context.Service<
         const tools = yield* openRegistry<ToolEntry>();
         const toolHooks = yield* openRegistry<ToolHookEntry>();
         const providers = yield* openRegistry<ModelProviderRegistration>();
+        const commands = yield* openRegistry<CommandRegistration>();
+
+        const registerCommand = Effect.fn("PluginHost.registerCommand")(function* (
+          ref: PluginRef,
+          command: CommandRegistration,
+        ) {
+          if ((yield* commands.values).some((c) => c.name === command.name)) {
+            return yield* new PluginSetupError({
+              plugin: ref.id,
+              message: `command /${command.name} is already registered by another plugin`,
+            });
+          }
+          return yield* commands.register(ref, command);
+        });
 
         const registerToolkit = <Tools extends Record<string, Tool.Any>>(
           ref: PluginRef,
@@ -213,8 +229,12 @@ export class PluginHost extends Context.Service<
               // SAFETY: `name` selects the matching event type by construction of ToolHooks.
               toolHooks.register(ref, { name, handler } as ToolHookEntry),
           },
-          model: { register: (provider) => providers.register(ref, provider) },
+          model: {
+            register: (provider) => providers.register(ref, provider),
+            providers: providers.values,
+          },
           agent: { transform: (apply) => transforms.register(ref, apply), rebuild },
+          command: { register: (command) => registerCommand(ref, command) },
           event: {
             subscribe: <Tag extends RunEvent["_tag"]>(tag: Tag) =>
               bus.stream.pipe(
@@ -284,6 +304,7 @@ export class PluginHost extends Context.Service<
         const plugins = Effect.gen(function* () {
           const toolEntries = yield* tools.entries;
           const providerEntries = yield* providers.entries;
+          const commandEntries = yield* commands.entries;
           const owner = yield* Ref.get(owners);
           return states.map(
             (state) =>
@@ -296,6 +317,9 @@ export class PluginHost extends Context.Service<
                   .filter((entry) => entry.plugin.id === state.id)
                   .map((entry) => entry.value.id),
                 agents: [...owner].flatMap(([name, by]) => (by === state.id ? [name] : [])),
+                commands: commandEntries
+                  .filter((entry) => entry.plugin.id === state.id)
+                  .map((entry) => entry.value.name),
               }),
           );
         });
@@ -314,6 +338,7 @@ export class PluginHost extends Context.Service<
           ),
           Context.add(ModelRegistry, models),
           Context.add(AgentRegistry, agentRegistry),
+          Context.add(CommandRegistry, commandRegistryOver(commands.values)),
           Context.add(RunEventBus, bus),
         );
       }),

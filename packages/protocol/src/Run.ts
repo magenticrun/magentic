@@ -4,6 +4,8 @@ import { Schema } from "effect";
 export const RunRequest = Schema.Struct({
   input: Schema.NonEmptyString,
   conversationId: Schema.optional(Schema.String),
+  /** A `provider/model` reference to run on instead of the agent's own. */
+  model: Schema.optional(Schema.String),
 });
 export type RunRequest = typeof RunRequest.Type;
 

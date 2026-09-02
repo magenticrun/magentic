@@ -1,6 +1,7 @@
 export * from "./Agents.ts";
 export * from "./Capability.ts";
 export * from "./Catalog.ts";
+export * from "./Commands.ts";
 export * from "./Context.ts";
 export * from "./Events.ts";
 export * from "./Models.ts";

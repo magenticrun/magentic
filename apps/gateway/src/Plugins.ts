@@ -16,6 +16,11 @@ export const configDir = Effect.gen(function* () {
   return path.resolve(dir);
 });
 
+/** Per-person state outside the config directory, beside the credential files. */
+export const dataDir = Config.string("MAGENTIC_DATA_DIR").pipe(
+  Config.orElse(() => Config.map(Config.string("HOME"), (home) => `${home}/.config/magentic`)),
+);
+
 export class GatewayConfigError extends Schema.TaggedError<GatewayConfigError>()(
   "GatewayConfigError",
   { file: Schema.String, message: Schema.String },

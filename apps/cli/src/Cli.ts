@@ -5,6 +5,7 @@ import { FetchHttpClient } from "effect/unstable/http";
 import { auth } from "./Auth.ts";
 import { chat } from "./Chat.ts";
 import { ensureGateway, gatewayClient } from "./Gateway.ts";
+import { LocalHost } from "./Host.ts";
 import { run } from "./Run.ts";
 
 const gateway = Flag.string("gateway").pipe(
@@ -27,7 +28,9 @@ const agentArgument = Argument.string("agent").pipe(
 /** `magentic` on its own opens the chat. */
 const magentic = Command.make("magentic", { agent: agentArgument }).pipe(
   Command.withSharedFlags({ gateway }),
-  Command.withHandler(({ agent, gateway: baseUrl }) => chat({ baseUrl, agent })),
+  Command.withHandler(({ agent, gateway: baseUrl }) =>
+    chat({ baseUrl, agent }).pipe(Effect.provide(LocalHost)),
+  ),
   Command.withDescription("Chat with an agent in the terminal"),
 );
 
@@ -68,6 +71,7 @@ const pluginList = Command.make(
         ...plugin.tools.map((t) => `tool ${t}`),
         ...plugin.providers.map((p) => `provider ${p}`),
         ...plugin.agents.map((a) => `agent ${a}`),
+        ...plugin.commands.map((c) => `command /${c}`),
       ].join(", ");
       const status = plugin.status === "failed" ? `failed: ${plugin.error ?? ""}` : plugin.status;
       yield* Console.log(`${plugin.id}\t${plugin.source}\t${status}\t${contributed}`);

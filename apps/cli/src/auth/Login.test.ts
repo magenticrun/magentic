@@ -39,7 +39,7 @@ const Stores = Layer.mergeAll(Codex.CodexAuthStore.layerMemory(), ApiKeyStore.la
 
 const TestLayer = PluginHost.layer({
   plugins: modelPlugins.map(builtin),
-  paths: { config: "/nonexistent/magentic", workspace: "/nonexistent" },
+  paths: { config: "/nonexistent/magentic", workspace: "/nonexistent", data: "/nonexistent" },
 }).pipe(
   Layer.provideMerge(Stores),
   Layer.provide(ToolCallGuard.layerAllowAll),

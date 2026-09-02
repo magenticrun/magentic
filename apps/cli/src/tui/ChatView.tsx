@@ -1,13 +1,26 @@
 import type { TextareaOptions, TextareaRenderable, ThemeMode } from "@opentui/core";
+import type { Picked, Picker } from "@magentic/plugin";
 import type { RunEvent } from "@magentic/protocol";
 import { type JSX, useKeyboard, useRenderer } from "@opentui/solid";
 import { Option, Predicate, type Schema } from "effect";
-import { batch, createEffect, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js";
+import {
+  batch,
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  Match,
+  onCleanup,
+  Show,
+  Switch,
+} from "solid-js";
 import { createStore, produce } from "solid-js/store";
+import { PickerView } from "./Picker.tsx";
 import { type Palette, paletteFor } from "./Theme.ts";
 
 export type TextLine = {
-  readonly kind: "user" | "assistant" | "error";
+  /** A note is what a command reports, in the transcript but not from the agent. */
+  readonly kind: "user" | "assistant" | "error" | "note";
   readonly text: string;
 };
 
@@ -27,6 +40,8 @@ export type Line = TextLine | ToolLine;
 type State = {
   agent: string;
   gateway: string;
+  /** The `provider/model` runs use, when known. */
+  model: Option.Option<string>;
   /** What the agent is doing right now; only shown while busy. */
   status: string;
   lines: Array<Line>;
@@ -52,6 +67,8 @@ const COMPOSER_KEYS: NonNullable<TextareaOptions["keyBindings"]> = [
   { name: "kpenter", shift: true, action: "newline" },
 ];
 
+const isEnter = (name: string) => name === "return" || name === "kpenter" || name === "linefeed";
+
 const clip = (text: string): string => {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > 160 ? `${flat.slice(0, 157)}…` : flat;
@@ -76,11 +93,29 @@ const summariseParams = (value: Schema.Json): string => {
 const asTool = (line: Line): ToolLine | undefined => (line.kind === "tool" ? line : undefined);
 const asText = (line: Line): TextLine | undefined => (line.kind === "tool" ? undefined : line);
 
+/** What the slash-command popover lists. */
+export interface CommandInfo {
+  readonly name: string;
+  readonly description: string;
+}
+
+/** A picker waiting for its answer. */
+interface Dialog {
+  readonly picker: Picker;
+  readonly done: (picked: Option.Option<Picked>) => void;
+}
+
 export interface ChatTui {
   readonly view: () => JSX.Element;
   /** Fold one run event into the transcript. */
   apply(event: RunEvent): void;
   addUser(text: string): void;
+  /** A line from a command. */
+  note(text: string): void;
+  error(text: string): void;
+  setModel(ref: string): void;
+  /** Show a picker over the composer until `done` is called with the answer. */
+  pick(picker: Picker, done: (picked: Option.Option<Picked>) => void): void;
   /** Note that the person stopped the run in flight. */
   interrupted(): void;
   setStatus(status: string): void;
@@ -92,6 +127,8 @@ export const createChatTui = (options: {
   readonly gateway: string;
   /** The `provider/model` the agent runs on, when the gateway could tell. */
   readonly model: Option.Option<string>;
+  /** Slash commands the composer completes. */
+  readonly commands: ReadonlyArray<CommandInfo>;
   readonly onSubmit: (text: string) => void;
   /** Esc, or ctrl+c, while a run is in flight. */
   readonly onInterrupt: () => void;
@@ -100,6 +137,7 @@ export const createChatTui = (options: {
   const [state, setState] = createStore<State>({
     agent: options.agent,
     gateway: options.gateway,
+    model: options.model,
     status: "",
     lines: [],
     busy: false,
@@ -144,6 +182,17 @@ export const createChatTui = (options: {
       }),
     );
 
+  // Signals rather than store fields: a dialog carries a callback.
+  const [dialog, setDialog] = createSignal<Dialog | undefined>(undefined);
+  const pick = (picker: Picker, done: Dialog["done"]) =>
+    setDialog({
+      picker,
+      done: (picked) => {
+        setDialog(undefined);
+        done(picked);
+      },
+    });
+
   const apply = (event: RunEvent) =>
     batch(() => {
       switch (event._tag) {
@@ -180,8 +229,30 @@ export const createChatTui = (options: {
     let disarm: ReturnType<typeof setTimeout> | undefined;
     onCleanup(() => clearTimeout(disarm));
     useKeyboard((key) => {
+      const listed = popover();
+      if (listed !== undefined && !key.ctrl && !key.meta) {
+        const count = listed.length;
+        const chosen = listed[selected()];
+        if (key.name === "up") {
+          setSelected((n) => (n - 1 + count) % count);
+        } else if (key.name === "down") {
+          setSelected((n) => (n + 1) % count);
+        } else if (key.name === "tab" && chosen !== undefined) {
+          complete(chosen);
+        } else if (isEnter(key.name) && chosen !== undefined && !state.busy) {
+          options.onSubmit(`/${chosen.name}`);
+          clear();
+        } else if (key.name === "escape") {
+          setDismissed(true);
+        } else {
+          return;
+        }
+        // Handled here; the composer must not also insert or submit.
+        key.preventDefault();
+        return;
+      }
       if (key.name === "escape") {
-        if (state.busy) {
+        if (state.busy && dialog() === undefined) {
           options.onInterrupt();
         }
         return;
@@ -241,21 +312,63 @@ export const createChatTui = (options: {
         editor.setViewport(viewport.offsetX, top, viewport.width, viewport.height, false);
       }
     };
+    const clear = () => {
+      composer?.setText("");
+      setRows(1);
+      setDraft("");
+    };
     const submit = () => {
       if (composer === undefined) {
         return;
       }
       const text = composer.plainText.trim();
-      if (text.length === 0 || state.busy) {
+      if (text.length === 0 || state.busy || dialog() !== undefined) {
         return;
       }
       options.onSubmit(text);
-      composer.setText("");
-      setRows(1);
+      clear();
+    };
+
+    // While the draft is one word starting with a slash, the commands it could
+    // become are listed under the composer: tab completes, enter runs.
+    const [draft, setDraft] = createSignal("");
+    const [dismissed, setDismissed] = createSignal(false);
+    const [selected, setSelected] = createSignal(0);
+    const suggestions = createMemo(() => {
+      const text = draft();
+      if (!text.startsWith("/") || /\s/.test(text)) {
+        return [];
+      }
+      const prefix = text.slice(1);
+      return options.commands.filter((command) => command.name.startsWith(prefix));
+    });
+    createEffect(() => {
+      suggestions();
+      setDismissed(false);
+      setSelected(0);
+    });
+    const popover = () =>
+      dialog() === undefined && !dismissed() && suggestions().length > 0
+        ? suggestions()
+        : undefined;
+    const onDraft = () => {
+      fitRows();
+      setDraft(composer?.plainText ?? "");
+    };
+    const complete = (command: CommandInfo) => {
+      if (composer === undefined) {
+        return;
+      }
+      const text = `/${command.name} `;
+      composer.setText(text);
+      composer.cursorOffset = text.length;
+      setDraft(text);
     };
 
     const bullet = (colours: Palette, line: ToolLine) =>
       line.result === undefined ? colours.muted : line.result.ok ? colours.success : colours.error;
+    const lineColour = (colours: Palette, line: TextLine) =>
+      line.kind === "error" ? colours.error : line.kind === "note" ? colours.muted : colours.text;
 
     return (
       <box flexDirection="column" width="100%" height="100%" paddingLeft={1} paddingRight={1}>
@@ -319,13 +432,9 @@ export const createChatTui = (options: {
                       </Match>
                       <Match when={true}>
                         <box flexDirection="row" marginBottom={1}>
-                          <text fg={text().kind === "error" ? palette().error : palette().text}>
-                            {"⏺ "}
-                          </text>
+                          <text fg={lineColour(palette(), text())}>{"⏺ "}</text>
                           <box flexGrow={1} flexShrink={1}>
-                            <text fg={text().kind === "error" ? palette().error : palette().text}>
-                              {text().text}
-                            </text>
+                            <text fg={lineColour(palette(), text())}>{text().text}</text>
                           </box>
                         </box>
                       </Match>
@@ -336,12 +445,43 @@ export const createChatTui = (options: {
             )}
           </For>
         </scrollbox>
+        <Show when={dialog()} keyed>
+          {(open) => <PickerView picker={open.picker} palette={palette()} onDone={open.done} />}
+        </Show>
         <Show when={state.busy}>
           <box flexDirection="row" flexShrink={0} paddingLeft={1}>
             <text fg={palette().accent}>{frame()} </text>
             <text fg={palette().text}>{state.status} </text>
             <text fg={palette().muted}>(esc to interrupt · {elapsed()}s)</text>
           </box>
+        </Show>
+        <Show when={popover()}>
+          {(listed) => (
+            <box flexDirection="column" flexShrink={0} paddingLeft={1} paddingRight={1}>
+              <For each={listed()}>
+                {(command, index) => (
+                  <box flexDirection="row">
+                    <text
+                      fg={index() === selected() ? palette().accent : palette().text}
+                      wrapMode="none"
+                      flexShrink={0}
+                    >
+                      {index() === selected() ? "❯ " : "  "}/{command.name}
+                    </text>
+                    <text
+                      fg={palette().muted}
+                      wrapMode="none"
+                      truncate
+                      flexShrink={1}
+                      marginLeft={2}
+                    >
+                      {command.description}
+                    </text>
+                  </box>
+                )}
+              </For>
+            </box>
+          )}
         </Show>
         <box
           border={["top", "bottom"]}
@@ -356,7 +496,7 @@ export const createChatTui = (options: {
             ref={(node: TextareaRenderable) => {
               composer = node;
             }}
-            focused
+            focused={dialog() === undefined}
             flexGrow={1}
             height={rows()}
             wrapMode="word"
@@ -366,7 +506,7 @@ export const createChatTui = (options: {
             cursorColor={palette().text}
             placeholderColor={palette().placeholder}
             placeholder={state.busy ? "Waiting for the agent…" : "Message the agent"}
-            onContentChange={fitRows}
+            onContentChange={onDraft}
             onSubmit={submit}
           />
         </box>
@@ -391,7 +531,7 @@ export const createChatTui = (options: {
           </Show>
           <text fg={palette().text} wrapMode="none" flexShrink={0} marginLeft={1}>
             {state.agent} <span style={{ fg: palette().muted }}>agent · </span>
-            {Option.match(options.model, {
+            {Option.match(state.model, {
               onNone: () => <span style={{ fg: palette().muted }}>no model signed in</span>,
               onSome: (ref) => ref,
             })}
@@ -405,6 +545,10 @@ export const createChatTui = (options: {
     view,
     apply,
     addUser: (text) => push({ kind: "user", text }),
+    note: (text) => push({ kind: "note", text }),
+    error: (text) => push({ kind: "error", text }),
+    setModel: (ref) => setState("model", Option.some(ref)),
+    pick,
     interrupted: () => push({ kind: "error", text: "Interrupted" }),
     setStatus: (status) => setState("status", status),
     setBusy: (busy) => setState("busy", busy),

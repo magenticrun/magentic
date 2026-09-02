@@ -21,6 +21,7 @@
   },
   "type": "module",
   "scripts": {
+    "prepare": "effect-tsgo patch --typescript",
     "dev": "bun run --filter @magentic/gateway dev",
     "test": "bun --bun vitest run",
     "test:watch": "bun --bun vitest",
@@ -30,7 +31,7 @@
     "check": "bun run typecheck && bun run lint && bun run test"
   },
   "devDependencies": {
-    "@effect/language-service": "^0.87.2",
+    "@effect/tsgo": "^0.39.1",
     "@effect/vitest": "4.0.0-rc.112",
     "@magentic/plugin": "workspace:*",
     "@magentic/protocol": "workspace:*",
@@ -39,7 +40,7 @@
     "effect": "catalog:",
     "oxfmt": "^0.66.0",
     "oxlint": "^1.81.0",
-    "typescript": "^5.9.0",
+    "typescript": "^7.0.2",
     "vite-plugin-solid": "2.11.14",
     "vitest": "^4.1.11"
   }

@@ -1,5 +1,6 @@
 import type { Schema } from "effect";
 import type { AgentDomain } from "./Agents.ts";
+import type { CommandDomain } from "./Commands.ts";
 import type { EventDomain } from "./Events.ts";
 import type { ModelDomain } from "./Models.ts";
 import type { ToolDomain } from "./Tools.ts";
@@ -10,6 +11,8 @@ export interface PluginPaths {
   readonly config: string;
   /** The directory file tools operate in. */
   readonly workspace: string;
+  /** Per-person state that is not configuration: favourites, caches. `~/.config/magentic` by default. */
+  readonly data: string;
 }
 
 /** What a plugin's `setup` receives. Each domain owns one kind of contribution. */
@@ -20,5 +23,6 @@ export interface PluginContext {
   readonly tool: ToolDomain;
   readonly model: ModelDomain;
   readonly agent: AgentDomain;
+  readonly command: CommandDomain;
   readonly event: EventDomain;
 }

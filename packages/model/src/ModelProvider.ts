@@ -1,7 +1,7 @@
 /** Defaults per provider until `magentic.yaml` chooses. */
-export const DEFAULT_OPENAI_MODEL = "gpt-5.2";
+export const DEFAULT_OPENAI_MODEL = "gpt-5.5";
 export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5";
-export const DEFAULT_ZAI_MODEL = "glm-5.2";
+export const DEFAULT_ZAI_MODEL = "glm-5.3-flash";
 export const DEFAULT_ZEN_MODEL = "claude-sonnet-5";
 
 /**

@@ -1,10 +1,10 @@
-import { configDir } from "@magentic/gateway";
-import { builtin, ModelRegistry, PluginHost, ToolCallGuard } from "@magentic/core";
-import { apiKeysFile, Codex, layerCredentialStores, modelPlugins } from "@magentic/model";
-import { ModelCatalog, type ModelProviderRegistration } from "@magentic/plugin";
-import { Config, Effect, Layer, Option, Path, Result, Runtime, Schema } from "effect";
+import { ModelRegistry } from "@magentic/core";
+import { apiKeysFile, Codex, modelPlugins } from "@magentic/model";
+import type { ModelProviderRegistration } from "@magentic/plugin";
+import { Config, Effect, Option, Path, Result, Runtime, Schema } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { runLogin } from "./auth/Login.ts";
+import { LocalHost } from "./Host.ts";
 import * as Prompt from "./auth/Prompt.ts";
 import { promptUi } from "./auth/PromptUi.ts";
 
@@ -143,21 +143,8 @@ const logout = Command.make(
   }),
 ).pipe(Command.withDescription("Log out from a configured provider"));
 
-/**
- * Signing in is local: the provider plugins run in this process against the
- * credential stores on disk, no gateway needed.
- */
-const LocalProviders = Layer.unwrap(
-  Effect.map(configDir, (dir) =>
-    PluginHost.layer({
-      plugins: modelPlugins.map(builtin),
-      paths: { config: dir, workspace: process.cwd() },
-    }),
-  ),
-).pipe(Layer.provide([layerCredentialStores, ModelCatalog.layer, ToolCallGuard.layerAllowAll]));
-
 export const auth = Command.make("auth").pipe(
   Command.withDescription("Manage AI providers and credentials"),
   Command.withSubcommands([login, list, logout]),
-  Command.provide(LocalProviders),
+  Command.provide(LocalHost),
 );

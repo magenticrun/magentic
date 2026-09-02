@@ -4,6 +4,7 @@ export * from "./ConversationStore.ts";
 export * from "./Errors.ts";
 export * from "./EventBus.ts";
 export * from "./GatewayConfig.ts";
+export * from "./plugin/CommandRegistry.ts";
 export * from "./plugin/ModelRegistry.ts";
 export * from "./plugin/PluginHost.ts";
 export * from "./plugin/ToolRegistry.ts";

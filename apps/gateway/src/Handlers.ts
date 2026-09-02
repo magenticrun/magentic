@@ -8,7 +8,7 @@ import {
 } from "@magentic/core";
 import { Identity } from "@magentic/identity";
 import { Policy } from "@magentic/policy";
-import { AgentInfo, AgentRequest, Api, RunDenied } from "@magentic/protocol";
+import { AgentInfo, AgentRequest, Api, RunDenied, type RunRequest } from "@magentic/protocol";
 import { Config, DateTime, Effect, Option } from "effect";
 import { HttpApiBuilder } from "effect/unstable/httpapi";
 
@@ -51,11 +51,8 @@ export const AgentsApiHandlersNoDeps = HttpApiBuilder.group(
     const policy = yield* Policy;
     const audit = yield* Audit;
 
-    const run = Effect.fn("Gateway.run")(function* (
-      name: string,
-      input: string,
-      conversationId: string | undefined,
-    ) {
+    const run = Effect.fn("Gateway.run")(function* (name: string, payload: RunRequest) {
+      const { input, conversationId, model } = payload;
       const agent = yield* registry.get(name);
       const subject = yield* localSubject.pipe(Effect.orDie);
       const principal = yield* identity.resolve(subject).pipe(Effect.orDie);
@@ -76,7 +73,7 @@ export const AgentsApiHandlersNoDeps = HttpApiBuilder.group(
           at: request.createdAt,
           principal,
           action: "run.started",
-          detail: { requestId: request.id, agent: agent.name },
+          detail: { requestId: request.id, agent: agent.name, model },
         }),
       );
       return runner.run({
@@ -84,13 +81,14 @@ export const AgentsApiHandlersNoDeps = HttpApiBuilder.group(
         principal,
         input,
         conversationId: Option.fromNullishOr(conversationId),
+        model: Option.fromNullishOr(model),
       });
     });
 
     return handlers.handleAll({
       list: () => registry.list.pipe(Effect.flatMap(Effect.forEach(toInfo))),
       get: ({ params }) => registry.get(params.name).pipe(Effect.flatMap(toInfo)),
-      run: ({ params, payload }) => run(params.name, payload.input, payload.conversationId),
+      run: ({ params, payload }) => run(params.name, payload),
     });
   }),
 );
