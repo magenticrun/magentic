@@ -16,7 +16,11 @@ export interface PickSection {
   readonly items: ReadonlyArray<PickItem>;
 }
 
-/** A key that acts on the row under the cursor without choosing it, e.g. `f` to favourite. */
+/**
+ * A key that acts on the row under the cursor without choosing it, e.g. `f`
+ * to favourite. A letter on its own types into the filter, so surfaces bind
+ * the key with ctrl (`ctrl+f`).
+ */
 export interface PickAction {
   readonly key: string;
   readonly label: string;
@@ -24,11 +28,18 @@ export interface PickAction {
 
 /**
  * A list to choose from, described rather than drawn, so any surface can show
- * it. Commands loop on `pick`: show, act on the answer, show again.
+ * it. Commands loop on `pick`: show, act on the answer, show again. Typing
+ * filters the rows by label and detail.
  */
 export interface Picker {
   readonly title: string;
   readonly sections: ReadonlyArray<PickSection>;
+  /**
+   * Rows a filter finds that the list does not show: the level below,
+   * flattened, so typing at the top reaches it. A row in a section too is
+   * shown once, in its unlisted place.
+   */
+  readonly unlisted?: ReadonlyArray<PickItem>;
   readonly actions?: ReadonlyArray<PickAction>;
   /** The item the cursor starts on; the first item otherwise. */
   readonly cursor?: string | undefined;

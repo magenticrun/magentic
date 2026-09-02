@@ -1195,29 +1195,44 @@ export const createChatTui = (options: {
         </Show>
         <Show when={popover()}>
           {(listed) => (
-            <box flexDirection="column" flexShrink={0} paddingLeft={1} paddingRight={1}>
-              <For each={listed()}>
-                {(command, index) => (
-                  <box flexDirection="row">
-                    <text
-                      fg={index() === selected() ? palette().accent : palette().text}
-                      wrapMode="none"
-                      flexShrink={0}
-                    >
-                      {index() === selected() ? "❯ " : "  "}/{command.name}
-                    </text>
-                    <text
-                      fg={palette().muted}
-                      wrapMode="none"
-                      truncate
-                      flexShrink={1}
-                      marginLeft={2}
-                    >
-                      {command.description}
-                    </text>
-                  </box>
-                )}
-              </For>
+            // A row of no height right above the composer; the list hangs off
+            // its bottom edge, so it floats over the transcript instead of
+            // pushing it up.
+            <box height={0} flexShrink={0}>
+              <box
+                position="absolute"
+                bottom={0}
+                left={0}
+                right={0}
+                zIndex={1}
+                flexDirection="column"
+                paddingLeft={1}
+                paddingRight={1}
+                backgroundColor={palette().panel}
+              >
+                <For each={listed()}>
+                  {(command, index) => (
+                    <box flexDirection="row">
+                      <text
+                        fg={index() === selected() ? palette().accent : palette().text}
+                        wrapMode="none"
+                        flexShrink={0}
+                      >
+                        {index() === selected() ? "❯ " : "  "}/{command.name}
+                      </text>
+                      <text
+                        fg={palette().muted}
+                        wrapMode="none"
+                        truncate
+                        flexShrink={1}
+                        marginLeft={2}
+                      >
+                        {command.description}
+                      </text>
+                    </box>
+                  )}
+                </For>
+              </box>
             </box>
           )}
         </Show>

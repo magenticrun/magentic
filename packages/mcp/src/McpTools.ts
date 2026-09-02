@@ -103,18 +103,27 @@ const annotate = <T extends Tool.Any>(tool: T, definition: McpToolDefinition): T
  * when a call comes back: it wants an object at the root, so every call to
  * the tool failed. The model still sees the server's schema, which
  * `Tool.getJsonSchema` prefers over the decoder; only the decoder changes, to
- * one that takes any object, which is all the server's validator gets anyway.
+ * a struct with one optional JSON slot per property the server declared,
+ * which is the loosest object schema the provider accepts. A key the server
+ * did not declare is dropped on the way in; the server validates the rest.
  */
-const withObjectArguments = <T extends Tool.Any>(tool: T): T =>
+const argumentsDecoder = (inputSchema: McpToolDefinition["inputSchema"]): Schema.Top => {
+  const names = Object.keys(inputSchema.properties ?? {});
+  return names.length === 0
+    ? Schema.Record(Schema.String, Schema.Never)
+    : Schema.Struct(Object.fromEntries(names.map((name) => [name, Schema.optional(Schema.Json)])));
+};
+
+const withArgumentsDecoder = <T extends Tool.Any>(tool: T, decoder: Schema.Top): T =>
   // SAFETY: a clone with the prototype and every field of `tool`; the one field replaced is a
   // schema of the same kind, and the handler already reads its decoded value as an object.
   Object.assign(Object.create(Object.getPrototypeOf(tool)), tool, {
-    parametersSchema: ToolArguments,
+    parametersSchema: decoder,
   }) as T;
 
 const makeTool = (name: string, definition: McpToolDefinition) =>
   annotate(
-    withObjectArguments(
+    withArgumentsDecoder(
       Tool.dynamic(name, {
         description: definition.description ?? definition.title ?? definition.name,
         parameters: definition.inputSchema,
@@ -126,6 +135,7 @@ const makeTool = (name: string, definition: McpToolDefinition) =>
         // The server wrote the schema for its own validator, not for OpenAI's strict
         // mode, which rejects any optional property; the server checks the arguments.
         .annotate(Tool.Strict, false),
+      argumentsDecoder(definition.inputSchema),
     ),
     definition,
   );

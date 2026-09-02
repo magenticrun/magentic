@@ -25,19 +25,63 @@ const flatten = (picker: Picker): ReadonlyArray<Row> => {
   return rows;
 };
 
+/** Every word typed appears in the row's label or detail, in any order, case aside. */
+const matches = (item: PickItem, words: ReadonlyArray<string>): boolean => {
+  const text = `${item.label} ${item.detail ?? ""}`.toLowerCase();
+  return words.every((word) => text.includes(word));
+};
+
+/**
+ * The rows a filter finds, without section titles: the listed items in their
+ * order, then the unlisted ones. A listed row that is also unlisted (a
+ * favourite) takes its unlisted place, so toggling it there does not move it.
+ */
+const search = (picker: Picker, query: string): ReadonlyArray<Row> => {
+  const words = query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((word) => word.length > 0);
+  const unlisted = picker.unlisted ?? [];
+  const below = new Set(unlisted.map((item) => item.id));
+  const listed = picker.sections.flatMap((s) => s.items).filter((item) => !below.has(item.id));
+  const seen = new Set<string>();
+  const rows: Array<Row> = [];
+  for (const item of [...listed, ...unlisted]) {
+    if (seen.has(item.id) || !matches(item, words)) {
+      continue;
+    }
+    seen.add(item.id);
+    rows.push({ kind: "item", item, index: rows.length });
+  }
+  return rows;
+};
+
 const isEnter = (name: string) => name === "return" || name === "kpenter" || name === "linefeed";
+
+/** The character a key types, when it types one: no chord, and not a control code. */
+const typed = (key: { sequence: string; ctrl: boolean; meta: boolean }): string | undefined => {
+  if (key.ctrl || key.meta || key.sequence.length === 0) {
+    return undefined;
+  }
+  const code = key.sequence.charCodeAt(0);
+  return code < 32 || code === 127 ? undefined : key.sequence;
+};
 
 /**
  * A picker drawn in the chat: sections, a cursor, a detail column at the
- * right, and one keystroke per action. Answers through `onDone`; a new
- * `picker` prop is the next question, drawn in the same frame.
+ * right, a filter that typing fills, and one keystroke per action. Answers
+ * through `onDone`; a new `picker` prop is the next question, drawn in the
+ * same frame.
  */
 export const PickerView = (props: {
   readonly picker: Picker;
   readonly palette: Palette;
   readonly onDone: (picked: Option.Option<Picked>) => void;
 }) => {
-  const rows = createMemo(() => flatten(props.picker));
+  const [query, setQuery] = createSignal("");
+  const rows = createMemo(() =>
+    query().length === 0 ? flatten(props.picker) : search(props.picker, query()),
+  );
   const items = createMemo(() => rows().flatMap((row) => (row.kind === "item" ? [row.item] : [])));
   const start = createMemo(() =>
     Math.max(
@@ -52,14 +96,22 @@ export const PickerView = (props: {
   const [top, setTop] = createSignal(centred());
 
   // A replacement picker with the same title is this list redrawn (a favourite
-  // toggled), so the viewport stays put; a different list opens centred.
+  // toggled), so the filter and the viewport stay put; a different list opens
+  // unfiltered and centred. Tracked by hand: a deferred `on` has no previous
+  // input on its first run.
+  let shown = props.picker;
   createEffect(
     on(
       () => props.picker,
-      (picker, previous) => {
-        setCursor(start());
-        if (previous === undefined || previous.title !== picker.title) {
+      (picker) => {
+        const previous = shown;
+        shown = picker;
+        if (previous.title !== picker.title) {
+          setQuery("");
+          setCursor(start());
           setTop(centred());
+        } else {
+          setCursor(start());
         }
       },
       { defer: true },
@@ -80,6 +132,13 @@ export const PickerView = (props: {
   const hiddenAbove = () => top();
   const hiddenBelow = () => Math.max(0, rows().length - top() - MAX_ROWS);
 
+  // A new filter starts the list over at its first match.
+  const filter = (next: string) => {
+    setQuery(next);
+    setCursor(0);
+    setTop(0);
+  };
+
   useKeyboard((key) => {
     // Global handlers run before the focused renderable's; without this the
     // key that closes the dialog would also land in the composer it refocuses.
@@ -97,6 +156,17 @@ export const PickerView = (props: {
       setCursor((n) => (count === 0 ? 0 : (n + 1) % count));
       return;
     }
+    if (key.name === "backspace") {
+      if (query().length > 0) {
+        filter([...query()].slice(0, -1).join(""));
+      }
+      return;
+    }
+    const character = typed(key);
+    if (character !== undefined) {
+      filter(query() + character);
+      return;
+    }
     const item = items()[cursor()];
     if (item === undefined) {
       return;
@@ -105,7 +175,7 @@ export const PickerView = (props: {
       props.onDone(Option.some({ id: item.id, action: Option.none() }));
       return;
     }
-    if (key.ctrl || key.meta) {
+    if (!key.ctrl || key.meta) {
       return;
     }
     const action = props.picker.actions?.find((a) => a.key === key.name);
@@ -118,7 +188,7 @@ export const PickerView = (props: {
     [
       "↑↓ move",
       "enter choose",
-      ...(props.picker.actions ?? []).map((a) => `${a.key} ${a.label}`),
+      ...(props.picker.actions ?? []).map((a) => `ctrl+${a.key} ${a.label}`),
       "esc back",
     ].join(" · ");
 
@@ -133,8 +203,18 @@ export const PickerView = (props: {
       paddingLeft={1}
       paddingRight={1}
     >
+      <text
+        fg={query().length > 0 ? props.palette.text : props.palette.muted}
+        wrapMode="none"
+        truncate
+      >
+        {query().length > 0 ? `⌕ ${query()}▏` : "⌕ type to filter"}
+      </text>
       <Show when={hiddenAbove() > 0}>
         <text fg={props.palette.muted}>{`  ↑ ${hiddenAbove()} more`}</text>
+      </Show>
+      <Show when={rows().length === 0}>
+        <text fg={props.palette.muted}>{"  no matches"}</text>
       </Show>
       <For each={visible()}>
         {(row) => (
