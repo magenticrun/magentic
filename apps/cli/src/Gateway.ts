@@ -1,11 +1,12 @@
+import { ModelCatalog } from "@magentic/plugin";
 import { Api, RPC_PATH } from "@magentic/protocol";
-import { Effect, Layer, Schedule, Schema } from "effect";
+import { Effect, Layer, Option, Schedule, Schema } from "effect";
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 
-export class GatewayUnreachable extends Schema.TaggedError<GatewayUnreachable>()(
-  "GatewayUnreachable",
-  { url: Schema.String, message: Schema.String },
-) {}
+class GatewayUnreachable extends Schema.TaggedError<GatewayUnreachable>()("GatewayUnreachable", {
+  url: Schema.String,
+  message: Schema.String,
+}) {}
 
 /** A typed client for the gateway at `baseUrl`, alive as long as the scope. */
 export const gatewayClient = (baseUrl: string) =>
@@ -39,8 +40,14 @@ export const ensureGateway = Effect.fn("Cli.ensureGateway")(function* (baseUrl: 
   const port = url.port === "" ? 80 : Number.parseInt(url.port, 10);
   // The server is loaded only now: most starts find a gateway already running.
   const { layerServer } = yield* Effect.promise(() => import("@magentic/gateway"));
-  // Request logs would land in the transcript, or on top of the full-screen chat.
-  yield* Layer.build(layerServer(port, { quiet: true }));
+  // Request logs would land in the transcript, or on top of the full-screen
+  // chat. The catalog this process already has, when it has one, is shared.
+  const catalog = yield* Effect.serviceOption(ModelCatalog);
+  const options = Option.match(catalog, {
+    onNone: () => ({ quiet: true }),
+    onSome: (service) => ({ quiet: true, catalog: Layer.succeed(ModelCatalog, service) }),
+  });
+  yield* Layer.build(layerServer(port, options));
   yield* client.health().pipe(Effect.retry({ times: 50, schedule: Schedule.spaced("100 millis") }));
   return { client, embedded: true };
 });

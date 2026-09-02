@@ -16,7 +16,8 @@
       "@clack/prompts": "1.7.0",
       "@opentui/core": "0.5.10",
       "@opentui/solid": "0.5.10",
-      "solid-js": "1.9.12"
+      "solid-js": "1.9.12",
+      "@modelcontextprotocol/client": "2.0.0"
     }
   },
   "type": "module",
@@ -25,10 +26,11 @@
     "dev": "bun run --filter @magentic/gateway dev",
     "test": "bun --bun vitest run",
     "test:watch": "bun --bun vitest",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p apps/cli/tsconfig.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p apps/cli/tsconfig.json && tsc --noEmit -p tsconfig.tools.json",
     "lint": "oxlint && oxfmt --check",
+    "knip": "knip",
     "format": "oxlint --fix; oxfmt",
-    "check": "bun run typecheck && bun run lint && bun run test"
+    "check": "bun run typecheck && bun run lint && bun run knip && bun run test"
   },
   "devDependencies": {
     "@effect/tsgo": "^0.39.1",
@@ -38,8 +40,9 @@
     "@oxlint/plugins": "1.81.0",
     "@types/bun": "^1.4.0",
     "effect": "catalog:",
+    "knip": "6.34.0",
     "oxfmt": "^0.66.0",
-    "oxlint": "^1.81.0",
+    "oxlint": "1.81.0",
     "typescript": "^7.0.2",
     "vite-plugin-solid": "2.11.14",
     "vitest": "^4.1.11"

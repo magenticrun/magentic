@@ -14,7 +14,7 @@ const UserCodeResponse = Schema.Struct({
   device_auth_id: Schema.String,
   user_code: Schema.optionalKey(Schema.String),
   usercode: Schema.optionalKey(Schema.String),
-  interval: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number])),
+  interval: Schema.optionalKey(Schema.Union([Schema.String, Schema.Finite])),
 });
 
 const CodeSuccessResponse = Schema.Struct({

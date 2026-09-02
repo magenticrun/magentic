@@ -14,9 +14,16 @@ import {
   type RunEventEnvelope,
   type ToolCallContext,
   type ToolHooks,
+  toolMatches,
   type ToolServices,
 } from "@magentic/plugin";
-import { AgentNotFound, PluginInfo, type PluginSource, type RunEvent } from "@magentic/protocol";
+import {
+  AgentNotFound,
+  type Capability,
+  PluginInfo,
+  type PluginSource,
+  type RunEvent,
+} from "@magentic/protocol";
 import {
   Context,
   Effect,
@@ -51,8 +58,9 @@ export interface LoadedPlugin<R = never> {
   readonly options?: Schema.Json;
 }
 
-/** Marks a plugin we ship. */
-export const builtin = <R>(plugin: Plugin<R>): LoadedPlugin<R> => ({ plugin, source: "builtin" });
+/** Marks a plugin we ship, with the part of the config it reads when it has one. */
+export const builtin = <R>(plugin: Plugin<R>, options?: Schema.Json): LoadedPlugin<R> =>
+  options === undefined ? { plugin, source: "builtin" } : { plugin, source: "builtin", options };
 
 /** The services a list of loaded plugins needs, as one union. */
 export type PluginRequirements<Plugins extends ReadonlyArray<LoadedPlugin<any>>> =
@@ -176,7 +184,12 @@ export class PluginHost extends Context.Service<
             // Captured now so a call later runs with the plugin's own services.
             const services = yield* Effect.context<Exclude<ToolServices<Tools>, ToolCallContext>>();
             const taken = new Set((yield* tools.values).map((entry) => entry.tool.name));
-            const registrations: Array<Registration> = [];
+            // Every tool is checked before any is registered: a toolkit lands whole or not at all.
+            const checked: Array<{
+              readonly name: string;
+              readonly tool: Tool.Any;
+              readonly capability: Capability;
+            }> = [];
             for (const [name, tool] of Object.entries(toolkit.tools)) {
               const capability = capabilityOf(tool);
               if (capability === "none") {
@@ -192,6 +205,10 @@ export class PluginHost extends Context.Service<
                 });
               }
               taken.add(name);
+              checked.push({ name, tool, capability });
+            }
+            const registrations: Array<Registration> = [];
+            for (const { name, tool, capability } of checked) {
               // SAFETY: `name` came from the keys of `toolkit.tools`.
               const key = name as keyof Tools;
               const bound = (params: Schema.Json, callId: string) => {
@@ -279,6 +296,21 @@ export class PluginHost extends Context.Service<
         }
         yield* Ref.set(booting, false);
         yield* rebuild;
+
+        // A tool an agent names that no plugin registered is a typo, a failed
+        // plugin, or a server that did not connect; say so once, here.
+        const registered = (yield* tools.values).map((entry) => entry.tool.name);
+        const hidden = new Set(options.disabledTools ?? []);
+        for (const agent of (yield* Ref.get(agents)).values()) {
+          for (const pattern of agent.tools) {
+            const matched = registered.some((name) => toolMatches(pattern, name));
+            if (!matched && !hidden.has(pattern)) {
+              yield* Effect.logWarning(
+                `agent ${agent.name} lists tool ${pattern}, which no plugin registered`,
+              );
+            }
+          }
+        }
 
         const runtimeRef: PluginRef = { id: "runtime", order: options.plugins.length };
 

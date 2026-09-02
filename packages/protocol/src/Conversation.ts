@@ -1,13 +1,14 @@
 import { Schema } from "effect";
+import { ConversationId } from "./ConversationId.ts";
 import { TokenUsage } from "./Run.ts";
 
 /** Tokens a conversation has used: the latest model call, whose input is the context in use, and running totals. */
 export const ConversationUsage = Schema.Struct({
   latest: TokenUsage,
   /** Model calls so far; a run with tool calls makes several. */
-  calls: Schema.Number,
-  totalInputTokens: Schema.Number,
-  totalOutputTokens: Schema.Number,
+  calls: Schema.Finite,
+  totalInputTokens: Schema.Finite,
+  totalOutputTokens: Schema.Finite,
 });
 export type ConversationUsage = typeof ConversationUsage.Type;
 
@@ -16,7 +17,7 @@ export type ConversationUsage = typeof ConversationUsage.Type;
  * sessions. Runs update it; surfaces list and resume it.
  */
 export class Conversation extends Schema.Class<Conversation>("magentic/protocol/Conversation")({
-  id: Schema.NonEmptyString,
+  id: ConversationId,
   agent: Schema.NonEmptyString,
   /** Whose it is; nobody else lists or resumes it. */
   principal: Schema.String,
@@ -29,7 +30,7 @@ export class Conversation extends Schema.Class<Conversation>("magentic/protocol/
   createdAt: Schema.DateTimeUtcFromString,
   updatedAt: Schema.DateTimeUtcFromString,
   /** Messages in the history, the system prompt included. */
-  messages: Schema.Number,
+  messages: Schema.Finite,
   /** Absent until a model call has reported. */
   usage: Schema.optional(ConversationUsage),
 }) {}

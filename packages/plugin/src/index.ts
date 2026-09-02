@@ -1,3 +1,4 @@
+export * from "./Errors.ts";
 export * from "./Agents.ts";
 export * from "./Capability.ts";
 export * from "./Catalog.ts";

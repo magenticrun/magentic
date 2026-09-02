@@ -8,6 +8,14 @@ export type ToolServices<Tools extends Record<string, Tool.Any>> =
   | Tool.HandlerServices<Tools[keyof Tools]>
   | Tool.ResultDecodingServices<Tools[keyof Tools]>;
 
+/**
+ * Whether an entry of an agent's `tools` list names a tool. An entry ending in
+ * `*` matches every tool with that prefix, so `linear_*` takes every tool an
+ * MCP server called `linear` contributes.
+ */
+export const toolMatches = (pattern: string, name: string): boolean =>
+  pattern.endsWith("*") ? name.startsWith(pattern.slice(0, -1)) : pattern === name;
+
 /** Who is calling, from which run. Provided to every tool handler per call. */
 export class ToolCallContext extends Context.Service<
   ToolCallContext,

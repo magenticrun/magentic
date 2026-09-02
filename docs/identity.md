@@ -25,12 +25,12 @@ downstream authenticates again.
 `Identity.authenticate(credential)` takes a tagged union and returns a `Principal` or an
 `IdentityError` with a `reason`.
 
-| Credential     | Comes from                                    | Verified by                                                                                        |
-| -------------- | --------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `BearerToken`  | CLI, Cursor, HTTP callers                     | hash lookup in `sessions` or `tokens`, expiry, revoke                                              |
-| `SlackRequest` | Slack Events API and interactivity payloads   | HMAC of `v0:<ts>:<body>` with the signing secret, 5 minute window, then `user` id from the payload |
-| `ApiKey`       | CI and services                               | hash lookup in `tokens` where `kind = "service"`                                                   |
-| `LocalSubject` | dev mode only, gated by `IDENTITY_LOCAL=true` | trusted as-is                                                                                      |
+| Credential     | Comes from                                    | Verified by                                                                                            |
+| -------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `BearerToken`  | CLI, Cursor, HTTP callers                     | hash lookup in `sessions` or `tokens`, expiry, revoke                                                  |
+| `SlackRequest` | Slack Events API and interactivity payloads   | HMAC of `v0:<ts>:<body>` with the signing secret, 5 minute window, then `user` id from the payload     |
+| `ApiKey`       | CI and services                               | hash lookup in `tokens` where `kind = "service"`                                                       |
+| `LocalSubject` | dev mode only, gated by `IDENTITY_LOCAL=true` | trusted as-is; the gateway binds loopback unless `IDENTITY_LOCAL=true` accepts a wider `MAGENTIC_HOST` |
 
 ## Providers
 
@@ -195,7 +195,8 @@ configuration section of `harness.md`) and reload with the rest of the directory
 come from the environment:
 
 ```
-IDENTITY_LOCAL=true                      dev only
+MAGENTIC_HOST=127.0.0.1                  listen address; loopback by default
+IDENTITY_LOCAL=true                      accept local identity beyond loopback (dev only)
 IDENTITY_REQUIRE_LINK=false              when OIDC is set, must Slack users be linked
 SLACK_SIGNING_SECRET, SLACK_BOT_TOKEN
 OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_GROUPS_CLAIM=groups

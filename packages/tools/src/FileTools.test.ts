@@ -11,6 +11,7 @@ import {
   Glob,
   Grep,
   ListDir,
+  READ_MAX_BYTES,
   ReadFile,
   WriteFile,
 } from "./FileTools.ts";
@@ -128,6 +129,45 @@ layer(TestLayer)("file tools", (it) => {
         .handle("list_dir", { path: ".." })
         .pipe(Effect.flatMap(lastResult));
       assert.strictEqual(expectFileToolError(listed.result).reason, "OutsideWorkspace");
+    }),
+  );
+
+  it.effect("refuses a link that leaves the workspace, and follows one that stays inside", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* WorkspaceRoot;
+      const outside = yield* fs.makeTempDirectoryScoped({ prefix: "magentic-outside-" });
+      yield* fs.writeFileString(`${outside}/secret.txt`, "no");
+      yield* fs.symlink(`${outside}/secret.txt`, `${root}/leak.txt`);
+      yield* fs.symlink(outside, `${root}/leakdir`);
+      yield* fs.makeDirectory(`${root}/inner`, { recursive: true });
+      yield* fs.writeFileString(`${root}/inner/ok.txt`, "fine");
+      yield* fs.symlink(`${root}/inner`, `${root}/innerlink`);
+      const toolkit = yield* FileTools;
+
+      for (const path of ["leak.txt", "leakdir/secret.txt", "leakdir/new.txt"]) {
+        const read = yield* toolkit.handle("read_file", { path }).pipe(Effect.flatMap(lastResult));
+        assert.strictEqual(expectFileToolError(read.result).reason, "OutsideWorkspace", path);
+        const write = yield* toolkit
+          .handle("write_file", { path, content: "x" })
+          .pipe(Effect.flatMap(lastResult));
+        assert.strictEqual(expectFileToolError(write.result).reason, "OutsideWorkspace", path);
+      }
+      const listed = yield* toolkit
+        .handle("list_dir", { path: "leakdir" })
+        .pipe(Effect.flatMap(lastResult));
+      assert.strictEqual(expectFileToolError(listed.result).reason, "OutsideWorkspace");
+
+      const found = yield* toolkit
+        .handle("grep", { pattern: "no" })
+        .pipe(Effect.flatMap(lastResult));
+      assert.isFalse(found.isFailure);
+      assert.isFalse(JSON.stringify(found.result).includes("leak"));
+
+      const inside = yield* toolkit
+        .handle("read_file", { path: "innerlink/ok.txt" })
+        .pipe(Effect.flatMap(lastResult));
+      assert.isFalse(inside.isFailure);
     }),
   );
 
@@ -284,6 +324,43 @@ layer(TestLayer)("file tools", (it) => {
         .handle("grep", { pattern: "(", path: "search" })
         .pipe(Effect.flatMap(lastResult));
       assert.strictEqual(expectFileToolError(bad.result).reason, "InvalidPattern");
+    }),
+  );
+});
+
+layer(TestLayer)("file tools size limits", (it) => {
+  it.effect("cuts a huge file at the read limit and leaves it out of a search", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* WorkspaceRoot;
+      const line = "needle-in-a-huge-file\n";
+      const lines = Math.ceil((READ_MAX_BYTES + 4096) / line.length);
+      yield* fs.writeFileString(`${root}/huge.txt`, line.repeat(lines));
+      yield* fs.writeFileString(`${root}/small.txt`, line);
+      const toolkit = yield* FileTools;
+
+      const read = yield* toolkit
+        .handle("read_file", { path: "huge.txt" })
+        .pipe(Effect.flatMap(lastResult));
+      assert.isFalse(read.isFailure);
+      const content = read.result;
+      if (content instanceof FileToolError || content instanceof AiError.AiError) {
+        return assert.fail(`expected content, got ${content.message}`);
+      }
+      assert.strictEqual(new TextEncoder().encode(content.content).byteLength, READ_MAX_BYTES);
+      assert.isTrue(content.truncated);
+
+      const found = yield* toolkit
+        .handle("grep", { pattern: "needle-in-a-huge" })
+        .pipe(Effect.flatMap(lastResult));
+      const matches = found.result;
+      if (matches instanceof FileToolError || matches instanceof AiError.AiError) {
+        return assert.fail(`expected matches, got ${matches.message}`);
+      }
+      assert.deepStrictEqual(
+        matches.matches.map((m) => m.path),
+        ["small.txt"],
+      );
     }),
   );
 });

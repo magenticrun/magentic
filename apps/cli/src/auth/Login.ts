@@ -1,5 +1,5 @@
 import {
-  LoginCancelled,
+  type LoginCancelled,
   type LoginError,
   type LoginMethod,
   type LoginUi,
@@ -8,7 +8,7 @@ import {
 } from "@magentic/plugin";
 import { Effect, Option, Result, Schema } from "effect";
 
-export class NoSuchProvider extends Schema.TaggedError<NoSuchProvider>()("NoSuchProvider", {
+class NoSuchProvider extends Schema.TaggedError<NoSuchProvider>()("NoSuchProvider", {
   message: Schema.String,
 }) {}
 
@@ -99,11 +99,9 @@ export const runLogin = Effect.fn("Auth.login")(function* (
     if (error._tag !== "LoginCancelled") {
       yield* options.ui.finish(Screen.Failed({ message: error.message }));
     }
-    return yield* Effect.fail(error);
+    return yield* error;
   }
   const summary = outcome.success;
   yield* options.ui.finish(Screen.Done({ message: `Logged in to ${provider.name}: ${summary}` }));
   return { provider, method, summary };
 });
-
-export { LoginCancelled };

@@ -27,7 +27,7 @@ export class CodexTokens extends Schema.Class<CodexTokens>("magentic/model/Codex
 export const AUTH_CLAIMS = "https://api.openai.com/auth";
 
 export const JwtClaims = Schema.Struct({
-  exp: Schema.optionalKey(Schema.Number),
+  exp: Schema.optionalKey(Schema.Finite),
   [AUTH_CLAIMS]: Schema.optionalKey(
     Schema.Struct({
       chatgpt_account_id: Schema.optionalKey(Schema.String),

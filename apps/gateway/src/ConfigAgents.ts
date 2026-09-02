@@ -1,4 +1,4 @@
-import { AgentDefinition, define } from "@magentic/plugin";
+import { AgentDefinition, define, messageOf } from "@magentic/plugin";
 import { Effect, FileSystem, Path, Predicate, Queue, Result, Schema, Stream } from "effect";
 
 /** An inline prompt, or a file relative to the configuration directory. */
@@ -11,6 +11,8 @@ const AgentFile = Schema.Struct({
   model: Schema.optional(Schema.String),
   prompt: PromptSource,
   tools: Schema.optional(Schema.Array(Schema.String)),
+  /** Model calls one run may make; the runner's default otherwise. */
+  maxSteps: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
 });
 
 export interface ConfigAgentsOptions {
@@ -21,9 +23,6 @@ export interface ConfigAgentsOptions {
 }
 
 const isAgentFile = (name: string) => name.endsWith(".yaml") || name.endsWith(".yml");
-
-const messageOf = (error: { readonly message: string } | string) =>
-  Predicate.isString(error) ? error : error.message;
 
 /**
  * Agents from `agents/*.yaml` in the configuration directory. A file that
@@ -46,7 +45,7 @@ export const configAgentsPlugin = (options: ConfigAgentsOptions) =>
         const text = yield* readText(file);
         const parsed = yield* Effect.try({
           try: () => Bun.YAML.parse(text),
-          catch: (error) => (error instanceof Error ? error.message : String(error)),
+          catch: (error) => messageOf(error),
         });
         const decoded = yield* Schema.decodeUnknownEffect(AgentFile)(parsed).pipe(
           Effect.mapError((error) => error.message),
@@ -60,8 +59,9 @@ export const configAgentsPlugin = (options: ConfigAgentsOptions) =>
           prompt,
           tools: decoded.tools ?? [],
         };
+        const withModel = decoded.model === undefined ? base : { ...base, model: decoded.model };
         return new AgentDefinition(
-          decoded.model === undefined ? base : { ...base, model: decoded.model },
+          decoded.maxSteps === undefined ? withModel : { ...withModel, maxSteps: decoded.maxSteps },
         );
       });
 

@@ -83,6 +83,15 @@ export class ConversationStore extends Context.Service<
         const infoFile = (id: string) => path.join(dir, id, "conversation.json");
         const historyFile = (id: string) => path.join(dir, id, "history.json");
 
+        /** The wire schema already refuses these; the store refuses them again because it owns the disk. */
+        const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
+        const safe = (id: string) =>
+          SAFE_ID.test(id)
+            ? Effect.void
+            : Effect.fail(
+                new ConversationStoreError({ id, message: `${id} is not a valid conversation id` }),
+              );
+
         const readIfExists = Effect.fn("ConversationStore.readIfExists")(function* (file: string) {
           if (!(yield* fs.exists(file))) {
             return Option.none<string>();
@@ -92,6 +101,7 @@ export class ConversationStore extends Context.Service<
 
         const get = Effect.fn("ConversationStore.get")(
           function* (id: string) {
+            yield* safe(id);
             const text = yield* readIfExists(infoFile(id));
             if (Option.isNone(text)) {
               return Option.none<Conversation>();
@@ -115,6 +125,7 @@ export class ConversationStore extends Context.Service<
 
         const save = Effect.fn("ConversationStore.save")(
           function* (info: Conversation, json: string) {
+            yield* safe(info.id);
             yield* fs.makeDirectory(path.join(dir, info.id), { recursive: true });
             yield* fs.writeFileString(historyFile(info.id), json);
             yield* fs.writeFileString(infoFile(info.id), yield* encodeInfo(info));
@@ -128,6 +139,7 @@ export class ConversationStore extends Context.Service<
 
         const update = Effect.fn("ConversationStore.update")(
           function* (info: Conversation) {
+            yield* safe(info.id);
             yield* fs.makeDirectory(path.join(dir, info.id), { recursive: true });
             yield* fs.writeFileString(infoFile(info.id), yield* encodeInfo(info));
           },
@@ -140,6 +152,7 @@ export class ConversationStore extends Context.Service<
 
         const remove = Effect.fn("ConversationStore.remove")(
           function* (id: string) {
+            yield* safe(id);
             const target = path.join(dir, id);
             if (yield* fs.exists(target)) {
               yield* fs.remove(target, { recursive: true });
@@ -155,7 +168,10 @@ export class ConversationStore extends Context.Service<
         return ConversationStore.of({
           get,
           history: (id) =>
-            readIfExists(historyFile(id)).pipe(Effect.orElseSucceed(() => Option.none<string>())),
+            safe(id).pipe(
+              Effect.andThen(readIfExists(historyFile(id))),
+              Effect.orElseSucceed(() => Option.none<string>()),
+            ),
           list,
           save,
           update,

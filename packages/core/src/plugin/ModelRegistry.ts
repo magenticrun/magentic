@@ -6,8 +6,21 @@ import {
   type ModelProviderRegistration,
   parseModelRef,
 } from "@magentic/plugin";
-import { Context, Effect, Layer, Option, Schema, Scope, Semaphore } from "effect";
+import { Context, Effect, Exit, Layer, Option, Schema, Scope, Semaphore } from "effect";
 import { LanguageModel } from "effect/unstable/ai";
+
+/** A model built for one `provider/model`, with the credentials it was built from. */
+interface Built {
+  /**
+   * The provider's status line at build time. It names the key or account,
+   * so a different line means the credentials changed and the model must be
+   * built again; none means signed out.
+   */
+  readonly signature: string;
+  readonly model: LanguageModel.Service;
+  /** Closed when the model is replaced, releasing what its layer acquired. */
+  readonly scope: Scope.Closeable;
+}
 
 /** No provider or model answers to a reference, in words the person who wrote it can act on. */
 export class NoModelConfigured extends Schema.TaggedError<NoModelConfigured>()(
@@ -38,7 +51,10 @@ export class ModelRegistry extends Context.Service<
     resolve(
       ref: Option.Option<string>,
     ): Effect.Effect<ResolvedModel, NoModelConfigured | LoginError>;
-    /** The model `resolve` lands on, built once per provider and model and kept for the host's life. */
+    /**
+     * The model `resolve` lands on, built once per provider and model and
+     * kept until the provider's credentials change or it signs out.
+     */
     languageModel(ref: Option.Option<string>): Effect.Effect<LanguageModel.Service, ModelFailure>;
   }
 >()("magentic/core/ModelRegistry") {}
@@ -60,8 +76,18 @@ export const modelRegistryOver = (
   scope: Scope.Scope,
 ): Effect.Effect<ModelRegistry["Service"]> =>
   Effect.gen(function* () {
-    const built = new Map<string, LanguageModel.Service>();
+    const built = new Map<string, Built>();
     const lock = yield* Semaphore.make(1);
+
+    /** Forget a built model and release what its layer held. */
+    const release = (key: string) =>
+      Effect.gen(function* () {
+        const stale = built.get(key);
+        if (stale !== undefined) {
+          built.delete(key);
+          yield* Scope.close(stale.scope, Exit.void);
+        }
+      });
 
     const get = (id: string) =>
       Effect.map(providers, (all) => Option.fromNullishOr(all.find((p) => p.id === id)));
@@ -94,10 +120,21 @@ export const modelRegistryOver = (
       modelId: string,
     ) {
       const key = formatModelRef(provider.id, modelId);
-      const cached = built.get(key);
-      if (cached !== undefined) {
-        return cached;
+      const notSignedIn = new NoModelConfigured({
+        message: `${provider.name} is not signed in; run \`magentic auth login -p ${provider.id}\``,
+      });
+      // Read every time, so a logout or a new key in the store takes effect
+      // on the next run rather than at the next restart.
+      const status = yield* provider.status;
+      if (Option.isNone(status)) {
+        yield* release(key);
+        return yield* notSignedIn;
       }
+      const cached = built.get(key);
+      if (cached !== undefined && cached.signature === status.value) {
+        return cached.model;
+      }
+      yield* release(key);
       const known = yield* provider.models;
       if (!known.some((m) => m.id === modelId)) {
         return yield* new NoModelConfigured({
@@ -106,15 +143,18 @@ export const modelRegistryOver = (
       }
       const layer = yield* provider.model(modelId);
       if (Option.isNone(layer)) {
-        return yield* new NoModelConfigured({
-          message: `${provider.name} is not signed in; run \`magentic auth login -p ${provider.id}\``,
-        });
+        return yield* notSignedIn;
       }
-      const context = yield* Layer.build(layer.value).pipe(
-        Effect.provideService(Scope.Scope, scope),
+      const modelScope = yield* Scope.fork(scope);
+      const context = yield* Effect.result(
+        Layer.build(layer.value).pipe(Effect.provideService(Scope.Scope, modelScope)),
       );
-      const model = Context.get(context, LanguageModel.LanguageModel);
-      built.set(key, model);
+      if (context._tag === "Failure") {
+        yield* Scope.close(modelScope, Exit.void);
+        return yield* context.failure;
+      }
+      const model = Context.get(context.success, LanguageModel.LanguageModel);
+      built.set(key, { signature: status.value, model, scope: modelScope });
       return model;
     });
 

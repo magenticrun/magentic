@@ -5,8 +5,7 @@
   "description": "The magentic gateway: hosts agents and runs every request through identity, policy, and audit.",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./paths": "./src/Paths.ts"
+    ".": "./src/index.ts"
   },
   "scripts": {
     "dev": "bun --watch src/main.ts",
@@ -18,6 +17,7 @@
     "@magentic/audit": "workspace:*",
     "@magentic/core": "workspace:*",
     "@magentic/identity": "workspace:*",
+    "@magentic/mcp": "workspace:*",
     "@magentic/model": "workspace:*",
     "@magentic/plugin": "workspace:*",
     "@magentic/policy": "workspace:*",

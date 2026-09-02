@@ -42,7 +42,7 @@ import {
 import { PickerView } from "./Picker.tsx";
 import { type Palette, paletteFor } from "./Theme.ts";
 
-export type TextLine = {
+type TextLine = {
   /**
    * A note is what a command reports, in the transcript but not from the
    * agent. A summary is what a compaction left for the model to continue from.
@@ -51,9 +51,9 @@ export type TextLine = {
   readonly text: string;
 };
 
-export type ToolResult = { readonly ok: boolean; readonly text: string };
+type ToolResult = { readonly ok: boolean; readonly text: string };
 
-export type ToolLine = {
+type ToolLine = {
   readonly kind: "tool";
   readonly name: string;
   readonly params: string;
@@ -66,7 +66,7 @@ export type ToolLine = {
  * to one line once it has, the way opencode does. Measured in ticks of the
  * run's clock, since that is what the footer counts too.
  */
-export type ThinkingLine = {
+type ThinkingLine = {
   readonly kind: "thinking";
   readonly text: string;
   readonly startedTick: number;
@@ -76,7 +76,7 @@ export type ThinkingLine = {
   readonly expanded: boolean;
 };
 
-export type Line = TextLine | ToolLine | ThinkingLine;
+type Line = TextLine | ToolLine | ThinkingLine;
 
 /** Mutable on purpose: Solid's store setters address fields by name. */
 type State = {
@@ -348,6 +348,12 @@ export const createChatTui = (options: {
         }
         case "RunFinished":
           setState("status", "");
+          if (event.reason === "step-limit") {
+            push({
+              kind: "note",
+              text: "Stopped at the agent's step limit; send another message to continue",
+            });
+          }
           return;
         case "RunFailed":
           setState("status", "");

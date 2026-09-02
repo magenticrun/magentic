@@ -3,10 +3,7 @@ import { type Choice, LoginCancelled, type LoginUi, Screen } from "@magentic/plu
 import * as Prompt from "./Prompt.ts";
 
 const orCancelled = <A>(value: Option.Option<A>): Effect.Effect<A, LoginCancelled> =>
-  Option.match(value, {
-    onNone: () => Effect.fail(new LoginCancelled()),
-    onSome: Effect.succeed,
-  });
+  Effect.fromOption(value, () => new LoginCancelled());
 
 /**
  * The sign-in surface built from clack prompts: a select per picker, a

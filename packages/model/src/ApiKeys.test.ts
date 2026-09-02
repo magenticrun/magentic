@@ -18,6 +18,14 @@ layer(BunServices.layer)("api key store", (it) => {
         yield* store.set("openai", Redacted.make("sk-openai-secret-5678"));
         const info = yield* fs.stat(file);
         assert.strictEqual(info.mode & 0o777, 0o600);
+        // The directory it made is private too.
+        const parent = yield* fs.stat(path.dirname(file));
+        assert.strictEqual(parent.mode & 0o777, 0o700);
+        // A file someone opened up is closed again on the next save.
+        yield* fs.chmod(file, 0o644);
+        yield* store.set("zai", Redacted.make("zai-secret-9012"));
+        assert.strictEqual((yield* fs.stat(file)).mode & 0o777, 0o600);
+        yield* store.remove("zai");
         assert.deepStrictEqual(yield* store.list, ["anthropic", "openai"]);
         const loaded = yield* store.get("anthropic");
         assert.deepStrictEqual(

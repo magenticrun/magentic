@@ -44,7 +44,7 @@ const isNonStreamingResponsesCall = (request: HttpClientRequest.HttpClientReques
   if (text === undefined) {
     return false;
   }
-  return Schema.decodeUnknownOption(RequestBody)(text).pipe(
+  return Schema.decodeOption(RequestBody)(text).pipe(
     (parsed) => parsed._tag === "Some" && parsed.value.stream !== true,
   );
 };
@@ -67,7 +67,7 @@ const collectFinalResponse = (
         if (!line.startsWith("data:")) {
           continue;
         }
-        const decoded = Schema.decodeUnknownOption(StreamEvent)(line.slice(5).trim());
+        const decoded = Schema.decodeOption(StreamEvent)(line.slice(5).trim());
         if (decoded._tag !== "Some") {
           continue;
         }

@@ -195,9 +195,10 @@ export interface AgentDomain {
 }
 ```
 
-The built-in `assistant` agent is one transform in a `builtin-agents` plugin. `ConfigDirectory`
-from `harness.md` is a plugin too: its transform decodes `agents/*.yaml` into the draft, and
-its file watcher calls `ctx.agent.rebuild`. That is the "registries subscribe to LoadedConfig"
+The built-in `assistant` agent is one transform in the gateway's `assistant` plugin. The
+`ConfigDirectory` of `harness.md` is a plugin too, `config-agents` (`configAgentsPlugin` in the
+gateway): its transform decodes `agents/*.yaml` into the draft, and its file watcher calls
+`ctx.agent.rebuild`. That is the "registries subscribe to LoadedConfig"
 mechanism from the harness doc, now with one implementation for every rebuildable domain
 instead of one per registry. `AgentRegistry` keeps its interface and reads the committed state.
 
@@ -353,18 +354,83 @@ like the rest of the config directory. What the design guarantees is narrower an
 stating: a plugin cannot register a tool without a capability, cannot bypass policy or audit
 for calls that go through the registry, and cannot outlive being disabled.
 
+## MCP servers
+
+Tools from Model Context Protocol servers come through one plugin, `mcp` in `@magentic/mcp`,
+the way pi keeps MCP out of its core and leaves it to an extension. The gateway reads the
+`mcp:` section of `magentic.yaml` and hands it to the plugin as its options; nothing else in
+the gateway knows the protocol. Each entry is a server, local (a command the gateway starts
+and talks to over stdio) or remote (a URL, Streamable HTTP first and SSE when that fails):
+
+```yaml
+mcp:
+  linear:
+    type: remote
+    url: https://mcp.linear.app/mcp
+    headers: { Authorization: Bearer ... }
+  files:
+    type: local
+    command: [npx, -y, "@modelcontextprotocol/server-filesystem", .]
+    cwd: . # relative to the workspace
+    environment: { LOG_LEVEL: debug } # added to a safe default environment
+    timeout: 30000 # ms for the handshake and for each call
+  archive:
+    type: remote
+    url: https://archive.example/mcp
+    enabled: false
+```
+
+What the plugin does with a server, following opencode's `MCP` service:
+
+- Connects to every enabled server concurrently at setup, with the entry's timeout. One that
+  cannot be reached, or whose entry does not decode, is logged and skipped; the others keep
+  working and the plugin stays active.
+- Lists the server's tools and registers each as `<server>_<tool>` (anything outside
+  `[a-zA-Z0-9_-]` becomes `_`; two names that collapse to the same string get a numbered
+  suffix, logged), a `Tool.dynamic` carrying the server's own JSON Schema, so the model sees
+  the schema the server published and the server validates the arguments.
+  Every one declares the `mcp` capability: the gateway cannot tell what a foreign tool does,
+  so policy rules say `mcp: approval` rather than reasoning per tool. MCP's `readOnlyHint`
+  and the other hints become Effect's `Tool.Readonly`, `Destructive`, `Idempotent`, and
+  `OpenWorld` annotations.
+- Returns the text of a result as one string when that is all there is, the structured
+  content when there is no text, and otherwise every block, with images and audio described
+  (`{ type, mimeType, omitted }`) rather than copied into the context. A result marked
+  `isError`, a protocol error, and a lost server all reach the model as `McpToolError`.
+- Re-lists and re-registers when the server sends `tools/list_changed`, coalescing a burst
+  into one republish; when the new listing cannot be registered the old tools are put back
+  rather than left missing. Withdraws the tools when the connection closes. The server's
+  `notifications/message` log lines land in the gateway log under its name.
+- Appends the server's `instructions`, when it sent any, to the prompt of every agent that
+  can see at least one of its tools, as a section naming the server and those tools. The
+  text is framed as the server's notes about its tools, third-party content that cannot
+  override the prompt above it or grant anything. That is an agent transform, so it replays
+  with the rest and follows the tool list.
+- Answers `roots/list` with the workspace.
+
+An agent lists MCP tools like any other, by name, or as `<server>_*` for everything a server
+offers: an entry in `tools:` that ends in `*` matches by prefix. The client is the official
+`@modelcontextprotocol/client` (v2), wrapped in Effect: Effect 4 ships the MCP schemas and a
+server but no client, and a hand-rolled one would have to reimplement Streamable HTTP, SSE,
+and stdio on top of an rc. Prompts, resources, sampling, elicitation, and OAuth sign-in for
+remote servers are not wired; a bearer token in `headers` covers the remote servers that need
+one today.
+
 ## The built-ins, rewritten as plugins
 
 - `@magentic/tools`: `fileTools` plugin registering `read_file`, `write_file`, `edit_file`,
   `list_dir`, `glob`, and `grep` from the existing `FileToolsLayer`. `shell` and `http_fetch` arrive as their own plugins so they can
   be disabled individually.
+- `@magentic/mcp`: the `mcp` plugin above, given the `mcp:` section as its options.
 - `@magentic/model`: `openaiCodex`, `openai`, `anthropic`, `zai`, `opencodeZen` plugins, each one
   `ModelProviderRegistration`. `Providers.ts` in the CLI is deleted; `magentic auth login`
   builds its picker from the model domain of a local `PluginHost` with the built-ins only,
   since sign-in is a local operation and needs no gateway.
-- `@magentic/core`: `builtinAgents` plugin with `assistant`; later `configDirectory`.
+- The gateway: `assistant` with the built-in agent, `config-agents` for `agents/*.yaml`.
 
-`Server.ts` lists them: `PluginHost.layer({ builtin: [fileTools, openaiCodex, openai, anthropic, builtinAgents], external: fromConfig })`. Nothing else in the gateway changes shape.
+`Server.ts` lists them as `builtinPlugins` (file tools, shell, the providers, `assistant`),
+then `config-agents`, `mcp`, and the external plugins from `plugins.use`, in that order.
+Nothing else in the gateway changes shape.
 
 ## CLI
 
@@ -389,10 +455,10 @@ Done, with tests beside the code:
   `opencodeZenPlugin` (Claude through OpenCode Zen's Anthropic-compatible route), and the
   gateway's `assistantPlugin`.
 - Gateway: `ToolCallGuardLive` (policy per call, `tool.called` / `tool.failed` /
-  `tool.denied` audit events), the config and plugin loader, `GET /plugins`.
+  `tool.denied` audit events), the config and plugin loader, the `listPlugins` RPC.
 - CLI: `magentic plugin list`; `auth login|list|logout` read providers from a local host.
 - `configAgentsPlugin` in the gateway: `agents/*.yaml` from the configuration directory
-  (`name`, `description`, `model`, `prompt` inline or `{ file }`, `tools`), one bad file
+  (`name`, `description`, `model`, `prompt` inline or `{ file }`, `tools`, `maxSteps`), one bad file
   logged with its path and field while the rest load, rebuilt on SIGHUP and, with
   `reload: watch` in `magentic.yaml`, on file changes.
 - `model:` on an agent picks a provider by id; `ModelRegistry.languageModel` builds each
@@ -400,6 +466,10 @@ Done, with tests beside the code:
 - Commands: `ctx.command.register`, `CommandRegistry` from the host, `commands` on
   `PluginInfo`, `model` on `RunRequest`. `modelCommandPlugin` in `@magentic/model` is `/model`;
   the CLI chat runs it from its local host and draws the picker in the TUI.
+
+- `mcpPlugin` in `@magentic/mcp`: the `mcp:` section, local and remote servers, tools as
+  `<server>_<tool>` with the `mcp` capability, list-changed and close handling, server
+  instructions on the agents that see the tools, and `<server>_*` in an agent's `tools:`.
 
 Still open: `magentic plugin add|remove` and a reload endpoint, both waiting on a decision
 about the CLI surface.

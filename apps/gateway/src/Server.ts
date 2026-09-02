@@ -1,19 +1,32 @@
 import { BunHttpServer, BunServices } from "@effect/platform-bun";
 import { Audit } from "@magentic/audit";
-import { AgentDefinition, builtin, ConversationStore, PluginHost, Runner } from "@magentic/core";
+import {
+  AgentDefinition,
+  builtin,
+  configDir,
+  ConversationStore,
+  dataDir,
+  PluginHost,
+  Runner,
+} from "@magentic/core";
 import { Identity } from "@magentic/identity";
+import { mcpPlugin } from "@magentic/mcp";
 import { layerCredentialStores, modelPlugins } from "@magentic/model";
 import { define, ModelCatalog } from "@magentic/plugin";
 import { Policy } from "@magentic/policy";
 import { Api, RPC_PATH } from "@magentic/protocol";
 import { fileToolsPlugin, shellToolPlugin, WorkspaceRoot } from "@magentic/tools";
-import { Config, Effect, Layer } from "effect";
-import { FetchHttpClient, HttpRouter, HttpServerResponse } from "effect/unstable/http";
+import { Config, Effect, type FileSystem, Layer, type Path, Schema } from "effect";
+import {
+  FetchHttpClient,
+  type HttpClient,
+  HttpRouter,
+  HttpServerResponse,
+} from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import { configAgentsPlugin } from "./ConfigAgents.ts";
 import { ToolCallGuardLive } from "./Guard.ts";
 import { RpcHandlers } from "./Handlers.ts";
-import { configDir, dataDir } from "./Paths.ts";
 import { loadExternalPlugin, loadGatewayConfig } from "./Plugins.ts";
 
 /** The one agent every gateway has until `agents/*.yaml` exists. */
@@ -64,9 +77,43 @@ const workspaceRoot = Config.string("MAGENTIC_WORKSPACE").pipe(Config.withDefaul
 
 const WorkspaceLayer = Layer.unwrap(Effect.map(workspaceRoot, WorkspaceRoot.layer));
 
+/** Address the gateway listens on. Loopback until authentication exists; see docs/identity.md. */
+const listenHost = Config.string("MAGENTIC_HOST").pipe(Config.withDefault("127.0.0.1"));
+
+/** Whether the operator accepted that local identity trusts every caller on this network. */
+const localIdentityAcknowledged = Config.boolean("IDENTITY_LOCAL").pipe(Config.withDefault(false));
+
+export class UnsafeBind extends Schema.TaggedError<UnsafeBind>()("UnsafeBind", {
+  host: Schema.String,
+  message: Schema.String,
+}) {}
+
+const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
+
+/**
+ * Local identity resolves every caller to this process's user and policy allows
+ * everything, so a bind beyond loopback needs saying so out loud.
+ */
+export const checkBind = (
+  host: string,
+  acknowledged: boolean,
+): Effect.Effect<string, UnsafeBind> =>
+  LOOPBACK.has(host) || acknowledged
+    ? Effect.succeed(host)
+    : Effect.fail(
+        new UnsafeBind({
+          host,
+          message:
+            `MAGENTIC_HOST=${host} would expose the gateway with local identity (every caller is ` +
+            `this user) and no authentication. Keep MAGENTIC_HOST=127.0.0.1, or set ` +
+            `IDENTITY_LOCAL=true to accept that on this network.`,
+        }),
+      );
+
 /** What we ship, in the order their contributions take. External plugins follow. */
 export const builtinPlugins = [
   builtin(fileToolsPlugin),
+  builtin(shellToolPlugin),
   ...modelPlugins.map(builtin),
   builtin(assistantPlugin),
 ];
@@ -82,8 +129,10 @@ export const HostLayer = Layer.unwrap(
       loadExternalPlugin(dir, spec),
     );
     const fromConfig = builtin(configAgentsPlugin({ dir, watch: config.reload === "watch" }));
+    // After the config agents, so the servers' instructions reach every agent that can see their tools.
+    const mcp = builtin(mcpPlugin, config.mcpServers);
     return PluginHost.layer({
-      plugins: [...builtinPlugins, fromConfig, ...external],
+      plugins: [...builtinPlugins, fromConfig, mcp, ...external],
       disabled: config.disabledPlugins,
       disabledTools: config.disabledTools,
       paths: { config: dir, workspace, data },
@@ -101,14 +150,17 @@ export const RunnerLayer = Runner.layer.pipe(Layer.provideMerge(ConversationStor
 
 const AdmissionLayer = Layer.mergeAll(Identity.layerLocal, Policy.layerAllowAll, Audit.layerMemory);
 
-/** Identity, policy, and audit meet the runner here and nowhere else. */
+/**
+ * Identity, policy, and audit meet the runner here and nowhere else. The
+ * model catalog comes from outside, so a process that already has one (the
+ * CLI with its embedded gateway) serves with it rather than a second copy.
+ */
 export const ServicesLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer).pipe(
   Layer.provideMerge(
     HostLayer.pipe(
       Layer.provide([
         WorkspaceLayer,
         layerCredentialStores,
-        ModelCatalog.layer,
         ToolCallGuardLive.pipe(Layer.provide(AdmissionLayer)),
       ]),
     ),
@@ -125,19 +177,41 @@ export const HealthRoute = HttpRouter.add("GET", "/health", HttpServerResponse.e
 
 export const AllRoutes = Layer.mergeAll(RpcRoute, HealthRoute);
 
-/** The whole gateway on one port. Building the layer starts serving. `quiet` drops request logs. */
-export const layerServer = (port: number, options: { readonly quiet?: boolean } = {}) =>
+export interface ServerOptions {
+  /** Drop request and listen logs, for a gateway embedded in another program. */
+  readonly quiet?: boolean;
+  readonly hostname?: string;
+  /**
+   * The model catalog to serve with. The CLI hands over its own, so an
+   * embedded gateway does not fetch, cache, and refresh a second copy.
+   */
+  readonly catalog?: Layer.Layer<
+    ModelCatalog,
+    never,
+    FileSystem.FileSystem | Path.Path | HttpClient.HttpClient
+  >;
+}
+
+/** The whole gateway on one port. Building the layer starts serving. */
+export const layerServer = (port: number, options: ServerOptions = {}) =>
   HttpRouter.serve(AllRoutes, {
     disableLogger: options.quiet === true,
     disableListenLog: options.quiet === true,
   }).pipe(
     // Bun closes a request that sends nothing for ten seconds; compacting a
     // conversation waits on the model longer than that. 255 is Bun's most.
-    Layer.provide(BunHttpServer.layer({ port, idleTimeout: 255 })),
+    Layer.provide(
+      BunHttpServer.layer({ port, hostname: options.hostname ?? "127.0.0.1", idleTimeout: 255 }),
+    ),
+    Layer.provide(options.catalog ?? ModelCatalog.layer),
     Layer.provide([BunServices.layer, FetchHttpClient.layer]),
   );
 
-/** `Layer.launch` this to run the gateway on `PORT`. */
+/** `Layer.launch` this to run the gateway on `PORT`, listening on `MAGENTIC_HOST`. */
 export const HttpServerLayer = Layer.unwrap(
-  Effect.map(Config.port("PORT").pipe(Config.withDefault(4321)), layerServer),
+  Effect.gen(function* () {
+    const port = yield* Config.port("PORT").pipe(Config.withDefault(4321));
+    const hostname = yield* checkBind(yield* listenHost, yield* localIdentityAcknowledged);
+    return layerServer(port, { hostname });
+  }),
 );

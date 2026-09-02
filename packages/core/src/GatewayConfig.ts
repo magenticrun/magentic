@@ -19,6 +19,8 @@ export class GatewayConfig extends Schema.Class<GatewayConfig>("magentic/core/Ga
   plugins: Schema.optional(PluginsSection),
   /** `name: false` hides a tool from every agent. Policy still decides each call. */
   tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
+  /** MCP servers by name. The `mcp` plugin decodes each entry; the gateway only carries them. */
+  mcp: Schema.optional(Schema.Record(Schema.String, Schema.Json)),
   /** `watch` rebuilds agents when `agents/` changes. SIGHUP always does. */
   reload: Schema.optional(Schema.Literals(["manual", "watch"])),
 }) {
@@ -30,6 +32,10 @@ export class GatewayConfig extends Schema.Class<GatewayConfig>("magentic/core/Ga
 
   get externalPlugins(): ReadonlyArray<PluginSpec> {
     return this.plugins?.use ?? [];
+  }
+
+  get mcpServers(): Readonly<Record<string, Schema.Json>> {
+    return this.mcp ?? {};
   }
 
   get disabledTools(): ReadonlyArray<string> {

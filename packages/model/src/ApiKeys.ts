@@ -106,12 +106,15 @@ export class ApiKeyStore extends Context.Service<
 
         const save = Effect.fn("ApiKeyStore.save")(
           function* (keys: Keys) {
-            yield* fs.makeDirectory(path.dirname(file), { recursive: true });
+            // The directory is private too, and the mode is set again on every
+            // save: `mode` only applies when the file is created.
+            yield* fs.makeDirectory(path.dirname(file), { recursive: true, mode: 0o700 });
             const text = yield* Schema.encodeEffect(StoredFile)({
               version: 1,
               keys: [...keys].map(([provider, key]) => ({ provider, key: Redacted.value(key) })),
             });
             yield* fs.writeFileString(file, text, { mode: 0o600 });
+            yield* fs.chmod(file, 0o600);
           },
           Effect.mapError((error) => storage(`cannot write ${file}: ${error.message}`)),
         );

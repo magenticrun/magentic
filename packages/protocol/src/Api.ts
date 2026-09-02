@@ -7,6 +7,7 @@ import {
   ConversationNotFound,
   TranscriptEntry,
 } from "./Conversation.ts";
+import { ConversationId } from "./ConversationId.ts";
 import { PluginInfo } from "./Plugin.ts";
 import { Compacted, RunDenied, RunEvent, RunRequest } from "./Run.ts";
 
@@ -40,28 +41,28 @@ export const Api = RpcGroup.make(
     success: Schema.Array(Conversation),
   }),
   Rpc.make("getConversation", {
-    payload: { id: Schema.String },
+    payload: { id: ConversationId },
     success: Conversation,
     error: ConversationNotFound,
   }),
   Rpc.make("transcript", {
-    payload: { id: Schema.String },
+    payload: { id: ConversationId },
     success: Schema.Array(TranscriptEntry),
     error: ConversationNotFound,
   }),
   /** Give the conversation a title of the caller's choosing. */
   Rpc.make("rename", {
-    payload: { id: Schema.String, title: Schema.NonEmptyString },
+    payload: { id: ConversationId, title: Schema.NonEmptyString },
     success: Conversation,
     error: ConversationNotFound,
   }),
   Rpc.make("removeConversation", {
-    payload: { id: Schema.String },
+    payload: { id: ConversationId },
     error: ConversationNotFound,
   }),
   /** Fold the conversation so far into a summary the next run continues from. */
   Rpc.make("compact", {
-    payload: { id: Schema.String },
+    payload: { id: ConversationId },
     success: Compacted,
     error: Schema.Union([ConversationNotFound, CompactionFailed]),
   }),
