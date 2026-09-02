@@ -88,8 +88,10 @@ Each is a `Context.Service` with static layers. Ids are `magentic/core/<Name>`.
   `ConfigDirectory` service (see "Configuration" below) and swaps them on reload.
 - **ToolRegistry**: fed by plugins (see `plugins.md`); `forAgent(def)` returns a
   `Toolkit.WithHandler` whose `handle` runs policy, hooks, the tool, and audit. Built-in
-  tools ship in `@magentic/tools` as plugins: `read_file`, `write_file`, `shell`, `http_fetch`,
-  `load_skill`, `remember`, `recall`. Each declares `capability` and `risk` through
+  tools ship in `@magentic/tools` as plugins: `read_file`, `write_file`, `edit_file`,
+  `list_dir`, `glob`, `grep`, `shell`, `http_fetch`, `load_skill`, `remember`, `recall`. The
+  file tools stay inside the `WorkspaceRoot`; `glob` and `grep` walk the tree themselves,
+  skipping `node_modules`, `.git`, and hidden directories, so nothing depends on ripgrep. Each declares `capability` and `risk` through
   `Tool.make(...).annotate(...)`.
 - **SkillRegistry**: scans `skills/**/SKILL.md`, parses frontmatter, exposes `list` and
   `load(name)`. Summaries are injected into the system prompt; the body is loaded via the

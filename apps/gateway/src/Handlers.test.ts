@@ -129,7 +129,12 @@ layer(TestLayer)("gateway api", (it) => {
       assert.deepStrictEqual(
         plugins.map((p) => [p.id, p.status, [...p.tools], [...p.agents]]),
         [
-          ["file-tools", "active", ["read_file", "write_file"], []],
+          [
+            "file-tools",
+            "active",
+            ["read_file", "write_file", "edit_file", "list_dir", "glob", "grep"],
+            [],
+          ],
           ["fake", "active", [], []],
           ["triage", "active", [], ["triage"]],
         ],

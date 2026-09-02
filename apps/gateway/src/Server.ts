@@ -23,13 +23,13 @@ import { configDir, dataDir, loadExternalPlugin, loadGatewayConfig } from "./Plu
 /** The one agent every gateway has until `agents/*.yaml` exists. */
 export const assistant = new AgentDefinition({
   name: "assistant",
-  description: "General assistant that can read and write files in the workspace.",
+  description: "General assistant that can explore, read, and change files in the workspace.",
   prompt:
     "You are magentic, a capable assistant working inside a software workspace. " +
-    "Use read_file to look at files before answering questions about them and " +
-    "write_file when asked to create or change a file. Paths are relative to the workspace root. " +
-    "Be concise.",
-  tools: ["read_file", "write_file"],
+    "Use list_dir, glob, and grep to find files, read_file to look at them before answering " +
+    "questions about them, edit_file to change part of a file, and write_file to create one " +
+    "or replace it whole. Paths are relative to the workspace root. Be concise.",
+  tools: ["read_file", "write_file", "edit_file", "list_dir", "glob", "grep"],
 });
 
 export const assistantPlugin = define({
