@@ -69,6 +69,13 @@ export const readClipboard = async (): Promise<Clipboard> => {
   return text.length === 0 ? { kind: "empty" } : { kind: "text", text };
 };
 
+/** Put text on the host clipboard; false when the host could not take it. */
+export const writeClipboard = async (text: string): Promise<boolean> => {
+  host ??= createHostClipboard();
+  const result = await host.writeText(text);
+  return result.status === "written";
+};
+
 export const toAttachment = (mediaType: string, data: Uint8Array, fileName?: string): Attachment =>
   fileName === undefined ? { mediaType, data } : { mediaType, data, fileName };
 

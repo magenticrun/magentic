@@ -1,5 +1,7 @@
 import {
   decodePasteBytes,
+  type ScrollAcceleration,
+  type ScrollBoxRenderable,
   type TextareaOptions,
   type TextareaRenderable,
   type ThemeMode,
@@ -21,7 +23,7 @@ import {
 } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import { Logo } from "./Logo.tsx";
-import { markdownStyleFor } from "./Markdown.ts";
+import { markdownStyleFor, subtleStyleFor } from "./Markdown.ts";
 import {
   attached,
   composerStyleFor,
@@ -35,6 +37,7 @@ import {
   textPlaceholder,
   toAttachment,
   unfold,
+  writeClipboard,
 } from "./Paste.ts";
 import { PickerView } from "./Picker.tsx";
 import { type Palette, paletteFor } from "./Theme.ts";
@@ -58,12 +61,29 @@ export type ToolLine = {
   readonly result?: ToolResult;
 };
 
-export type Line = TextLine | ToolLine;
+/**
+ * What the model thought before it answered, shown as it streams and folded
+ * to one line once it has, the way opencode does. Measured in ticks of the
+ * run's clock, since that is what the footer counts too.
+ */
+export type ThinkingLine = {
+  readonly kind: "thinking";
+  readonly text: string;
+  readonly startedTick: number;
+  /** Absent while the model is still thinking. */
+  readonly endedTick?: number;
+  /** Whether the person opened the folded text again. */
+  readonly expanded: boolean;
+};
+
+export type Line = TextLine | ToolLine | ThinkingLine;
 
 /** Mutable on purpose: Solid's store setters address fields by name. */
 type State = {
   /** The `provider/model` runs use, when known. */
   model: Option.Option<string>;
+  /** Ticks of the spinner since the run began; 0 between runs. */
+  ticks: number;
   /** Tokens the latest model call held, input and output; 0 before the first reply. */
   contextTokens: number;
   /** How many tokens the model can hold; 0 when the catalog does not say. */
@@ -79,6 +99,10 @@ const FRAMES = ["·", "✢", "✳", "✶", "✻", "✽", "✶", "✳", "✢"];
 const TICK_MS = 100;
 /** How long a first ctrl+c waits for the second before it is forgotten. */
 const CONFIRM_MS = 2000;
+/** How long the footer notes a copy. */
+const FLASH_MS = 2000;
+/** Rows per wheel notch, constant, as opencode scrolls unless told otherwise. */
+const SCROLL_SPEED: ScrollAcceleration = { tick: () => 3, reset: () => {} };
 /** The composer grows with its text up to this many rows, then scrolls inside. */
 const MAX_INPUT_ROWS = 8;
 /**
@@ -128,7 +152,16 @@ const summariseParams = (value: Schema.Json): string => {
 };
 
 const asTool = (line: Line): ToolLine | undefined => (line.kind === "tool" ? line : undefined);
-const asText = (line: Line): TextLine | undefined => (line.kind === "tool" ? undefined : line);
+const asThinking = (line: Line): ThinkingLine | undefined =>
+  line.kind === "thinking" ? line : undefined;
+const asText = (line: Line): TextLine | undefined =>
+  line.kind === "tool" || line.kind === "thinking" ? undefined : line;
+
+/** `Thought for 12s`; a thought shorter than a second still took one. */
+const thoughtFor = (line: ThinkingLine): string => {
+  const ticks = (line.endedTick ?? line.startedTick) - line.startedTick;
+  return `Thought for ${Math.max(1, Math.round((ticks * TICK_MS) / 1000))}s`;
+};
 
 /** What the slash-command popover lists. */
 export interface CommandInfo {
@@ -184,6 +217,7 @@ export const createChatTui = (options: {
 }): ChatTui => {
   const [state, setState] = createStore<State>({
     model: options.model,
+    ticks: 0,
     contextTokens: 0,
     contextWindow: options.contextWindow,
     status: "",
@@ -230,6 +264,44 @@ export const createChatTui = (options: {
       }),
     );
 
+  /** Grow the thought in progress, or begin one. */
+  const appendThinking = (text: string) =>
+    setState(
+      produce((s) => {
+        const last = s.lines.at(-1);
+        if (last !== undefined && last.kind === "thinking" && last.endedTick === undefined) {
+          s.lines = [...s.lines.slice(0, -1), { ...last, text: last.text + text }];
+        } else {
+          s.lines = [...s.lines, { kind: "thinking", text, startedTick: s.ticks, expanded: false }];
+        }
+      }),
+    );
+
+  /** The model moved on from thinking; fold the thought. */
+  const finishThinking = () =>
+    setState(
+      produce((s) => {
+        const last = s.lines.at(-1);
+        if (last !== undefined && last.kind === "thinking" && last.endedTick === undefined) {
+          s.lines = [...s.lines.slice(0, -1), { ...last, endedTick: s.ticks }];
+        }
+      }),
+    );
+
+  const toggleThinking = (index: number) =>
+    setState(
+      produce((s) => {
+        const line = s.lines[index];
+        if (line !== undefined && line.kind === "thinking") {
+          s.lines = [
+            ...s.lines.slice(0, index),
+            { ...line, expanded: !line.expanded },
+            ...s.lines.slice(index + 1),
+          ];
+        }
+      }),
+    );
+
   // Signals rather than store fields: a dialog carries a callback. A command
   // that asks again replaces the picker in place, and the dialog only closes
   // when the command ends, so nothing flashes between two questions.
@@ -251,6 +323,10 @@ export const createChatTui = (options: {
 
   const apply = (event: RunEvent) =>
     batch(() => {
+      // Anything but more reasoning means the model has finished thinking.
+      if (event._tag !== "ReasoningDelta") {
+        finishThinking();
+      }
       switch (event._tag) {
         case "RunStarted":
           setState("status", "Thinking…");
@@ -259,7 +335,7 @@ export const createChatTui = (options: {
           appendAssistant(event.text);
           return;
         case "ReasoningDelta":
-          setState("status", "Reasoning…");
+          appendThinking(event.text);
           return;
         case "ToolCall":
           setState("status", `Running ${event.name}…`);
@@ -327,7 +403,51 @@ export const createChatTui = (options: {
     const [armed, setArmed] = createSignal(false);
     let disarm: ReturnType<typeof setTimeout> | undefined;
     onCleanup(() => clearTimeout(disarm));
+    // A word in the footer for a moment, such as that a selection was copied.
+    const [flash, setFlash] = createSignal<string | undefined>(undefined);
+    let unflash: ReturnType<typeof setTimeout> | undefined;
+    onCleanup(() => clearTimeout(unflash));
+    const showFlash = (text: string) => {
+      setFlash(text);
+      clearTimeout(unflash);
+      unflash = setTimeout(() => setFlash(undefined), FLASH_MS);
+    };
+    // The composer keeps the keyboard, so the transcript scrolls from here
+    // with opencode's keys and distances; the wheel reaches the scrollbox on
+    // its own. OpenTUI calls alt `meta`.
+    let scroll: ScrollBoxRenderable | undefined;
+    const scrollKey = (key: { name: string; ctrl: boolean; meta: boolean }): boolean => {
+      if (scroll === undefined) {
+        return false;
+      }
+      const box = scroll;
+      const alt = key.ctrl && key.meta;
+      if (key.name === "pageup" || (alt && key.name === "b")) {
+        box.scrollBy(-box.height / 2);
+      } else if (key.name === "pagedown" || (alt && key.name === "f")) {
+        box.scrollBy(box.height / 2);
+      } else if (alt && key.name === "u") {
+        box.scrollBy(-box.height / 4);
+      } else if (alt && key.name === "d") {
+        box.scrollBy(box.height / 4);
+      } else if (alt && key.name === "y") {
+        box.scrollBy(-1);
+      } else if (alt && key.name === "e") {
+        box.scrollBy(1);
+      } else if (key.ctrl && !key.meta && key.name === "g") {
+        box.scrollTo(0);
+      } else if (alt && key.name === "g") {
+        box.scrollTo(box.scrollHeight);
+      } else {
+        return false;
+      }
+      return true;
+    };
     useKeyboard((key) => {
+      if (dialog() === undefined && scrollKey(key)) {
+        key.preventDefault();
+        return;
+      }
       const listed = popover();
       if (listed !== undefined && !key.ctrl && !key.meta) {
         const count = listed.length;
@@ -385,18 +505,32 @@ export const createChatTui = (options: {
     const palette = () => paletteFor(mode());
     const markdownStyle = () => markdownStyleFor(palette());
 
-    // Ticks since the run began; drives the spinner and the elapsed seconds.
-    const [ticks, setTicks] = createSignal(0);
+    // Dragging selects text, as OpenTUI does with the mouse on; letting go
+    // copies it and clears the selection, as opencode does. A click that ends
+    // a drag is not a click on what it landed on.
+    const selecting = () => (renderer.getSelection()?.getSelectedText() ?? "").length > 0;
+    const copySelection = async () => {
+      const text = renderer.getSelection()?.getSelectedText() ?? "";
+      if (text.length === 0) {
+        return;
+      }
+      renderer.clearSelection();
+      const copied = (await writeClipboard(text)) || renderer.copyToClipboardOSC52(text);
+      showFlash(copied ? "copied to clipboard" : "could not reach the clipboard");
+    };
+
+    // Ticks since the run began; drives the spinner, the elapsed seconds, and
+    // how long each thought took.
     createEffect(() => {
       if (!state.busy) {
         return;
       }
-      setTicks(0);
-      const timer = setInterval(() => setTicks((n) => n + 1), TICK_MS);
+      setState("ticks", 0);
+      const timer = setInterval(() => setState("ticks", (n) => n + 1), TICK_MS);
       onCleanup(() => clearInterval(timer));
     });
-    const frame = () => FRAMES[ticks() % FRAMES.length];
-    const elapsed = () => Math.floor((ticks() * TICK_MS) / 1000);
+    const frame = () => FRAMES[state.ticks % FRAMES.length];
+    const elapsed = () => Math.floor((state.ticks * TICK_MS) / 1000);
 
     // The composer keeps its own text; the view reads it on send and sizes
     // the box to the text, counting wrapped rows.
@@ -556,8 +690,26 @@ export const createChatTui = (options: {
       line.kind === "error" ? colours.error : line.kind === "note" ? colours.muted : colours.text;
 
     return (
-      <box flexDirection="column" width="100%" height="100%" paddingLeft={1} paddingRight={1}>
-        <scrollbox stickyScroll stickyStart="bottom" flexGrow={1} flexShrink={1} marginTop={1}>
+      <box
+        flexDirection="column"
+        width="100%"
+        height="100%"
+        paddingLeft={1}
+        paddingRight={1}
+        onMouseUp={() => void copySelection()}
+      >
+        <scrollbox
+          ref={(node: ScrollBoxRenderable) => {
+            scroll = node;
+          }}
+          stickyScroll
+          stickyStart="bottom"
+          scrollAcceleration={SCROLL_SPEED}
+          verticalScrollbarOptions={{ visible: false }}
+          flexGrow={1}
+          flexShrink={1}
+          marginTop={1}
+        >
           <box flexDirection="row" flexShrink={0} marginBottom={1}>
             <Logo palette={palette()} />
             {/* One row beside a three-row mark, level with the dot. */}
@@ -578,8 +730,40 @@ export const createChatTui = (options: {
             </box>
           </box>
           <For each={state.lines}>
-            {(line) => (
+            {(line, index) => (
               <Switch>
+                <Match when={asThinking(line)}>
+                  {(thought) => (
+                    <box flexDirection="column" marginBottom={1}>
+                      {/* Click the header to open a folded thought again, or fold it. */}
+                      <box
+                        flexDirection="row"
+                        onMouseUp={() => {
+                          if (!selecting()) {
+                            toggleThinking(index());
+                          }
+                        }}
+                      >
+                        <text fg={palette().muted} flexShrink={0}>
+                          {thought().endedTick === undefined ? frame() : "⏺"}
+                        </text>
+                        <text fg={palette().muted} marginLeft={1} wrapMode="none">
+                          {thought().endedTick === undefined ? "Thinking…" : thoughtFor(thought())}
+                        </text>
+                      </box>
+                      <Show when={thought().endedTick === undefined || thought().expanded}>
+                        <box marginLeft={2}>
+                          <markdown
+                            content={thought().text}
+                            syntaxStyle={subtleStyleFor(palette())}
+                            fg={palette().muted}
+                            streaming={thought().endedTick === undefined}
+                          />
+                        </box>
+                      </Show>
+                    </box>
+                  )}
+                </Match>
                 <Match when={asTool(line)}>
                   {(tool) => (
                     <box flexDirection="row" marginBottom={1}>
@@ -746,16 +930,18 @@ export const createChatTui = (options: {
           {/* The left half is free for later; the hint keeps to the right. */}
           <box flexDirection="row" justifyContent="flex-end">
             <Show
-              when={armed()}
+              when={armed() ? "ctrl+c again to quit" : flash()}
               fallback={
                 <text fg={palette().muted} wrapMode="none" truncate>
-                  shift+enter newline
+                  shift+enter newline · pgup/pgdn scroll
                 </text>
               }
             >
-              <text fg={palette().accent} wrapMode="none" truncate>
-                ctrl+c again to quit
-              </text>
+              {(notice) => (
+                <text fg={palette().accent} wrapMode="none" truncate>
+                  {notice()}
+                </text>
+              )}
             </Show>
           </box>
         </box>
