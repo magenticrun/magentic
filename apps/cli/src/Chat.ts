@@ -135,8 +135,9 @@ const startingConversation = Effect.fn("Cli.chat.startingConversation")(function
 /**
  * The full-screen chat. Inputs come from the view through a queue; each one
  * becomes a run whose events are folded back into the transcript, or, when
- * it starts with a slash, a command from the local plugin host. Esc stops
- * the run in flight; ctrl+c twice ends the session.
+ * it starts with a slash, a command from the local plugin host. The view
+ * holds back what is sent during a run until it ends. Esc stops the run in
+ * flight; ctrl+c twice ends the session.
  */
 export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   // The terminal reports light or dark within a few milliseconds, or never;

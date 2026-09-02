@@ -49,7 +49,9 @@ bun apps/cli/src/main.ts
 bun apps/cli/src/main.ts run "Explain this repository"
 ```
 
-The built-in `assistant` can inspect, edit, and run commands in the current workspace. List the agents available to the gateway with:
+The built-in `assistant` can inspect, edit, and run commands in the current workspace. While it works you can keep typing: a message sent then is queued above the composer and goes out when the turn ends, consecutive messages as one. `↑` on an empty composer takes the queue back for editing; `Esc` stops the run and does the same.
+
+List the agents available to the gateway with:
 
 ```sh
 bun apps/cli/src/main.ts agents
