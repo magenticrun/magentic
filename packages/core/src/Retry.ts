@@ -1,6 +1,6 @@
 import type { RunEvent } from "@magentic/protocol";
-import { Cause, Duration, Effect, Random, Schedule } from "effect";
-import type { AiError } from "effect/unstable/ai";
+import { Cause, Duration, Effect, Option, Random, Schedule } from "effect";
+import { AiError } from "effect/unstable/ai";
 
 /**
  * How a failed model call is tried again, after opencode: backoff from two
@@ -95,6 +95,24 @@ export const retryPolicy = <R>(
       });
     }),
   );
+
+/**
+ * The tool call the provider threw out before it ran, when that is what failed
+ * the model call. An endpoint that does not hold the model to the tool schema
+ * lets a parameter of the wrong type through; the response then dies with
+ * nothing of it in the history, so the model can be told what was wrong and
+ * call the tool again.
+ */
+export const rejectedToolCall = (
+  cause: Cause.Cause<unknown>,
+): Option.Option<AiError.ToolParameterValidationError> => {
+  const error = Cause.findErrorOption(cause);
+  if (Option.isNone(error) || !AiError.isAiError(error.value)) {
+    return Option.none();
+  }
+  const { reason } = error.value;
+  return reason._tag === "ToolParameterValidationError" ? Option.some(reason) : Option.none();
+};
 
 /** The event a surface gets for one retry. */
 export const toRetryEvent = (retrying: Retrying): RunEvent => ({

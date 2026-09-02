@@ -7,6 +7,10 @@ const CHARS_PER_TOKEN = 4;
 
 const count = (n: number): string => n.toLocaleString("en-US");
 
+/** `$0.0123` under a cent, `$1.23` otherwise. */
+const formatCost = (dollars: number): string =>
+  dollars > 0 && dollars < 0.01 ? `$${dollars.toFixed(4)}` : `$${dollars.toFixed(2)}`;
+
 const percent = (part: number, whole: number): string => {
   const share = (part / whole) * 100;
   return `${share < 1 ? "<1" : Math.round(share)}%`;
@@ -49,16 +53,21 @@ export const contextCommandPlugin = define({
     const run = Effect.fn("context.run")(function* ({ ui, session }: CommandInput) {
       const model = yield* session.model;
       const usage = yield* session.usage;
+      const reasoning = yield* session.reasoning;
       const lines: Array<string> = [
         Option.match(model, {
           onNone: () => "Model: none chosen",
-          onSome: (ref) => `Model: ${ref}`,
+          onSome: (ref) =>
+            `Model: ${ref}${Option.match(reasoning, {
+              onNone: () => "",
+              onSome: (level) => ` · thinking ${level}`,
+            })}`,
         }),
       ];
       if (Option.isNone(usage)) {
         lines.push("Context: empty until the first reply");
       } else {
-        const { latest, calls, totalInputTokens, totalOutputTokens } = usage.value;
+        const { latest, calls, totalInputTokens, totalOutputTokens, totalCost } = usage.value;
         const window = Option.isSome(model) ? yield* windowOf(model.value) : 0;
         const held = latest.inputTokens + latest.outputTokens;
         const share = window > 0 ? ` of ${count(window)} (${percent(held, window)})` : "";
@@ -79,7 +88,9 @@ export const contextCommandPlugin = define({
             ["assistant", estimate.assistant],
             ["tool calls", estimate.toolCalls],
           ]),
-          `Session: ${calls} model ${calls === 1 ? "call" : "calls"} · ${count(totalInputTokens)} input · ${count(totalOutputTokens)} output`,
+          `Session: ${calls} model ${calls === 1 ? "call" : "calls"} · ${count(totalInputTokens)} input · ${count(totalOutputTokens)} output${
+            totalCost === undefined ? "" : ` · ${formatCost(totalCost)}`
+          }`,
         );
       }
       yield* ui.notify(lines.join("\n"));

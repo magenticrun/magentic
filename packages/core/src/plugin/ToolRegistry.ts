@@ -120,7 +120,9 @@ export const toolRegistryOver = (inputs: ToolRegistryInputs): ToolRegistry["Serv
     run: RunIdentity,
   ) {
     const entries = (yield* visible).filter((entry) =>
-      agent.tools.some((pattern) => toolMatches(pattern, entry.tool.name)),
+      agent.tools.some((pattern) =>
+        toolMatches(pattern, { name: entry.tool.name, capability: entry.capability }),
+      ),
     );
     const byName = new Map(entries.map((entry) => [entry.tool.name, entry]));
     const tools = Object.fromEntries(entries.map((entry) => [entry.tool.name, entry.tool]));

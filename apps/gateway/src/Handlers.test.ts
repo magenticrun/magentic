@@ -1,13 +1,13 @@
 import { BunServices } from "@effect/platform-bun";
 import { assert, layer } from "@effect/vitest";
 import { Audit, AuditMemory } from "@magentic/audit";
-import { builtin, ConversationStore, PluginHost, Runner } from "@magentic/core";
+import { builtin, ConversationStore, PluginHost, Runner, Steering } from "@magentic/core";
 import { Identity } from "@magentic/identity";
 import { mcpPlugin, McpServers } from "@magentic/mcp";
 import { fakeProviderPlugin, type FakeScript } from "@magentic/model";
 import { AgentDefinition, define, ModelCatalog } from "@magentic/plugin";
 import { Policy } from "@magentic/policy";
-import { Api, RPC_PATH } from "@magentic/protocol";
+import { Api, RPC_PATH, RunNotFound } from "@magentic/protocol";
 import { fileToolsPlugin, WorkspaceRoot } from "@magentic/tools";
 import { DateTime, Effect, Exit, FileSystem, Layer, Ref, Stream } from "effect";
 import {
@@ -125,7 +125,9 @@ const handlersWith = (policy: Layer.Layer<Policy>) => {
     Layer.provide([WorkspaceLayer, ToolCallGuardLive.pipe(Layer.provide(AdmissionLayer))]),
     Layer.provideMerge(McpServers.layer),
   );
-  const RunnerLayer = Runner.layer.pipe(Layer.provideMerge(ConversationStore.layerMemory));
+  const RunnerLayer = Runner.layer.pipe(
+    Layer.provideMerge(Layer.mergeAll(ConversationStore.layerMemory, Steering.layer)),
+  );
   const ServicesLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer).pipe(
     Layer.provideMerge(HostLayer),
   );
@@ -236,6 +238,16 @@ layer(TestLayer)("gateway api", (it) => {
         recorded.map((e) => e.action),
         ["run.started"],
       );
+    }),
+  );
+
+  it.effect("refuses to steer a run that is not in flight", () =>
+    Effect.gen(function* () {
+      const client = yield* makeClient;
+      const error = yield* client.steer({ runId: "gone", input: "more" }).pipe(Effect.flip);
+      assert.deepStrictEqual(error, new RunNotFound({ runId: "gone" }));
+      // Nothing to take back either; the surface sends it as a new run instead.
+      assert.deepStrictEqual(yield* client.unsteer({ runId: "gone" }), []);
     }),
   );
 

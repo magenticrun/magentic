@@ -153,6 +153,8 @@ export interface ModelProviderRegistration {
     Option.Option<Layer.Layer<LanguageModel.LanguageModel, ModelProviderError>>,
     LoginError
   >;
+  /** The request configuration that makes a model think at one of its `reasoningLevels`. */
+  reasoning?(model: string, level: string): Effect.Effect<Option.Option<Context.Context<never>>>;
 }
 export interface ModelDomain {
   register(provider: ModelProviderRegistration): Effect.Effect<Registration, never, Scope.Scope>;
@@ -160,6 +162,17 @@ export interface ModelDomain {
   readonly providers: Effect.Effect<ReadonlyArray<ModelProviderRegistration>>;
 }
 ```
+
+`ModelInfo` carries what the catalog says of each model beyond its limits: `reasoningLevels`,
+the names its thinking can be set to (the effort names when it takes an effort, `high` and
+`max` budgets when it takes a budget, none when it only turns on and off), and `cost`, its
+prices per million tokens. A chat cycles the levels with `ctrl+t` and sends the choice with
+each run; the runner asks the provider's `reasoning` for the request configuration and
+provides it as context around the model call, so a provider that speaks the OpenAI protocol
+answers with a reasoning effort and one that speaks Anthropic's with an effort or a thinking
+budget. The runner prices every call from `cost` and reports it on the `TokenUsage` event and
+the conversation's usage; a provider whose plan is not metered by the token, such as a ChatGPT
+subscription, leaves `cost` out.
 
 This follows opencode: an agent's `model:` is a `provider/model` reference such as
 `opencode-zen/gpt-5.5`; a bare provider id takes that provider's default model, and no
@@ -389,7 +402,10 @@ What the plugin does with a server, following opencode's `MCP` service:
 - Lists the server's tools and registers each as `<server>_<tool>` (anything outside
   `[a-zA-Z0-9_-]` becomes `_`; two names that collapse to the same string get a numbered
   suffix, logged), a `Tool.dynamic` carrying the server's own JSON Schema, so the model sees
-  the schema the server published and the server validates the arguments.
+  the schema the server published and the server validates the arguments. Strict schema mode
+  is off for these: OpenAI's rejects any optional property, and servers rarely write for it.
+  The arguments decode as any object, since the provider derives a codec from the decoder
+  when a call comes back and cannot from the `Schema.Unknown` a JSON-Schema tool carries.
   Every one declares the `mcp` capability: the gateway cannot tell what a foreign tool does,
   so policy rules say `mcp: approval` rather than reasoning per tool. MCP's `readOnlyHint`
   and the other hints become Effect's `Tool.Readonly`, `Destructive`, `Idempotent`, and
@@ -422,8 +438,9 @@ What the plugin does with a server, following opencode's `MCP` service:
   one, so a missing tool is explained in the chat rather than in the gateway log.
   `/mcp <server>` adds the tools that server offers.
 
-An agent lists MCP tools like any other, by name, or as `<server>_*` for everything a server
-offers: an entry in `tools:` that ends in `*` matches by prefix. The client is the official
+An agent lists MCP tools like any other, by name, as `<server>_*` for everything a server
+offers, or as `mcp:*` for every tool from every server: an entry in `tools:` that ends in `*`
+matches by prefix, and a capability followed by `:*` matches by capability. The client is the official
 `@modelcontextprotocol/client` (v2), wrapped in Effect: Effect 4 ships the MCP schemas and a
 server but no client, and a hand-rolled one would have to reimplement Streamable HTTP, SSE,
 and stdio on top of an rc. Prompts, resources, sampling, elicitation, and OAuth sign-in for
@@ -483,7 +500,8 @@ Done, with tests beside the code:
 
 - `mcpPlugin` in `@magentic/mcp`: the `mcp:` section, local and remote servers, tools as
   `<server>_<tool>` with the `mcp` capability, list-changed and close handling, server
-  instructions on the agents that see the tools, and `<server>_*` in an agent's `tools:`.
+  instructions on the agents that see the tools, and `<server>_*` or `mcp:*` in an agent's
+  `tools:`.
 
 Still open: `magentic plugin add|remove` and a reload endpoint, both waiting on a decision
 about the CLI surface.

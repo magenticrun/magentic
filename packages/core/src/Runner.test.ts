@@ -1,17 +1,18 @@
 import { BunServices } from "@effect/platform-bun";
 import { assert, layer } from "@effect/vitest";
 import { fakeProviderPlugin, type FakeScript } from "@magentic/model";
-import { AgentDefinition, ModelCatalog } from "@magentic/plugin";
-import { Principal } from "@magentic/protocol";
+import { AgentDefinition, CapabilityAnnotation, define, ModelCatalog } from "@magentic/plugin";
+import { Principal, type RunEvent } from "@magentic/protocol";
 import { fileToolsPlugin, WorkspaceRoot } from "@magentic/tools";
-import { Effect, Fiber, FileSystem, Layer, Option, Stream } from "effect";
+import { Deferred, Effect, Fiber, FileSystem, Layer, Option, Ref, Schema, Stream } from "effect";
 import { TestClock } from "effect/testing";
-import { AiError } from "effect/unstable/ai";
+import { AiError, Tool, Toolkit } from "effect/unstable/ai";
 import { FetchHttpClient } from "effect/unstable/http";
 import { ConversationStore } from "./ConversationStore.ts";
 import { builtin, PluginHost } from "./plugin/PluginHost.ts";
 import { ToolCallGuard } from "./plugin/ToolRegistry.ts";
 import { Runner } from "./Runner.ts";
+import { Steering } from "./Steering.ts";
 import { transcriptFromJson } from "./Transcript.ts";
 
 const reader = new AgentDefinition({
@@ -74,7 +75,7 @@ const StoreLayer = Layer.unwrap(
 );
 
 const TestLayer = Runner.layer.pipe(
-  Layer.provideMerge(Layer.mergeAll(HostLayer, StoreLayer)),
+  Layer.provideMerge(Layer.mergeAll(HostLayer, StoreLayer, Steering.layer)),
   Layer.provideMerge(
     Layer.mergeAll(BunServices.layer, FetchHttpClient.layer, ModelCatalog.layerSnapshot),
   ),
@@ -99,6 +100,7 @@ layer(TestLayer)("Runner", (it) => {
           conversationId: Option.none(),
           model: Option.none(),
           directory: Option.some("/work/here"),
+          reasoning: Option.none(),
         }),
       );
       assert.deepStrictEqual(
@@ -148,6 +150,7 @@ layer(TestLayer)("Runner", (it) => {
           conversationId: Option.some(conversationId),
           model: Option.none(),
           directory: Option.some("/work/elsewhere"),
+          reasoning: Option.none(),
         }),
       );
       const reply = second.find((e) => e._tag === "TextDelta");
@@ -214,6 +217,7 @@ layer(TestLayer)("Runner", (it) => {
           conversationId: Option.some(conversationId),
           model: Option.none(),
           directory: Option.none(),
+          reasoning: Option.none(),
         }),
       );
       const continued = third.find((e) => e._tag === "TextDelta");
@@ -244,6 +248,7 @@ const TightLayer = Runner.layer.pipe(
         paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
       }).pipe(Layer.provide(ToolCallGuard.layerAllowAll)),
       ConversationStore.layerMemory,
+      Steering.layer,
     ),
   ),
   Layer.provideMerge(
@@ -272,6 +277,7 @@ layer(TightLayer)("Runner auto compaction", (it) => {
           conversationId: Option.none(),
           model: Option.none(),
           directory: Option.none(),
+          reasoning: Option.none(),
         }),
       );
       assert.deepStrictEqual(
@@ -297,6 +303,7 @@ layer(TightLayer)("Runner auto compaction", (it) => {
           conversationId: Option.some(id),
           model: Option.none(),
           directory: Option.none(),
+          reasoning: Option.none(),
         }),
       );
       const reply = second.find((e) => e._tag === "TextDelta");
@@ -346,6 +353,7 @@ const FlakyLayer = Runner.layer.pipe(
         paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
       }).pipe(Layer.provide(ToolCallGuard.layerAllowAll)),
       ConversationStore.layerMemory,
+      Steering.layer,
     ),
   ),
   Layer.provideMerge(
@@ -369,6 +377,7 @@ layer(FlakyLayer)("Runner retries", (it) => {
               conversationId: Option.none(),
               model: Option.none(),
               directory: Option.none(),
+              reasoning: Option.none(),
             }),
           ),
         );
@@ -402,6 +411,7 @@ layer(FlakyLayer)("Runner retries", (it) => {
             conversationId: Option.some(id),
             model: Option.none(),
             directory: Option.none(),
+            reasoning: Option.none(),
           }),
         );
         assert.deepStrictEqual(
@@ -427,6 +437,7 @@ const LoopingLayer = Runner.layer.pipe(
         paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
       }).pipe(Layer.provide([WorkspaceLayer, ToolCallGuard.layerAllowAll])),
       ConversationStore.layerMemory,
+      Steering.layer,
     ),
   ),
   Layer.provideMerge(
@@ -447,6 +458,7 @@ layer(LoopingLayer)("Runner step limit", (it) => {
           conversationId: Option.none(),
           model: Option.none(),
           directory: Option.none(),
+          reasoning: Option.none(),
         }),
       );
       assert.strictEqual(events.filter((e) => e._tag === "ToolCall").length, 2);
@@ -458,6 +470,183 @@ layer(LoopingLayer)("Runner step limit", (it) => {
       const store = yield* ConversationStore;
       const saved = yield* store.get(id);
       assert.strictEqual(Option.isSome(saved) ? saved.value.messages : 0, 6);
+    }),
+  );
+});
+
+/** Answers with what the last message said and how hard it was asked to think, after one call to `wait`. */
+const steerable: FakeScript = ({ index, options, reasoning }) => {
+  if (index === 0) {
+    return [{ type: "tool-call", id: "call-1", name: "wait", params: {} }];
+  }
+  const last = options.prompt.content.at(-1);
+  const said =
+    last?.role === "user"
+      ? last.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("")
+      : `a ${last?.role ?? "nothing"}`;
+  return [
+    {
+      type: "text",
+      text: `saw ${said}; thinking ${Option.getOrElse(reasoning, () => "default")}`,
+    },
+  ];
+};
+
+/** A tool that returns when the test says so, holding the run between its model calls. */
+const gate = Deferred.makeUnsafe<void>();
+const Wait = Tool.make("wait", {
+  description: "Waits for the test.",
+  parameters: Schema.Struct({}),
+  success: Schema.Struct({ ok: Schema.Boolean }),
+}).annotate(CapabilityAnnotation, "fs:read");
+const WaitTools = Toolkit.make(Wait);
+const waitPlugin = define({
+  id: "wait",
+  description: "The wait tool.",
+  setup: (ctx) =>
+    Effect.gen(function* () {
+      const handlers = yield* WaitTools.toHandlers(
+        Effect.succeed(WaitTools.of({ wait: () => Effect.as(Deferred.await(gate), { ok: true }) })),
+      );
+      yield* ctx.tool.registerToolkit(yield* WaitTools.pipe(Effect.provideContext(handlers)));
+    }),
+});
+
+const waiter = new AgentDefinition({
+  name: "waiter",
+  description: "Waits",
+  prompt: "You wait.",
+  tools: ["wait"],
+});
+
+const SteeringLayer = Runner.layer.pipe(
+  Layer.provideMerge(
+    Layer.mergeAll(
+      PluginHost.layer({
+        plugins: [
+          builtin(waitPlugin),
+          builtin(
+            fakeProviderPlugin(steerable, { context: 0, output: 0, cost: { input: 1, output: 2 } }),
+          ),
+        ],
+        paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
+      }).pipe(Layer.provide(ToolCallGuard.layerAllowAll)),
+      ConversationStore.layerMemory,
+      Steering.layer,
+    ),
+  ),
+  Layer.provideMerge(
+    Layer.mergeAll(BunServices.layer, FetchHttpClient.layer, ModelCatalog.layerSnapshot),
+  ),
+);
+
+layer(SteeringLayer)("Runner steering, thinking, and cost", (it) => {
+  it.effect("shows the model what was steered in before its next call, at the level asked", () =>
+    Effect.gen(function* () {
+      const runner = yield* Runner;
+      const steering = yield* Steering;
+      const seen = yield* Ref.make<ReadonlyArray<RunEvent>>([]);
+      const runId = yield* Ref.make("");
+      yield* runner
+        .run({
+          agent: waiter,
+          principal: alice,
+          input: "start",
+          attachments: [],
+          conversationId: Option.none(),
+          model: Option.none(),
+          directory: Option.none(),
+          reasoning: Option.some("high"),
+        })
+        .pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              yield* Ref.update(seen, (all) => [...all, event]);
+              if (event._tag === "RunStarted") {
+                yield* Ref.set(runId, event.runId);
+              }
+              // The tool is waiting on the gate, so this arrives before the next model call.
+              if (event._tag === "ToolCall") {
+                const id = yield* Ref.get(runId);
+                assert.isTrue(
+                  yield* steering.offer(id, alice.id, { input: "also this", attachments: [] }),
+                );
+                // Someone else's input is not taken.
+                assert.isFalse(
+                  yield* steering.offer(id, "mallory", { input: "no", attachments: [] }),
+                );
+                yield* Deferred.succeed(gate, undefined);
+              }
+            }),
+          ),
+        );
+      const events = yield* Ref.get(seen);
+      assert.deepStrictEqual(
+        events.map((e) => e._tag),
+        [
+          "RunStarted",
+          "ToolCall",
+          "ToolResult",
+          "TokenUsage",
+          "Steered",
+          "TextDelta",
+          "TokenUsage",
+          "RunFinished",
+        ],
+      );
+      assert.deepStrictEqual(events[4], { _tag: "Steered", inputs: ["also this"] });
+      const reply = events[5];
+      assert.strictEqual(
+        reply?._tag === "TextDelta" ? reply.text : reply,
+        "saw also this; thinking high",
+      );
+      // Ten input tokens at $1 and one output token at $2 a million, each call.
+      const usage = events[3];
+      assert.isTrue(usage?._tag === "TokenUsage" && usage.cost !== undefined);
+      if (usage?._tag === "TokenUsage" && usage.cost !== undefined) {
+        assert.closeTo(usage.cost, 12e-6, 1e-12);
+      }
+      const started = events[0];
+      const conversationId = started?._tag === "RunStarted" ? started.conversationId : "";
+      const saved = yield* (yield* ConversationStore).get(conversationId);
+      assert.closeTo(Option.isSome(saved) ? (saved.value.usage?.totalCost ?? 0) : 0, 24e-6, 1e-12);
+      // The steered input is a user turn in the history, between the tool and the answer.
+      const transcript = yield* transcriptFromJson(
+        Option.getOrElse(yield* (yield* ConversationStore).history(conversationId), () => ""),
+      );
+      assert.deepStrictEqual(
+        transcript.map((e) => (e._tag === "User" ? `User:${e.text}` : e._tag)),
+        ["User:start", "Tool", "User:also this", "Assistant"],
+      );
+      // A run that has ended takes nothing more.
+      const id = yield* Ref.get(runId);
+      assert.isFalse(yield* steering.offer(id, alice.id, { input: "late", attachments: [] }));
+      assert.deepStrictEqual(yield* steering.retract(id, alice.id), []);
+    }),
+  );
+
+  it.effect("runs at the model's default when the level is not one of its own", () =>
+    Effect.gen(function* () {
+      const runner = yield* Runner;
+      yield* Deferred.succeed(gate, undefined);
+      const events = yield* Stream.runCollect(
+        runner.run({
+          agent: waiter,
+          principal: alice,
+          input: "start",
+          attachments: [],
+          conversationId: Option.none(),
+          model: Option.none(),
+          directory: Option.none(),
+          reasoning: Option.some("ultra"),
+        }),
+      );
+      // The fake's second run makes no tool call: one answer, to the input, at the default.
+      const reply = events.find((e) => e._tag === "TextDelta");
+      assert.strictEqual(
+        reply?._tag === "TextDelta" ? reply.text : reply,
+        "saw start; thinking default",
+      );
     }),
   );
 });

@@ -1,4 +1,4 @@
-import type { AgentDefinition } from "@magentic/plugin";
+import type { AgentDefinition, ModelCost } from "@magentic/plugin";
 import {
   type Attachment,
   type Compacted,
@@ -22,7 +22,14 @@ import {
   type Schema,
   Stream,
 } from "effect";
-import { Chat, LanguageModel, Prompt, type Response, type Tool } from "effect/unstable/ai";
+import {
+  type AiError,
+  Chat,
+  LanguageModel,
+  Prompt,
+  type Response,
+  type Tool,
+} from "effect/unstable/ai";
 import {
   compactContext,
   CompactionError,
@@ -36,9 +43,10 @@ import { estimateContext } from "./ContextEstimate.ts";
 import { ConversationStore } from "./ConversationStore.ts";
 import { describeCause } from "./Errors.ts";
 import { RunEventBus } from "./EventBus.ts";
-import { retryPolicy, toRetryEvent } from "./Retry.ts";
+import { rejectedToolCall, retryPolicy, toRetryEvent } from "./Retry.ts";
 import { ModelRegistry } from "./plugin/ModelRegistry.ts";
 import { ToolRegistry } from "./plugin/ToolRegistry.ts";
+import { type Steer, Steering } from "./Steering.ts";
 
 export interface RunOptions {
   readonly agent: AgentDefinition;
@@ -52,6 +60,8 @@ export interface RunOptions {
   readonly model: Option.Option<string>;
   /** Where the surface is working; kept on the conversation from its first run. */
   readonly directory: Option.Option<string>;
+  /** How hard the model should think, one of its `reasoningLevels`; none for its default. */
+  readonly reasoning: Option.Option<string>;
 }
 
 export interface CompactOptions {
@@ -133,6 +143,16 @@ export const DEFAULT_MAX_STEPS = 50;
 /** The `RunFinished` reason for a run that stopped at its step limit. */
 export const STEP_LIMIT_REASON = "step-limit";
 
+/**
+ * Tool calls one run may have thrown out for bad parameters before it fails
+ * with the provider's complaint. A model that cannot match a tool's schema
+ * after this many tries will not match it on the next one either.
+ */
+export const MAX_CORRECTIONS = 3;
+
+/** Arguments echoed back to the model, past which the point is made. */
+const PARAMS_SHOWN = 1_000;
+
 const titleOf = (input: string): string => {
   const flat = input.replace(/\s+/g, " ").trim();
   return flat.length > TITLE_LENGTH ? `${flat.slice(0, TITLE_LENGTH - 1)}…` : flat;
@@ -142,16 +162,63 @@ const titleOf = (input: string): string => {
 const foldUsage = (
   previous: Option.Option<ConversationUsage>,
   latest: TokenUsage,
-): ConversationUsage => ({
-  latest,
-  calls: Option.match(previous, { onNone: () => 1, onSome: (u) => u.calls + 1 }),
-  totalInputTokens:
-    Option.match(previous, { onNone: () => 0, onSome: (u) => u.totalInputTokens }) +
-    latest.inputTokens,
-  totalOutputTokens:
-    Option.match(previous, { onNone: () => 0, onSome: (u) => u.totalOutputTokens }) +
-    latest.outputTokens,
-});
+): ConversationUsage => {
+  const before = Option.getOrUndefined(previous);
+  const spent = before?.totalCost;
+  const totalCost = latest.cost === undefined ? spent : (spent ?? 0) + latest.cost;
+  const usage: ConversationUsage = {
+    latest,
+    calls: (before?.calls ?? 0) + 1,
+    totalInputTokens: (before?.totalInputTokens ?? 0) + latest.inputTokens,
+    totalOutputTokens: (before?.totalOutputTokens ?? 0) + latest.outputTokens,
+  };
+  return totalCost === undefined ? usage : { ...usage, totalCost };
+};
+
+/**
+ * What one call cost at the model's prices, in dollars. Cached input is
+ * priced apart when the catalog prices it; the rest of the input is priced
+ * as input, whether or not the provider said how much was uncached.
+ */
+const costOf = (price: ModelCost, usage: Response.Usage): number => {
+  const cacheRead = usage.inputTokens.cacheRead ?? 0;
+  const cacheWrite = usage.inputTokens.cacheWrite ?? 0;
+  const uncached =
+    usage.inputTokens.uncached ??
+    Math.max(0, (usage.inputTokens.total ?? 0) - cacheRead - cacheWrite);
+  const dollars =
+    uncached * price.input +
+    cacheRead * (price.cacheRead ?? price.input) +
+    cacheWrite * (price.cacheWrite ?? price.input) +
+    (usage.outputTokens.total ?? 0) * price.output;
+  return dollars / 1_000_000;
+};
+
+/** Steered inputs as one user message: the texts joined by line breaks, every file along. */
+const steeredPrompt = (steers: ReadonlyArray<Steer>): Prompt.RawInput =>
+  promptOf(
+    steers.map((s) => s.input).join("\n"),
+    steers.flatMap((s) => s.attachments),
+  );
+
+/**
+ * What the model hears when the provider threw its tool call out: the
+ * complaint and the arguments it sent, neither of which is in the history,
+ * after whatever the step was already going to say, so nothing of the input
+ * is lost when the very first call is the one thrown out.
+ */
+const correctionPrompt = (
+  prompt: Prompt.RawInput,
+  rejected: AiError.ToolParameterValidationError,
+): Prompt.RawInput => {
+  const params = JSON.stringify(rejected.toolParams);
+  const shown = params.length > PARAMS_SHOWN ? `${params.slice(0, PARAMS_SHOWN)}…` : params;
+  return Prompt.concat(
+    Prompt.make(prompt),
+    `Your ${rejected.toolName} call did not run: its arguments ${shown} do not match the tool's ` +
+      `schema. ${rejected.description}. Call it again with arguments the schema allows.`,
+  );
+};
 
 /**
  * A conversation open for a run: the chat holds what the model sees, the
@@ -165,11 +232,11 @@ interface Opened {
 
 /**
  * Turns one input into a stream of events: the model speaks, calls tools,
- * sees their results, and speaks again until it stops calling tools. History
- * is restored from and saved to the ConversationStore around every run, with
- * what the conversation is: its title, model, size, and usage. When the
- * context nears the model's window the conversation is compacted, as
- * `compact` does on request.
+ * sees their results, and speaks again until it stops calling tools and
+ * nothing more has been steered in. History is restored from and saved to
+ * the ConversationStore around every run, with what the conversation is:
+ * its title, model, size, and usage. When the context nears the model's
+ * window the conversation is compacted, as `compact` does on request.
  */
 export class Runner extends Context.Service<
   Runner,
@@ -187,6 +254,7 @@ export class Runner extends Context.Service<
       const models = yield* ModelRegistry;
       const conversations = yield* ConversationStore;
       const bus = yield* RunEventBus;
+      const steering = yield* Steering;
 
       const openChat = Effect.fn("Runner.openChat")(function* (
         conversationId: string,
@@ -221,17 +289,35 @@ export class Runner extends Context.Service<
         return yield* opened.chat.exportJson;
       });
 
-      /** The model's token limits from its catalog entry; zeros when unknown. */
-      const limitsOf = Effect.fn("Runner.limitsOf")(function* (choice: Option.Option<string>) {
+      /**
+       * What the catalog says of the model: its token limits (zeros when
+       * unknown), its prices, and the request configuration that makes it
+       * think at the level asked for, when it has such a level.
+       */
+      const infoOf = Effect.fn("Runner.infoOf")(function* (
+        choice: Option.Option<string>,
+        reasoning: Option.Option<string>,
+      ) {
+        const none = {
+          limits: { context: 0, output: 0 } satisfies ModelLimits,
+          cost: Option.none<ModelCost>(),
+          thinking: Option.none<Context.Context<never>>(),
+        };
         const resolved = yield* models.resolve(choice).pipe(Effect.option);
         if (Option.isNone(resolved)) {
-          const none: ModelLimits = { context: 0, output: 0 };
           return none;
         }
-        const known = yield* resolved.value.provider.models;
-        const info = known.find((m) => m.id === resolved.value.model);
-        const limits: ModelLimits = { context: info?.context ?? 0, output: info?.output ?? 0 };
-        return limits;
+        const { provider, model } = resolved.value;
+        const info = (yield* provider.models).find((m) => m.id === model);
+        const thinking =
+          Option.isSome(reasoning) && provider.reasoning !== undefined
+            ? yield* provider.reasoning(model, reasoning.value)
+            : Option.none<Context.Context<never>>();
+        return {
+          limits: { context: info?.context ?? 0, output: info?.output ?? 0 } satisfies ModelLimits,
+          cost: Option.fromNullishOr(info?.cost),
+          thinking,
+        };
       });
 
       /** Compact what the model sees, moving what the summary replaced to the archive. */
@@ -308,6 +394,7 @@ export class Runner extends Context.Service<
               runId,
               principal: options.principal,
             });
+            const steers = yield* steering.open(runId, options.principal.id);
             const finishReason = yield* Ref.make("unknown");
             const existing = yield* conversations.get(conversationId);
             const usageSoFar = yield* Ref.make(
@@ -320,7 +407,12 @@ export class Runner extends Context.Service<
             const loop = Effect.gen(function* () {
               // Resolved per run so a provider signed in after boot is picked up.
               const model = yield* models.languageModel(choice);
-              const limits = yield* limitsOf(choice);
+              const { limits, cost, thinking } = yield* infoOf(choice, options.reasoning);
+              /** The call with the thinking configuration in its context, when there is one. */
+              const withThinking = <A, E, R>(
+                stream: Stream.Stream<A, E, R>,
+              ): Stream.Stream<A, E, R> =>
+                Option.isSome(thinking) ? Stream.provideContext(stream, thinking.value) : stream;
               // A summary that cannot be written is logged, not a failed run.
               const compactIfFull = (held: number) =>
                 isOverflow(held, limits)
@@ -335,6 +427,8 @@ export class Runner extends Context.Service<
                   : Effect.void;
               let prompt = promptOf(options.input, options.attachments);
               const maxSteps = options.agent.maxSteps ?? DEFAULT_MAX_STEPS;
+              /** Tool calls the provider threw out so far, over the whole run. */
+              const corrected = yield* Ref.make(0);
               for (let step = 1; ; step++) {
                 const calledTool = yield* Ref.make(false);
                 const usage = yield* Ref.make(Option.none<Response.Usage>());
@@ -348,6 +442,7 @@ export class Runner extends Context.Service<
                   Ref.set(chat.history, before),
                   chat.streamText({ prompt, toolkit: tools }).pipe(
                     Stream.provideService(LanguageModel.LanguageModel, model),
+                    withThinking,
                     Stream.runForEach((part) =>
                       Effect.gen(function* () {
                         if (part.type === "tool-call") {
@@ -365,18 +460,41 @@ export class Runner extends Context.Service<
                     ),
                   ),
                 );
-                yield* Effect.retry(
-                  attempt,
-                  retryPolicy({
-                    canRetry: Effect.map(Ref.get(spoke), (yes) => !yes),
-                    onRetry: (retrying) => emit(toRetryEvent(retrying)),
-                  }),
+                const call = yield* Effect.exit(
+                  Effect.retry(
+                    attempt,
+                    retryPolicy({
+                      canRetry: Effect.map(Ref.get(spoke), (yes) => !yes),
+                      onRetry: (retrying) => emit(toRetryEvent(retrying)),
+                    }),
+                  ),
                 );
+                if (call._tag === "Failure") {
+                  const rejected = rejectedToolCall(call.cause);
+                  const corrections = yield* Ref.get(corrected);
+                  if (Option.isNone(rejected) || corrections >= MAX_CORRECTIONS) {
+                    return yield* call;
+                  }
+                  // Nothing of a response that died on a bad tool call is in the
+                  // history, so the model hears what the call got wrong and takes
+                  // the step again rather than the run ending on it.
+                  yield* Ref.set(chat.history, before);
+                  yield* Ref.update(corrected, (n) => n + 1);
+                  yield* emit({
+                    _tag: "Retrying",
+                    attempt: corrections + 1,
+                    limit: MAX_CORRECTIONS,
+                    message: rejected.value.message,
+                    delayMs: 0,
+                  });
+                  prompt = correctionPrompt(prompt, rejected.value);
+                  continue;
+                }
                 // Once the call is in the history, so the estimate matches what was counted.
                 const reported = yield* Ref.get(usage);
                 if (Option.isSome(reported)) {
                   const { inputTokens, outputTokens } = reported.value;
-                  const event: TokenUsage = {
+                  const counted: TokenUsage = {
                     _tag: "TokenUsage",
                     inputTokens: inputTokens.total ?? 0,
                     outputTokens: outputTokens.total ?? 0,
@@ -385,16 +503,17 @@ export class Runner extends Context.Service<
                     reasoningTokens: outputTokens.reasoning,
                     breakdown: estimateContext(yield* Ref.get(chat.history), tools.tools),
                   };
+                  const event: TokenUsage = Option.isSome(cost)
+                    ? { ...counted, cost: costOf(cost.value, reported.value) }
+                    : counted;
                   yield* Ref.update(usageSoFar, (previous) =>
                     Option.some(foldUsage(previous, event)),
                   );
                   yield* emit(event);
                   yield* compactIfFull(event.inputTokens + event.outputTokens);
                 }
-                if (!(yield* Ref.get(calledTool))) {
-                  return;
-                }
-                if (step >= maxSteps) {
+                const calledTools = yield* Ref.get(calledTool);
+                if (calledTools && step >= maxSteps) {
                   // The tool results are in the history; the next input picks up from them.
                   yield* Ref.set(finishReason, STEP_LIMIT_REASON);
                   yield* Effect.logWarning(
@@ -402,8 +521,19 @@ export class Runner extends Context.Service<
                   );
                   return;
                 }
-                // The tool results are already in the history; ask the model to continue.
-                prompt = [];
+                // What was steered in meanwhile goes to the model before it speaks
+                // again. A run that has answered and has nothing steered ends,
+                // closed to steering in the same step so nothing arrives too late.
+                const steered = yield* calledTools ? steers.take : steers.takeOrClose;
+                if (steered.length > 0) {
+                  yield* emit({ _tag: "Steered", inputs: steered.map((s) => s.input) });
+                  prompt = steeredPrompt(steered);
+                } else if (calledTools) {
+                  // The tool results are already in the history; ask the model to continue.
+                  prompt = [];
+                } else {
+                  return;
+                }
               }
             });
 

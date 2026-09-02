@@ -6,6 +6,7 @@ import {
   ModelRegistry,
   PluginHost,
   Runner,
+  Steering,
   transcriptFromJson,
 } from "@magentic/core";
 import { Identity } from "@magentic/identity";
@@ -19,7 +20,9 @@ import {
   Conversation,
   ConversationNotFound,
   RunDenied,
+  RunNotFound,
   type RunRequest,
+  type SteerRequest,
 } from "@magentic/protocol";
 import { Config, DateTime, Effect, Option, Stream } from "effect";
 
@@ -58,6 +61,7 @@ export const RpcHandlers = Api.toLayer(
     const policy = yield* Policy;
     const audit = yield* Audit;
     const mcp = yield* McpServers;
+    const steering = yield* Steering;
 
     /** What a surface may know, with the model the agent would run on today. */
     const toInfo = Effect.fn("Gateway.toInfo")(function* (agent: AgentDefinition) {
@@ -67,7 +71,7 @@ export const RpcHandlers = Api.toLayer(
     });
 
     const run = Effect.fn("Gateway.run")(function* (name: string, payload: RunRequest) {
-      const { input, attachments, conversationId, model, directory } = payload;
+      const { input, attachments, conversationId, model, directory, reasoning } = payload;
       const agent = yield* registry.get(name);
       const principal = yield* caller;
       // Continuing a conversation means one of the caller's own. An unknown id starts one.
@@ -105,7 +109,26 @@ export const RpcHandlers = Api.toLayer(
         conversationId: Option.fromNullishOr(conversationId),
         model: Option.fromNullishOr(model),
         directory: Option.fromNullishOr(directory),
+        reasoning: Option.fromNullishOr(reasoning),
       });
+    });
+
+    /** More for one of the caller's runs in flight; a run that is not theirs is not found. */
+    const steer = Effect.fn("Gateway.steer")(function* (payload: SteerRequest) {
+      const principal = yield* caller;
+      const accepted = yield* steering.offer(payload.runId, principal.id, {
+        input: payload.input,
+        attachments: payload.attachments ?? [],
+      });
+      if (!accepted) {
+        return yield* new RunNotFound({ runId: payload.runId });
+      }
+    });
+
+    const unsteer = Effect.fn("Gateway.unsteer")(function* (runId: string) {
+      const principal = yield* caller;
+      const taken = yield* steering.retract(runId, principal.id);
+      return taken.map((s) => s.input);
     });
 
     const list = Effect.fn("Gateway.conversations.list")(function* (
@@ -164,6 +187,8 @@ export const RpcHandlers = Api.toLayer(
       listAgents: () => registry.list.pipe(Effect.flatMap(Effect.forEach(toInfo))),
       getAgent: ({ name }) => registry.get(name).pipe(Effect.flatMap(toInfo)),
       run: ({ agent, ...request }) => Stream.unwrap(run(agent, request)),
+      steer: (request) => steer(request),
+      unsteer: ({ runId }) => unsteer(runId),
       listConversations: ({ agent, directory }) => list(agent, directory),
       getConversation: ({ id }) => Effect.flatMap(caller, (p) => owned(store, p.id, id)),
       transcript: ({ id }) => transcript(id),

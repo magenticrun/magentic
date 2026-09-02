@@ -51,12 +51,14 @@ type TextLine = {
   readonly text: string;
 };
 
-type ToolResult = { readonly ok: boolean; readonly text: string };
+type ToolResult = { readonly ok: boolean; readonly text: string; readonly raw: Schema.Json };
 
 type ToolLine = {
   readonly kind: "tool";
   readonly name: string;
   readonly params: string;
+  /** The arguments as the model gave them, for the detail under the call. */
+  readonly raw: Schema.Json;
   /** Absent while the tool is still running. */
   readonly result?: ToolResult;
 };
@@ -88,10 +90,16 @@ type State = {
   contextTokens: number;
   /** How many tokens the model can hold; 0 when the catalog does not say. */
   contextWindow: number;
+  /** How hard the model is asked to think, one of its levels; none for its default. */
+  reasoning: Option.Option<string>;
+  /** Dollars this chat has spent at the catalog's prices; none until a priced call. */
+  cost: Option.Option<number>;
   /** What the agent is doing right now; only shown while busy. */
   status: string;
   lines: Array<Line>;
   busy: boolean;
+  /** Whether tool results show in full under each call, as ctrl+o toggles. */
+  expanded: boolean;
 };
 
 /** The frames Claude Code's spinner walks through, out and back. */
@@ -129,6 +137,113 @@ const formatTokens = (count: number): string => {
 };
 
 const isEnter = (name: string) => name === "return" || name === "kpenter" || name === "linefeed";
+
+/** `$0.0123` under a cent, `$1.23` otherwise. */
+const formatCost = (dollars: number): string =>
+  dollars > 0 && dollars < 0.01 ? `$${dollars.toFixed(4)}` : `$${dollars.toFixed(2)}`;
+
+/** Lines the detail under a tool call shows at most, folded or open. */
+const DETAIL_FOLDED_LINES = 12;
+const DETAIL_OPEN_LINES = 80;
+
+/** One line of the detail under a tool call: a diff line, or a line of what came back. */
+interface DetailLine {
+  readonly sign: "-" | "+" | " ";
+  readonly text: string;
+  /** The part of the line that changed, when the diff is one line to one line. */
+  readonly mark?: readonly [number, number];
+}
+
+/** The lines of a string, a trailing line break ending the last rather than starting an empty one. */
+const linesOf = (text: string): ReadonlyArray<string> =>
+  text.length === 0 ? [] : (text.endsWith("\n") ? text.slice(0, -1) : text).split("\n");
+
+/** Where two one-line strings differ: the span between their common prefix and suffix. */
+const changedSpan = (a: string, b: string): readonly [number, number] => {
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) {
+    start++;
+  }
+  let end = 0;
+  while (
+    end < a.length - start &&
+    end < b.length - start &&
+    a[a.length - 1 - end] === b[b.length - 1 - end]
+  ) {
+    end++;
+  }
+  return [start, a.length - end];
+};
+
+/** Removed lines then added lines, the way pi draws an edit; one line for one line marks what changed. */
+const diffLines = (before: string, after: string): ReadonlyArray<DetailLine> => {
+  const removed = linesOf(before);
+  const added = linesOf(after);
+  if (removed.length === 1 && added.length === 1) {
+    const old = removed[0] ?? "";
+    const now = added[0] ?? "";
+    return [
+      { sign: "-", text: old, mark: changedSpan(old, now) },
+      { sign: "+", text: now, mark: changedSpan(now, old) },
+    ];
+  }
+  return [
+    ...removed.map((text): DetailLine => ({ sign: "-", text })),
+    ...added.map((text): DetailLine => ({ sign: "+", text })),
+  ];
+};
+
+const stringField = (value: Schema.Json, key: string): string | undefined => {
+  if (!Predicate.isObject(value) || Array.isArray(value)) {
+    return undefined;
+  }
+  const field = value[key];
+  return Predicate.isString(field) ? field : undefined;
+};
+
+/** A tool result as lines: a command's output, a file's content, or the JSON otherwise. */
+const resultLines = (name: string, result: ToolResult): ReadonlyArray<DetailLine> => {
+  const plain = (text: string) =>
+    linesOf(text).map((line): DetailLine => ({ sign: " ", text: line }));
+  if (name === "shell") {
+    const stdout = stringField(result.raw, "stdout") ?? "";
+    const stderr = stringField(result.raw, "stderr") ?? "";
+    return [...plain(stdout), ...plain(stderr)];
+  }
+  const content = stringField(result.raw, "content");
+  if (name === "read_file" && content !== undefined) {
+    return plain(content);
+  }
+  return plain(Predicate.isString(result.raw) ? result.raw : JSON.stringify(result.raw, null, 2));
+};
+
+/**
+ * What shows under a tool call: an edit's diff and a written file's lines
+ * always, and with ctrl+o what every tool got back. Long details are cut
+ * with a count of what was left out.
+ */
+const detailOf = (tool: ToolLine, expanded: boolean): ReadonlyArray<DetailLine> => {
+  const limit = expanded ? DETAIL_OPEN_LINES : DETAIL_FOLDED_LINES;
+  const all = (() => {
+    if (tool.name === "edit_file") {
+      return diffLines(
+        stringField(tool.raw, "oldString") ?? "",
+        stringField(tool.raw, "newString") ?? "",
+      );
+    }
+    if (tool.name === "write_file") {
+      return linesOf(stringField(tool.raw, "content") ?? "").map((text): DetailLine => ({
+        sign: "+",
+        text,
+      }));
+    }
+    return expanded && tool.result !== undefined ? resultLines(tool.name, tool.result) : [];
+  })();
+  if (all.length <= limit) {
+    return all;
+  }
+  return [...all.slice(0, limit), { sign: " ", text: `… ${all.length - limit} more lines` }];
+};
 
 const clip = (text: string): string => {
   const flat = text.replace(/\s+/g, " ").trim();
@@ -170,13 +285,18 @@ export interface CommandInfo {
 }
 
 /**
- * A message sent while a run was in flight, held until the run ends, the way
- * Claude Code queues them. The composer's draft as typed, placeholders and
- * all, so pulling it back into the composer restores it exactly.
+ * A message sent while a run was in flight. Steered into the run, it waits
+ * for the model's next call and leaves the queue when the run says it got
+ * there; held, it waits for the run to end, as a command does and as anything
+ * does that the run would not take. The composer's draft as typed,
+ * placeholders and all, so pulling it back into the composer restores it
+ * exactly; and unfolded, as the run sees it, to match what it delivers.
  */
 interface Queued {
   readonly draft: string;
   readonly folds: ReadonlyArray<Folded>;
+  readonly text: string;
+  readonly status: "steering" | "held";
 }
 
 /** A picker waiting for its answer. */
@@ -195,18 +315,26 @@ export interface ChatTui {
   error(text: string): void;
   /** The model later runs use, and how many tokens it can hold (0 when unknown). */
   setModel(ref: string, contextWindow: number): void;
+  /** How hard the model is asked to think; none for its default. */
+  setReasoning(level: Option.Option<string>): void;
+  /** A word in the footer for a moment. */
+  flash(text: string): void;
   /** Show a picker over the composer; `done` gets the answer. A second `pick` replaces it. */
   pick(picker: Picker, done: (picked: Option.Option<Picked>) => void): void;
   /** Close the picker, if one is open: the command that asked has ended. */
   dismiss(): void;
-  /** Replace the transcript with an earlier conversation's, and the context it last held. */
-  restore(entries: ReadonlyArray<TranscriptEntry>, contextTokens: number): void;
+  /** Replace the transcript with an earlier conversation's, the context it last held, and what it cost. */
+  restore(
+    entries: ReadonlyArray<TranscriptEntry>,
+    contextTokens: number,
+    cost: Option.Option<number>,
+  ): void;
   /** Clear the transcript for a new conversation. */
   reset(): void;
   /** Note that the person stopped the run in flight. */
   interrupted(): void;
   setStatus(status: string): void;
-  /** Whether a run is in flight. Messages sent while it is wait, and go out when it ends. */
+  /** Whether a run is in flight. Messages sent while it is are steered into it, or wait for it to end. */
   setBusy(busy: boolean): void;
 }
 
@@ -222,6 +350,16 @@ export const createChatTui = (options: {
   readonly commands: ReadonlyArray<CommandInfo>;
   /** The message with pasted text unfolded, and the images pasted into it. */
   readonly onSubmit: (text: string, attachments: ReadonlyArray<Attachment>) => void;
+  /**
+   * The same, sent while a run is in flight, for the run to read before its
+   * next model call. False when the run would not take it (it ended first),
+   * in which case it waits for the run to end and goes out then.
+   */
+  readonly onSteer: (text: string, attachments: ReadonlyArray<Attachment>) => Promise<boolean>;
+  /** Take back what was steered but has not reached the model: those messages, oldest first. */
+  readonly onRetract: () => Promise<ReadonlyArray<string>>;
+  /** ctrl+t: the next thinking level. */
+  readonly onCycleReasoning: () => void;
   /** Esc, or ctrl+c, while a run is in flight. Anything queued is back in the composer. */
   readonly onInterrupt: () => void;
   readonly onExit: () => void;
@@ -231,9 +369,12 @@ export const createChatTui = (options: {
     ticks: 0,
     contextTokens: 0,
     contextWindow: options.contextWindow,
+    reasoning: Option.none(),
+    cost: Option.none(),
     status: "",
     lines: [],
     busy: false,
+    expanded: false,
   });
 
   // Lines change in place. A line replaced by a copy is a new one to the
@@ -265,7 +406,7 @@ export const createChatTui = (options: {
         return;
       }
     }
-    push({ kind: "tool", name, params: "", result });
+    push({ kind: "tool", name, params: "", raw: null, result });
   };
 
   /** Grow the thought in progress, or begin one. */
@@ -313,8 +454,11 @@ export const createChatTui = (options: {
   const dismiss = () => setDialog(undefined);
 
   // Set by the view, which owns the composer and the queue: what was queued
-  // during a run is sent the moment the run ends.
+  // during a run is sent the moment the run ends, and what the run took from
+  // the queue leaves it.
   let flushQueue = () => {};
+  let steered = (_inputs: ReadonlyArray<string>) => {};
+  let showFlash = (_text: string) => {};
 
   const apply = (event: RunEvent) =>
     batch(() => {
@@ -334,14 +478,34 @@ export const createChatTui = (options: {
           return;
         case "ToolCall":
           setState("status", `Running ${event.name}…`);
-          push({ kind: "tool", name: event.name, params: summariseParams(event.params) });
+          push({
+            kind: "tool",
+            name: event.name,
+            params: summariseParams(event.params),
+            raw: event.params,
+          });
           return;
         case "ToolResult":
           setState("status", "Thinking…");
-          finishTool(event.name, { ok: !event.isFailure, text: summarise(event.result) });
+          finishTool(event.name, {
+            ok: !event.isFailure,
+            text: summarise(event.result),
+            raw: event.result,
+          });
+          return;
+        case "Steered":
+          // The run has them now: out of the queue and into the transcript, as sent.
+          steered(event.inputs);
+          for (const input of event.inputs) {
+            push({ kind: "user", text: input });
+          }
           return;
         case "TokenUsage":
           setState("contextTokens", event.inputTokens + event.outputTokens);
+          if (event.cost !== undefined) {
+            const spent = event.cost;
+            setState("cost", (before) => Option.some(Option.getOrElse(before, () => 0) + spent));
+          }
           return;
         case "CompactionStarted":
           setState("status", "Compacting…");
@@ -391,10 +555,14 @@ export const createChatTui = (options: {
           kind: "tool",
           name: entry.name,
           params: summariseParams(entry.params),
+          raw: entry.params,
         };
         return entry.result === undefined
           ? call
-          : { ...call, result: { ok: !entry.isFailure, text: summarise(entry.result) } };
+          : {
+              ...call,
+              result: { ok: !entry.isFailure, text: summarise(entry.result), raw: entry.result },
+            };
       }
     }
   };
@@ -408,7 +576,7 @@ export const createChatTui = (options: {
     const [flash, setFlash] = createSignal<string | undefined>(undefined);
     let unflash: ReturnType<typeof setTimeout> | undefined;
     onCleanup(() => clearTimeout(unflash));
-    const showFlash = (text: string) => {
+    showFlash = (text: string) => {
       setFlash(text);
       clearTimeout(unflash);
       unflash = setTimeout(() => setFlash(undefined), FLASH_MS);
@@ -487,13 +655,23 @@ export const createChatTui = (options: {
         (composer?.plainText ?? "").length === 0
       ) {
         key.preventDefault();
-        unqueue();
+        void unqueue();
         return;
       }
       if (key.ctrl && key.name === "v" && dialog() === undefined) {
         // The terminal pastes text itself; ctrl+v is for what it cannot paste, an image.
         key.preventDefault();
         void pasteClipboard();
+        return;
+      }
+      if (key.ctrl && key.name === "t" && dialog() === undefined) {
+        key.preventDefault();
+        options.onCycleReasoning();
+        return;
+      }
+      if (key.ctrl && key.name === "o" && dialog() === undefined) {
+        key.preventDefault();
+        setState("expanded", (open) => !open);
         return;
       }
       if (key.ctrl && key.name === "c") {
@@ -576,16 +754,37 @@ export const createChatTui = (options: {
       setDraft("");
     };
     // Messages sent while a run is in flight wait here, listed over the
-    // composer, and go out together when the run ends.
+    // composer: steered ones until the run takes them, held ones until it
+    // ends, when whatever is left goes out together.
     const [queue, setQueue] = createSignal<ReadonlyArray<Queued>>([]);
     /** Every fold in play, queued ones first: placeholders are numbered across all of them. */
     const allFolds = () => [...queue().flatMap((q) => q.folds), ...folds];
-    /** Send now, or queue for after the run. */
+    /** Send now; or, during a run, steer it in, and hold it when the run would not take it. */
     const send = (draft: string, drafted: ReadonlyArray<Folded>) => {
-      if (state.busy) {
-        setQueue((held) => [...held, { draft, folds: drafted }]);
-      } else {
-        options.onSubmit(unfold(draft, drafted), attached(draft, drafted));
+      const text = unfold(draft, drafted);
+      const files = attached(draft, drafted);
+      if (!state.busy) {
+        options.onSubmit(text, files);
+        return;
+      }
+      if (draft.startsWith("/")) {
+        setQueue((held) => [...held, { draft, folds: drafted, text, status: "held" }]);
+        return;
+      }
+      const item: Queued = { draft, folds: drafted, text, status: "steering" };
+      setQueue((held) => [...held, item]);
+      void options.onSteer(text, files).then((accepted) => {
+        if (!accepted) {
+          setQueue((held) => held.map((q) => (q === item ? { ...q, status: "held" } : q)));
+        }
+      });
+    };
+    steered = (inputs) => {
+      for (const input of inputs) {
+        setQueue((held) => {
+          const at = held.findIndex((q) => q.status === "steering" && q.text === input);
+          return at < 0 ? held : held.toSpliced(at, 1);
+        });
       }
     };
     /**
@@ -619,9 +818,8 @@ export const createChatTui = (options: {
       sendBatch();
     };
     flushQueue = flush;
-    /** The queue back in the composer, ahead of whatever is being typed, placeholders restored. */
-    const unqueue = () => {
-      const held = queue();
+    /** Some of the queue back in the composer, ahead of whatever is being typed, placeholders restored. */
+    const restore = (held: ReadonlyArray<Queued>) => {
       if (composer === undefined || held.length === 0) {
         return;
       }
@@ -644,10 +842,21 @@ export const createChatTui = (options: {
       composer.cursorOffset = text.length;
       onDraft();
     };
-    /** Stop the run; what was queued for after it comes back to be edited or sent again. */
+    /**
+     * The queue back in the composer: what is held, and what was steered
+     * but the run has not taken yet. Asking the run what that is takes a
+     * moment; what it took meanwhile has left the queue by the time it answers.
+     */
+    const unqueue = async () => {
+      if (queue().length === 0) {
+        return;
+      }
+      const pending = queue().some((q) => q.status === "steering") ? await options.onRetract() : [];
+      restore(queue().filter((q) => q.status === "held" || pending.includes(q.text)));
+    };
+    /** Stop the run; what was queued and not yet taken comes back to be edited or sent again. */
     const interrupt = () => {
-      unqueue();
-      options.onInterrupt();
+      void unqueue().then(() => options.onInterrupt());
     };
     const submit = () => {
       if (composer === undefined) {
@@ -774,6 +983,18 @@ export const createChatTui = (options: {
 
     const bullet = (colours: Palette, line: ToolLine) =>
       line.result === undefined ? colours.muted : line.result.ok ? colours.success : colours.error;
+    const detailColour = (colours: Palette, line: DetailLine) =>
+      line.sign === "-" ? colours.error : line.sign === "+" ? colours.success : colours.muted;
+    /** Whether any call has run, so the footer can offer ctrl+o. */
+    const hasTools = () => state.lines.some((line) => line.kind === "tool");
+    const hint = () => {
+      if (queue().length > 0) {
+        return "↑ to edit queued messages";
+      }
+      return hasTools()
+        ? `ctrl+o ${state.expanded ? "fold" : "open"} tool output · shift+enter newline`
+        : "shift+enter newline";
+    };
     const lineColour = (colours: Palette, line: TextLine) =>
       line.kind === "error" ? colours.error : line.kind === "note" ? colours.muted : colours.text;
 
@@ -876,6 +1097,23 @@ export const createChatTui = (options: {
                             </text>
                           )}
                         </Show>
+                        <For each={detailOf(tool(), state.expanded)}>
+                          {(detail) => (
+                            <text fg={detailColour(palette(), detail)} wrapMode="none" truncate>
+                              {"   "}
+                              {detail.sign === " " ? "" : `${detail.sign} `}
+                              <Show when={detail.mark} fallback={detail.text}>
+                                {(mark) => (
+                                  <>
+                                    {detail.text.slice(0, mark()[0])}
+                                    <strong>{detail.text.slice(mark()[0], mark()[1])}</strong>
+                                    {detail.text.slice(mark()[1])}
+                                  </>
+                                )}
+                              </Show>
+                            </text>
+                          )}
+                        </For>
                       </box>
                     </box>
                   )}
@@ -885,11 +1123,11 @@ export const createChatTui = (options: {
                     <Switch>
                       <Match when={text().kind === "user"}>
                         <box flexDirection="row" marginBottom={1}>
-                          <text fg={palette().muted} flexShrink={0}>
-                            {">"}
+                          <text fg={palette().accent} flexShrink={0}>
+                            {"❯"}
                           </text>
                           <box flexGrow={1} flexShrink={1} marginLeft={1}>
-                            <text fg={palette().muted}>{text().text}</text>
+                            <text fg={palette().text}>{text().text}</text>
                           </box>
                         </box>
                       </Match>
@@ -948,7 +1186,7 @@ export const createChatTui = (options: {
             <For each={queue()}>
               {(item) => (
                 <text fg={palette().muted} wrapMode="none" truncate>
-                  {"> "}
+                  {"❯ "}
                   {clip(item.draft)}
                 </text>
               )}
@@ -991,13 +1229,16 @@ export const createChatTui = (options: {
           flexShrink={0}
           paddingLeft={1}
         >
-          <text fg={palette().text}>{"> "}</text>
+          <text fg={palette().text}>{"❯ "}</text>
           <textarea
             ref={(node: TextareaRenderable) => {
               composer = node;
             }}
             focused={dialog() === undefined}
             flexGrow={1}
+            flexShrink={1}
+            flexBasis={0}
+            marginRight={1}
             height={rows()}
             wrapMode="word"
             keyBindings={COMPOSER_KEYS}
@@ -1006,7 +1247,11 @@ export const createChatTui = (options: {
             focusedTextColor={palette().text}
             cursorColor={palette().text}
             placeholderColor={palette().placeholder}
-            placeholder={state.busy ? "Queue a message for after this turn" : "Message the agent"}
+            placeholder={
+              state.busy
+                ? "Message the agent; it reads it before its next step"
+                : "Message the agent"
+            }
             onContentChange={onDraft}
             onSubmit={submit}
           />
@@ -1025,11 +1270,27 @@ export const createChatTui = (options: {
                 </text>
               ),
             })}
+            <Show when={Option.getOrUndefined(state.reasoning)}>
+              {(level) => (
+                <text fg={palette().muted} wrapMode="none" flexShrink={0}>
+                  {" · "}
+                  <strong style={{ fg: palette().accent }}>{level()}</strong>
+                </text>
+              )}
+            </Show>
             <Show when={contextInfo()}>
               {(info) => (
                 <text fg={palette().muted} wrapMode="none" flexShrink={0}>
                   {" · "}
                   {info()}
+                </text>
+              )}
+            </Show>
+            <Show when={Option.getOrUndefined(Option.filter(state.cost, (spent) => spent > 0))}>
+              {(spent) => (
+                <text fg={palette().muted} wrapMode="none" flexShrink={0}>
+                  {" · "}
+                  {formatCost(spent())}
                 </text>
               )}
             </Show>
@@ -1040,7 +1301,7 @@ export const createChatTui = (options: {
               when={armed() ? "ctrl+c again to quit" : flash()}
               fallback={
                 <text fg={palette().muted} wrapMode="none" truncate>
-                  {queue().length > 0 ? "↑ to edit queued messages" : "shift+enter newline"}
+                  {hint()}
                 </text>
               }
             >
@@ -1063,11 +1324,13 @@ export const createChatTui = (options: {
     note: (text) => push({ kind: "note", text }),
     error: (text) => push({ kind: "error", text }),
     setModel: (ref, contextWindow) => setState({ model: Option.some(ref), contextWindow }),
+    setReasoning: (level) => setState("reasoning", level),
+    flash: (text) => showFlash(text),
     pick,
     dismiss,
-    restore: (entries, contextTokens) =>
-      setState({ lines: entries.map(toLine), contextTokens, status: "" }),
-    reset: () => setState({ lines: [], contextTokens: 0, status: "" }),
+    restore: (entries, contextTokens, cost) =>
+      setState({ lines: entries.map(toLine), contextTokens, cost, status: "" }),
+    reset: () => setState({ lines: [], contextTokens: 0, cost: Option.none(), status: "" }),
     interrupted: () => push({ kind: "error", text: "Interrupted" }),
     setStatus: (status) => setState("status", status),
     setBusy: (busy) => {

@@ -10,7 +10,7 @@ import {
 import { ConversationId } from "./ConversationId.ts";
 import { McpServerInfo } from "./Mcp.ts";
 import { PluginInfo } from "./Plugin.ts";
-import { Compacted, RunDenied, RunEvent, RunRequest } from "./Run.ts";
+import { Compacted, RunDenied, RunEvent, RunNotFound, RunRequest, SteerRequest } from "./Run.ts";
 
 // The API definition lives here, apart from the gateway, so surfaces derive
 // typed clients from it without pulling in server code. It is Effect RPC over
@@ -33,6 +33,13 @@ export const Api = RpcGroup.make(
     error: Schema.Union([AgentNotFound, RunDenied, ConversationNotFound]),
     stream: true,
   }),
+  /**
+   * Send more to a run in flight. The model sees it at its next call, before
+   * it speaks again; `Steered` on the run's stream says when.
+   */
+  Rpc.make("steer", { payload: SteerRequest.fields, error: RunNotFound }),
+  /** Take back what was steered but has not reached the model yet; the inputs, oldest first. */
+  Rpc.make("unsteer", { payload: { runId: Schema.String }, success: Schema.Array(Schema.String) }),
   /** The caller's conversations, newest first, of one agent or directory when asked. */
   Rpc.make("listConversations", {
     payload: {

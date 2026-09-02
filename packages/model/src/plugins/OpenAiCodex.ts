@@ -1,4 +1,5 @@
 import {
+  CatalogModel,
   define,
   LoginError,
   type LoginMethod,
@@ -15,6 +16,7 @@ import { codexCliAuthFile } from "../codex/CodexConfig.ts";
 import { DEFAULT_MODEL, layer as codexLayer } from "../codex/CodexLanguageModel.ts";
 import { deviceLogin } from "../codex/CodexLogin.ts";
 import { type CodexTokens, planTypeOf } from "../codex/CodexTokens.ts";
+import { reasoningContext } from "../Reasoning.ts";
 
 const id = "openai-codex";
 
@@ -89,18 +91,28 @@ export const openaiCodexPlugin = define<
     }).pipe(Effect.mapError(failed));
 
     /** The GPT-5 family is what the ChatGPT backend serves; the catalog keeps the list current. */
-    const models = Effect.map(catalog.provider("openai"), (found) =>
+    const served = Effect.map(catalog.provider("openai"), (found) =>
       Option.match(found, {
-        onNone: () => [ModelInfo.fromCatalog({ id: DEFAULT_MODEL, name: DEFAULT_MODEL })],
+        onNone: () => [new CatalogModel({ id: DEFAULT_MODEL, name: DEFAULT_MODEL })],
         onSome: (provider) =>
           Object.values(provider.models)
             .filter(
               (m) => m.id.startsWith("gpt-5") && m.tool_call !== false && m.status !== "deprecated",
             )
-            .toSorted((a, b) => a.id.localeCompare(b.id))
-            .map(ModelInfo.fromCatalog),
+            .toSorted((a, b) => a.id.localeCompare(b.id)),
       }),
     );
+    // The subscription is not metered by the token, so the API prices do not apply.
+    const models = Effect.map(served, (all) =>
+      all.map((m) => new ModelInfo({ ...ModelInfo.fromCatalog(m), cost: undefined })),
+    );
+    const reasoning = (modelId: string, level: string) =>
+      Effect.flatMap(served, (all) => {
+        const found = all.find((m) => m.id === modelId);
+        return found === undefined
+          ? Effect.succeedNone
+          : reasoningContext("openai-responses", found, level);
+      });
 
     /** One Codex model with its own auth, errors in the provider's words. */
     const model = (modelId: string) =>
@@ -127,6 +139,7 @@ export const openaiCodexPlugin = define<
         Effect.map(store.load, (loaded) =>
           Option.isSome(loaded) ? Option.some(model(modelId)) : Option.none(),
         ).pipe(Effect.mapError(failed)),
+      reasoning,
     });
   }),
 });

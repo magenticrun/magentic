@@ -1,12 +1,25 @@
 import { define, ModelInfo } from "@magentic/plugin";
-import { Effect, Layer, Ref, Stream } from "effect";
+import { Context, Effect, Layer, Option, Ref, Stream } from "effect";
 import { AiError, LanguageModel, type Response } from "effect/unstable/ai";
 
 /** Token limits the fake model claims; 0 when a test does not care, as the catalog would say. */
 export interface FakeLimits {
   readonly context: number;
   readonly output: number;
+  /** What the fake charges, when a test cares. */
+  readonly cost?: ModelInfo["cost"];
 }
+
+/** The level a run asked the fake to think at; what its `reasoning` hands the runner. */
+export const FakeReasoning = Context.Reference<Option.Option<string>>(
+  "magentic/model/FakeReasoning",
+  {
+    defaultValue: () => Option.none(),
+  },
+);
+
+/** The levels the fake claims its thinking can be set to. */
+export const FAKE_REASONING_LEVELS: ReadonlyArray<string> = ["low", "high"];
 
 /**
  * A provider plugin whose model replays `script`. Always "signed in", so a
@@ -33,10 +46,18 @@ export const fakeProviderPlugin = (script: FakeScript, limits?: FakeLimits) =>
               toolCall: true,
               context: limits?.context ?? 0,
               output: limits?.output ?? 0,
+              reasoningLevels: FAKE_REASONING_LEVELS,
+              cost: limits?.cost,
             }),
           ]),
           defaultModel: "fake",
           model: () => Effect.succeedSome(layerFake(script)),
+          reasoning: (_, level) =>
+            Effect.succeed(
+              FAKE_REASONING_LEVELS.includes(level)
+                ? Option.some(Context.make(FakeReasoning, Option.some(level)))
+                : Option.none(),
+            ),
         }),
       ),
   });
@@ -45,6 +66,8 @@ export const fakeProviderPlugin = (script: FakeScript, limits?: FakeLimits) =>
 export type FakeScript = (call: {
   readonly index: number;
   readonly options: LanguageModel.ProviderOptions;
+  /** The level the run asked for, as `FakeReasoning` carries it around the call. */
+  readonly reasoning: Option.Option<string>;
 }) => ReadonlyArray<Response.PartEncoded> | AiError.AiError;
 
 /** The finish a real provider streams last, with usage counted at one token per part. */
@@ -96,12 +119,12 @@ export const layerFake = (script: FakeScript): Layer.Layer<LanguageModel.Languag
     Effect.gen(function* () {
       const calls = yield* Ref.make(0);
       const next = (options: LanguageModel.ProviderOptions) =>
-        Ref.getAndUpdate(calls, (n) => n + 1).pipe(
-          Effect.flatMap((index) => {
-            const turn = script({ index, options });
-            return turn instanceof AiError.AiError ? Effect.fail(turn) : Effect.succeed(turn);
-          }),
-        );
+        Effect.gen(function* () {
+          const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
+          const reasoning = yield* FakeReasoning;
+          const turn = script({ index, options, reasoning });
+          return turn instanceof AiError.AiError ? yield* turn : turn;
+        });
       return yield* LanguageModel.make({
         generateText: (options) => next(options).pipe(Effect.map((parts) => [...parts])),
         streamText: (options) =>

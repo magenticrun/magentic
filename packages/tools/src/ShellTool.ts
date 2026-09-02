@@ -2,6 +2,7 @@ import { Clock, Effect, Fiber, FileSystem, Option, Path, Ref, Schema, Stream } f
 import { Tool, Toolkit } from "effect/unstable/ai";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { CapabilityAnnotation } from "@magentic/plugin";
+import { ToolOutputDir } from "./ToolOutput.ts";
 import { resolveWithin, WorkspaceRoot } from "./WorkspaceRoot.ts";
 
 /** Returned to the model as a tool result, so the agent can pick another directory or report it. */
@@ -39,17 +40,17 @@ export const Shell = Tool.make("shell", {
     "The command runs through sh with no terminal and no stdin, so anything interactive fails or hangs: pass non-interactive flags. " +
     `A command is killed after ${DEFAULT_TIMEOUT_MS} ms unless timeout says otherwise, ${MAX_TIMEOUT_MS} ms at most, and comes back with timedOut set. ` +
     "Set workdir to run in a subdirectory instead of cd. " +
-    `stdout and stderr are each cut in the middle past ${OUTPUT_LIMIT} characters and marked truncated; pipe through tail or grep when only part of the output matters. ` +
+    `stdout and stderr are each cut in the middle past ${OUTPUT_LIMIT} characters and marked truncated; the whole of a cut stream is saved to the file stdoutFile or stderrFile names, outside the workspace, for grep, sed -n, or tail through this tool. ` +
     "Chain dependent commands with && in one call; run independent commands as separate, parallel calls.",
   parameters: Schema.Struct({
     command: Schema.NonEmptyString.annotate({ description: "The command line to run" }),
-    workdir: Schema.optional(
+    workdir: Schema.optionalKey(
       Schema.String.annotate({
         description:
           "Directory to run in, relative to the workspace root; the root itself when omitted",
       }),
     ),
-    timeout: Schema.optional(
+    timeout: Schema.optionalKey(
       Schema.Int.annotate({
         description: `Milliseconds before the command is killed; default ${DEFAULT_TIMEOUT_MS}, at most ${MAX_TIMEOUT_MS}`,
       }),
@@ -61,6 +62,10 @@ export const Shell = Tool.make("shell", {
     stdout: Schema.String,
     stderr: Schema.String,
     truncated: Schema.Boolean,
+    /** Where the whole stdout was saved; present only when stdout was cut. */
+    stdoutFile: Schema.optional(Schema.String),
+    /** Where the whole stderr was saved; present only when stderr was cut. */
+    stderrFile: Schema.optional(Schema.String),
     timedOut: Schema.Boolean,
     durationMs: Schema.Int,
   }),
@@ -107,12 +112,14 @@ export const push = (buffer: Bounded, chunk: string): Bounded => {
   return { head, tail, omitted };
 };
 
-/** The text the model sees, with a note where the middle was. */
-export const render = (buffer: Bounded): Captured =>
+/** The text the model sees, with a note where the middle was and where the whole is. */
+export const render = (buffer: Bounded, savedAs: string | undefined): Captured =>
   whole(buffer)
     ? { text: buffer.head, truncated: false }
     : {
-        text: `${buffer.head}\n… ${buffer.omitted} characters omitted …\n${buffer.tail}`,
+        text: `${buffer.head}\n… ${buffer.omitted} characters omitted${
+          savedAs === undefined ? "" : `; the whole output is in ${savedAs}`
+        } …\n${buffer.tail}`,
         truncated: true,
       };
 
@@ -121,12 +128,13 @@ const clampTimeout = (requested: number | undefined): number =>
     ? DEFAULT_TIMEOUT_MS
     : Math.min(requested, MAX_TIMEOUT_MS);
 
-/** Handlers for the shell tool. Needs a ChildProcessSpawner, a FileSystem, a Path, and a WorkspaceRoot. */
+/** Handlers for the shell tool. Needs a ChildProcessSpawner, a FileSystem, a Path, a WorkspaceRoot, and a ToolOutputDir. */
 export const shellToolHandlers = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const root = yield* WorkspaceRoot;
+  const outputDir = yield* ToolOutputDir;
 
   const resolveWorkdir = Effect.fn("ShellTool.resolveWorkdir")(function* (
     requested: string | undefined,
@@ -168,22 +176,50 @@ export const shellToolHandlers = Effect.gen(function* () {
             }),
           )
           .pipe(Effect.mapError(spawnFailed));
+        const callId = crypto.randomUUID();
         // Drain both pipes while the command runs, or a chatty one blocks on a full pipe.
         // Each chunk lands in a Ref, so what was read survives interrupting the reader.
-        const collect = (stream: Stream.Stream<Uint8Array, { readonly message: string }>) =>
+        // Once a stream passes the limit, all of it goes to a file too, from the start.
+        const collect = (
+          stream: Stream.Stream<Uint8Array, { readonly message: string }>,
+          name: "stdout" | "stderr",
+        ) =>
           Effect.gen(function* () {
             const buffer = yield* Ref.make(EMPTY);
+            const file = path.join(outputDir, `${callId}.${name}.log`);
+            const saved = yield* Ref.make(false);
+            // A file that cannot be written loses nothing the model would have seen.
+            const save = (text: string, flag: "w" | "a") =>
+              Effect.gen(function* () {
+                if (flag === "w") {
+                  yield* fs.makeDirectory(outputDir, { recursive: true });
+                }
+                yield* fs.writeFileString(file, text, { flag, mode: 0o600 });
+                yield* Ref.set(saved, true);
+              }).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning(`shell: output of ${callId} not saved to ${file}`, cause),
+                ),
+              );
             const reader = yield* Effect.forkChild(
               stream.pipe(
                 Stream.decodeText(),
-                Stream.runForEach((chunk) => Ref.update(buffer, (b) => push(b, chunk))),
+                Stream.runForEach((chunk) =>
+                  Effect.gen(function* () {
+                    const before = yield* Ref.getAndUpdate(buffer, (b) => push(b, chunk));
+                    if (whole(push(before, chunk))) {
+                      return;
+                    }
+                    yield* whole(before) ? save(before.head + chunk, "w") : save(chunk, "a");
+                  }),
+                ),
                 Effect.mapError(spawnFailed),
               ),
             );
-            return { buffer, reader };
+            return { buffer, reader, file, saved };
           });
-        const stdout = yield* collect(handle.stdout);
-        const stderr = yield* collect(handle.stderr);
+        const stdout = yield* collect(handle.stdout, "stdout");
+        const stderr = yield* collect(handle.stderr, "stderr");
         const exit = yield* handle.exitCode.pipe(
           Effect.mapError(spawnFailed),
           Effect.timeoutOption(limit),
@@ -201,11 +237,12 @@ export const shellToolHandlers = Effect.gen(function* () {
             if (Option.isNone(done)) {
               yield* Fiber.interrupt(collector.reader);
             }
-            return render(yield* Ref.get(collector.buffer));
+            const savedAs = (yield* Ref.get(collector.saved)) ? collector.file : undefined;
+            return { ...render(yield* Ref.get(collector.buffer), savedAs), savedAs };
           });
         const [out, err] = yield* Effect.all([settle(stdout), settle(stderr)], { concurrency: 2 });
         const finished = yield* Clock.currentTimeMillis;
-        return {
+        const result: typeof Shell.successSchema.Type = {
           exitCode: Option.isSome(exit) ? Number(exit.value) : null,
           stdout: out.text,
           stderr: err.text,
@@ -213,6 +250,9 @@ export const shellToolHandlers = Effect.gen(function* () {
           timedOut: Option.isNone(exit),
           durationMs: finished - started,
         };
+        const withStdout =
+          out.savedAs === undefined ? result : { ...result, stdoutFile: out.savedAs };
+        return err.savedAs === undefined ? withStdout : { ...withStdout, stderrFile: err.savedAs };
       }).pipe(Effect.scoped);
     }),
   });

@@ -13,4 +13,5 @@ export * from "./plugin/ModelRegistry.ts";
 export * from "./plugin/PluginHost.ts";
 export * from "./plugin/ToolRegistry.ts";
 export * from "./Runner.ts";
+export * from "./Steering.ts";
 export * from "./Transcript.ts";

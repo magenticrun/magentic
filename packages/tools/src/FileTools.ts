@@ -1,4 +1,4 @@
-import { Effect, FileSystem, Option, Path, Schema, Stream } from "effect";
+import { Effect, FileSystem, Option, Path, Schema } from "effect";
 import { Tool, Toolkit } from "effect/unstable/ai";
 import { CapabilityAnnotation, messageOf } from "@magentic/plugin";
 import { resolveWithin, WorkspaceRoot } from "./WorkspaceRoot.ts";
@@ -16,6 +16,7 @@ export class FileToolError extends Schema.TaggedError<FileToolError>()("FileTool
     "NoMatch",
     "Ambiguous",
     "NoChange",
+    "TooLarge",
     "IoError",
   ]),
   path: Schema.String,
@@ -30,8 +31,12 @@ export const GLOB_LIMIT = 200;
 export const GREP_LIMIT = 100;
 /** Files a search reads at most. */
 const GREP_FILE_LIMIT = 10_000;
-/** Bytes `read_file` returns at most; the rest is cut and `truncated` set. */
-export const READ_MAX_BYTES = 1_048_576;
+/** Lines `read_file` returns at most in one call. */
+export const READ_LINE_LIMIT = 2000;
+/** Characters `read_file` returns at most in one call: fewer lines when they are long. */
+export const READ_MAX_CHARS = 50_000;
+/** Files bigger than this are not read at all: a bundle or a dump, for grep or the shell. */
+export const READ_FILE_MAX_BYTES = 16 * 1_048_576;
 /** Files bigger than this are not searched: a bundle or a data dump, not code. */
 export const GREP_FILE_MAX_BYTES = 1_048_576;
 /** Files read at once during a search. */
@@ -51,22 +56,45 @@ const PathParam = Schema.String.annotate({
   description: "Path relative to the workspace root, e.g. src/index.ts",
 });
 
-const DirectoryParam = Schema.optional(
+const DirectoryParam = Schema.optionalKey(
   Schema.String.annotate({
     description: "Directory relative to the workspace root; the root itself when omitted",
   }),
 );
 
+/** Which lines of the file a cut read holds, one-based and inclusive. */
+export const ReadLines = Schema.Struct({
+  from: Schema.Int,
+  to: Schema.Int,
+  total: Schema.Int,
+});
+
 export const ReadFile = Tool.make("read_file", {
   description:
-    "Read a UTF-8 text file from the workspace. " +
-    `A file over ${READ_MAX_BYTES} bytes comes back cut there with truncated set; use grep to find the part you need.`,
-  parameters: Schema.Struct({ path: PathParam }),
+    "Read a UTF-8 text file from the workspace, whole when it is small. " +
+    `A read stops after ${READ_LINE_LIMIT} lines or ${READ_MAX_CHARS} characters, whichever comes first, and comes back with truncated set and lines.from, lines.to, and lines.total; ` +
+    "call again with offset = lines.to + 1 to go on, or use grep to find the part you need. " +
+    `A file over ${READ_FILE_MAX_BYTES} bytes is not read: search it with grep or the shell.`,
+  parameters: Schema.Struct({
+    path: PathParam,
+    offset: Schema.optionalKey(
+      Schema.Int.annotate({
+        description: "The line to start at, counting from 1; the first when omitted",
+      }),
+    ),
+    limit: Schema.optionalKey(
+      Schema.Int.annotate({
+        description: `How many lines to read at most; ${READ_LINE_LIMIT} when omitted, and never more`,
+      }),
+    ),
+  }),
   success: Schema.Struct({
     path: Schema.String,
     content: Schema.String,
-    /** Present, and true, only when the content was cut at the size limit. */
+    /** Present, and true, only when the content is not the whole file. */
     truncated: Schema.optional(Schema.Boolean),
+    /** Which lines `content` holds; present only when it is not the whole file. */
+    lines: Schema.optional(ReadLines),
   }),
   failure: FileToolError,
   failureMode: "return",
@@ -97,7 +125,7 @@ export const EditFile = Tool.make("edit_file", {
     path: PathParam,
     oldString: Schema.String.annotate({ description: "The exact text to replace" }),
     newString: Schema.String.annotate({ description: "What to put in its place" }),
-    replaceAll: Schema.optional(
+    replaceAll: Schema.optionalKey(
       Schema.Boolean.annotate({ description: "Replace every occurrence; default false" }),
     ),
   }),
@@ -169,7 +197,7 @@ export const Grep = Tool.make("grep", {
   parameters: Schema.Struct({
     pattern: Schema.String.annotate({ description: "The regular expression to search for" }),
     path: DirectoryParam,
-    include: Schema.optional(
+    include: Schema.optionalKey(
       Schema.String.annotate({
         description: 'Only search files whose name matches this glob, e.g. "*.ts" or "*.{ts,tsx}"',
       }),
@@ -209,6 +237,50 @@ const cutLine = (line: string): string =>
   line.length <= LINE_MAX_CHARS ? line : `${line.slice(0, LINE_MAX_CHARS)}…`;
 
 const countOccurrences = (text: string, needle: string): number => text.split(needle).length - 1;
+
+/** What one `read_file` call returns of a file: the whole thing, or a page of its lines. */
+type Page =
+  | { readonly whole: true }
+  | { readonly whole: false; readonly content: string; readonly lines: typeof ReadLines.Type };
+
+/**
+ * The lines from `offset` (one-based) on, at most `limit` of them and at
+ * most `READ_MAX_CHARS` characters, never cutting a line short except a
+ * first line longer than that on its own. Whole when that is all of the file.
+ */
+export const pageOf = (
+  text: string,
+  offset: number | undefined,
+  limit: number | undefined,
+): Page => {
+  // A trailing line break ends the last line; it does not start an empty one.
+  const trailing = text.endsWith("\n");
+  const all = trailing ? text.slice(0, -1).split("\n") : text.split("\n");
+  const total = text.length === 0 ? 0 : all.length;
+  const from = Math.max(1, offset ?? 1);
+  const want = Math.min(READ_LINE_LIMIT, Math.max(1, limit ?? READ_LINE_LIMIT));
+  const kept: Array<string> = [];
+  let chars = 0;
+  for (const line of all.slice(from - 1, from - 1 + want)) {
+    if (kept.length > 0 && chars + line.length + 1 > READ_MAX_CHARS) {
+      break;
+    }
+    kept.push(
+      kept.length === 0 && line.length > READ_MAX_CHARS ? line.slice(0, READ_MAX_CHARS) : line,
+    );
+    chars += line.length + 1;
+    if (chars > READ_MAX_CHARS) {
+      break;
+    }
+  }
+  const to = from - 1 + kept.length;
+  const wholeLine = kept.length === 0 || kept[0] === all[from - 1];
+  if (from === 1 && to === total && wholeLine) {
+    return { whole: true };
+  }
+  const content = kept.join("\n") + (to === total && trailing && wholeLine ? "\n" : "");
+  return { whole: false, content, lines: { from, to, total } };
+};
 
 /** Handlers for the file tools. Needs a FileSystem, a Path, and a WorkspaceRoot. */
 export const fileToolHandlers = Effect.gen(function* () {
@@ -355,30 +427,25 @@ export const fileToolHandlers = Effect.gen(function* () {
   });
 
   return FileTools.of({
-    read_file: Effect.fn("FileTools.read_file")(function* ({ path: requested }) {
+    read_file: Effect.fn("FileTools.read_file")(function* ({ path: requested, offset, limit }) {
       const { absolute, relative } = yield* resolveInside(requested);
       const exists = yield* fs.exists(absolute).pipe(Effect.mapError(ioError(requested)));
       if (!exists) {
         return yield* notFound(requested);
       }
       const info = yield* fs.stat(absolute).pipe(Effect.mapError(ioError(requested)));
-      if (Number(info.size) <= READ_MAX_BYTES) {
-        const content = yield* fs
-          .readFileString(absolute)
-          .pipe(Effect.mapError(ioError(requested)));
-        return { path: relative, content };
+      if (Number(info.size) > READ_FILE_MAX_BYTES) {
+        return yield* new FileToolError({
+          reason: "TooLarge",
+          path: requested,
+          message: `${requested} is ${info.size} bytes, over the ${READ_FILE_MAX_BYTES} the tool reads; search it with grep or the shell`,
+        });
       }
-      // Only the head is read, so a huge file costs the limit and not its size.
-      const chunks = yield* Stream.runCollect(
-        fs.stream(absolute, { bytesToRead: READ_MAX_BYTES }),
-      ).pipe(Effect.mapError(ioError(requested)));
-      const head = new Uint8Array(chunks.reduce((n, chunk) => n + chunk.byteLength, 0));
-      let offset = 0;
-      for (const chunk of chunks) {
-        head.set(chunk, offset);
-        offset += chunk.byteLength;
-      }
-      return { path: relative, content: new TextDecoder().decode(head), truncated: true };
+      const text = yield* fs.readFileString(absolute).pipe(Effect.mapError(ioError(requested)));
+      const page = pageOf(text, offset, limit);
+      return page.whole
+        ? { path: relative, content: text }
+        : { path: relative, content: page.content, truncated: true, lines: page.lines };
     }),
 
     write_file: Effect.fn("FileTools.write_file")(function* ({ path: requested, content }) {
