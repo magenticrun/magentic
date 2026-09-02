@@ -355,8 +355,8 @@ for calls that go through the registry, and cannot outlive being disabled.
 
 ## The built-ins, rewritten as plugins
 
-- `@magentic/tools`: `fileTools` plugin registering `read_file` and `write_file` from the
-  existing `FileToolsLayer`. `shell` and `http_fetch` arrive as their own plugins so they can
+- `@magentic/tools`: `fileTools` plugin registering `read_file`, `write_file`, `edit_file`,
+  `list_dir`, `glob`, and `grep` from the existing `FileToolsLayer`. `shell` and `http_fetch` arrive as their own plugins so they can
   be disabled individually.
 - `@magentic/model`: `openaiCodex`, `openai`, `anthropic`, `zai`, `opencodeZen` plugins, each one
   `ModelProviderRegistration`. `Providers.ts` in the CLI is deleted; `magentic auth login`
