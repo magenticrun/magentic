@@ -36,6 +36,7 @@ import { estimateContext } from "./ContextEstimate.ts";
 import { ConversationStore } from "./ConversationStore.ts";
 import { describeCause } from "./Errors.ts";
 import { RunEventBus } from "./EventBus.ts";
+import { retryPolicy, toRetryEvent } from "./Retry.ts";
 import { ModelRegistry } from "./plugin/ModelRegistry.ts";
 import { ToolRegistry } from "./plugin/ToolRegistry.ts";
 
@@ -326,22 +327,39 @@ export class Runner extends Context.Service<
               while (true) {
                 const calledTool = yield* Ref.make(false);
                 const usage = yield* Ref.make(Option.none<Response.Usage>());
-                yield* chat.streamText({ prompt, toolkit: tools }).pipe(
-                  Stream.provideService(LanguageModel.LanguageModel, model),
-                  Stream.runForEach((part) =>
-                    Effect.gen(function* () {
-                      if (part.type === "tool-call") {
-                        yield* Ref.set(calledTool, true);
-                      }
-                      if (part.type === "finish") {
-                        yield* Ref.set(finishReason, part.reason);
-                        yield* Ref.set(usage, Option.some(part.usage));
-                      }
-                      for (const event of toEvents(part)) {
-                        yield* emit(event);
-                      }
-                    }),
+                // A call that fails before anything reached the surface is tried
+                // again from the same history: the chat appends the prompt and
+                // whatever came back even when the stream fails. One that fails
+                // after speaking is not, so nothing shows twice.
+                const before = yield* Ref.get(chat.history);
+                const spoke = yield* Ref.make(false);
+                const attempt = Effect.andThen(
+                  Ref.set(chat.history, before),
+                  chat.streamText({ prompt, toolkit: tools }).pipe(
+                    Stream.provideService(LanguageModel.LanguageModel, model),
+                    Stream.runForEach((part) =>
+                      Effect.gen(function* () {
+                        if (part.type === "tool-call") {
+                          yield* Ref.set(calledTool, true);
+                        }
+                        if (part.type === "finish") {
+                          yield* Ref.set(finishReason, part.reason);
+                          yield* Ref.set(usage, Option.some(part.usage));
+                        }
+                        for (const event of toEvents(part)) {
+                          yield* Ref.set(spoke, true);
+                          yield* emit(event);
+                        }
+                      }),
+                    ),
                   ),
+                );
+                yield* Effect.retry(
+                  attempt,
+                  retryPolicy({
+                    canRetry: Effect.map(Ref.get(spoke), (yes) => !yes),
+                    onRetry: (retrying) => emit(toRetryEvent(retrying)),
+                  }),
                 );
                 // Once the call is in the history, so the estimate matches what was counted.
                 const reported = yield* Ref.get(usage);

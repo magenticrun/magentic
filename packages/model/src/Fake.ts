@@ -1,6 +1,6 @@
 import { define, ModelInfo } from "@magentic/plugin";
 import { Effect, Layer, Option, Ref, Stream } from "effect";
-import { LanguageModel, type Response } from "effect/unstable/ai";
+import { AiError, LanguageModel, type Response } from "effect/unstable/ai";
 
 /** Token limits the fake model claims; 0 when a test does not care, as the catalog would say. */
 export interface FakeLimits {
@@ -41,11 +41,11 @@ export const fakeProviderPlugin = (script: FakeScript, limits?: FakeLimits) =>
       ),
   });
 
-/** One scripted model turn: what the fake replies with for the nth call. */
+/** One scripted model turn: what the fake replies with for the nth call, or the error the call fails with. */
 export type FakeScript = (call: {
   readonly index: number;
   readonly options: LanguageModel.ProviderOptions;
-}) => ReadonlyArray<Response.PartEncoded>;
+}) => ReadonlyArray<Response.PartEncoded> | AiError.AiError;
 
 /** The finish a real provider streams last, with usage counted at one token per part. */
 const finish = (parts: ReadonlyArray<Response.PartEncoded>): Response.StreamPartEncoded => ({
@@ -97,7 +97,10 @@ export const layerFake = (script: FakeScript): Layer.Layer<LanguageModel.Languag
       const calls = yield* Ref.make(0);
       const next = (options: LanguageModel.ProviderOptions) =>
         Ref.getAndUpdate(calls, (n) => n + 1).pipe(
-          Effect.map((index) => script({ index, options })),
+          Effect.flatMap((index) => {
+            const turn = script({ index, options });
+            return turn instanceof AiError.AiError ? Effect.fail(turn) : Effect.succeed(turn);
+          }),
         );
       return yield* LanguageModel.make({
         generateText: (options) => next(options).pipe(Effect.map((parts) => [...parts])),

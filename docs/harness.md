@@ -113,7 +113,14 @@ Each is a `Context.Service` with static layers. Ids are `magentic/core/<Name>`.
   same on its own after a model call whose usage reaches the window less a reserve
   (`Compaction.ts`, after opencode: 20k tokens or the model's output limit, whichever is
   smaller), keeping up to a quarter of the room in recent turns word for word and emitting
-  `CompactionStarted` and `Compacted`. The summary is a user message marked in its
+  `CompactionStarted` and `Compacted`. A model call that fails before anything reached the
+  surface is tried again when Effect's client marks the error retryable (transport errors,
+  rate limits, provider 5xx): up to five times, backing off from two seconds and doubling
+  with jitter, capped at thirty seconds unless the provider sent `retry-after`
+  (`Retry.ts`, after opencode). The chat appends the prompt even when the stream fails, so
+  the history is put back before each try; each try emits `Retrying` with the wait. A call
+  that fails after it spoke is not retried, so nothing shows twice.
+  The summary is a user message marked in its
   `options.magentic`; the model sees the system prompt, the latest summary, and what
   follows it, while `history.json` keeps everything before as well, so transcripts still
   show it. `POST /conversations/:id/compact` is the manual route. Compaction is core, not a

@@ -4,7 +4,9 @@ import { fakeProviderPlugin, type FakeScript } from "@magentic/model";
 import { AgentDefinition, ModelCatalog } from "@magentic/plugin";
 import { Principal } from "@magentic/protocol";
 import { fileToolsPlugin, WorkspaceRoot } from "@magentic/tools";
-import { Effect, FileSystem, Layer, Option, Stream } from "effect";
+import { Effect, Fiber, FileSystem, Layer, Option, Stream } from "effect";
+import { TestClock } from "effect/testing";
+import { AiError } from "effect/unstable/ai";
 import { FetchHttpClient } from "effect/unstable/http";
 import { ConversationStore } from "./ConversationStore.ts";
 import { builtin, PluginHost } from "./plugin/PluginHost.ts";
@@ -311,5 +313,103 @@ layer(TightLayer)("Runner auto compaction", (it) => {
         ["User", "Assistant", "Summary", "User", "Assistant", "Summary"],
       );
     }),
+  );
+});
+
+const providerDown = new AiError.AiError({
+  module: "Fake",
+  method: "streamText",
+  reason: new AiError.InternalProviderError({ description: "Internal network failure" }),
+});
+const badKey = new AiError.AiError({
+  module: "Fake",
+  method: "streamText",
+  reason: new AiError.AuthenticationError({ kind: "InvalidKey", description: "bad key" }),
+});
+
+/** The first call fails as a provider does when it is down; the second answers; the third is refused. */
+const flaky: FakeScript = ({ index, options }) => {
+  if (index === 0) {
+    return providerDown;
+  }
+  if (index === 1) {
+    return [{ type: "text", text: `messages=${options.prompt.content.length}` }];
+  }
+  return badKey;
+};
+
+const FlakyLayer = Runner.layer.pipe(
+  Layer.provideMerge(
+    Layer.mergeAll(
+      PluginHost.layer({
+        plugins: [builtin(fakeProviderPlugin(flaky))],
+        paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
+      }).pipe(Layer.provide(ToolCallGuard.layerAllowAll)),
+      ConversationStore.layerMemory,
+    ),
+  ),
+  Layer.provideMerge(
+    Layer.mergeAll(BunServices.layer, FetchHttpClient.layer, ModelCatalog.layerSnapshot),
+  ),
+);
+
+layer(FlakyLayer)("Runner retries", (it) => {
+  it.effect(
+    "tries a failed call again from the same history, and gives up on one that would fail again",
+    () =>
+      Effect.gen(function* () {
+        const runner = yield* Runner;
+        const collecting = yield* Effect.forkChild(
+          Stream.runCollect(
+            runner.run({
+              agent: talker,
+              principal: alice,
+              input: "hello",
+              attachments: [],
+              conversationId: Option.none(),
+              model: Option.none(),
+              directory: Option.none(),
+            }),
+          ),
+        );
+        // The first retry waits about two seconds on the test clock.
+        yield* TestClock.adjust("1 minute");
+        const events = yield* Fiber.join(collecting);
+        assert.deepStrictEqual(
+          events.map((e) => e._tag),
+          ["RunStarted", "Retrying", "TextDelta", "TokenUsage", "RunFinished"],
+        );
+        const retrying = events[1];
+        assert.isTrue(
+          retrying?._tag === "Retrying" &&
+            retrying.attempt === 1 &&
+            retrying.message.includes("Internal network failure") &&
+            retrying.delayMs >= 1600 &&
+            retrying.delayMs <= 2400,
+        );
+        // The failed call's prompt was not left in the history: system and user only.
+        const reply = events[2];
+        assert.isTrue(reply?._tag === "TextDelta" && reply.text === "messages=2");
+
+        const started = events[0];
+        const id = started?._tag === "RunStarted" ? started.conversationId : "";
+        const second = yield* Stream.runCollect(
+          runner.run({
+            agent: talker,
+            principal: alice,
+            input: "again",
+            attachments: [],
+            conversationId: Option.some(id),
+            model: Option.none(),
+            directory: Option.none(),
+          }),
+        );
+        assert.deepStrictEqual(
+          second.map((e) => e._tag),
+          ["RunStarted", "RunFailed"],
+        );
+        const failed = second[1];
+        assert.isTrue(failed?._tag === "RunFailed" && failed.message.includes("bad key"));
+      }),
   );
 });

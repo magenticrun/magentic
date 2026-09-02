@@ -284,6 +284,12 @@ export const createChatTui = (options: {
           });
           setState({ contextTokens: 0, status: state.busy ? "Thinking…" : "" });
           return;
+        case "Retrying": {
+          const seconds = Math.ceil(event.delayMs / 1000);
+          setState("status", `Retrying in ${seconds}s (${event.attempt} of ${event.limit})…`);
+          push({ kind: "note", text: `${event.message}; retrying in ${seconds}s` });
+          return;
+        }
         case "RunFinished":
           setState("status", "");
           return;
