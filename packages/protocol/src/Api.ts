@@ -7,6 +7,7 @@ import {
   OpenApi,
 } from "effect/unstable/httpapi";
 import { AgentInfo, AgentNotFound } from "./Agent.ts";
+import { Conversation, ConversationNotFound, TranscriptEntry } from "./Conversation.ts";
 import { PluginInfo } from "./Plugin.ts";
 import { RunDenied, RunEvent, RunRequest } from "./Run.ts";
 
@@ -29,11 +30,37 @@ export class AgentsApi extends HttpApiGroup.make("agents")
       params: { name: Schema.String },
       payload: RunRequest,
       success: HttpApiSchema.StreamSse({ data: RunEvent }),
-      error: [AgentNotFound, RunDenied],
+      error: [AgentNotFound, RunDenied, ConversationNotFound],
     }),
   )
   .prefix("/agents")
   .annotateMerge(OpenApi.annotations({ title: "Agents" })) {}
+
+/** The caller's conversations, newest first. Another person's are not found. */
+export class ConversationsApi extends HttpApiGroup.make("conversations")
+  .add(
+    HttpApiEndpoint.get("list", "/", {
+      query: { agent: Schema.optional(Schema.String), directory: Schema.optional(Schema.String) },
+      success: Schema.Array(Conversation),
+    }),
+    HttpApiEndpoint.get("get", "/:id", {
+      params: { id: Schema.String },
+      success: Conversation,
+      error: ConversationNotFound,
+    }),
+    HttpApiEndpoint.get("transcript", "/:id/transcript", {
+      params: { id: Schema.String },
+      success: Schema.Array(TranscriptEntry),
+      error: ConversationNotFound,
+    }),
+    HttpApiEndpoint.delete("remove", "/:id", {
+      params: { id: Schema.String },
+      success: HttpApiSchema.NoContent,
+      error: ConversationNotFound,
+    }),
+  )
+  .prefix("/conversations")
+  .annotateMerge(OpenApi.annotations({ title: "Conversations" })) {}
 
 export class PluginsApi extends HttpApiGroup.make("plugins")
   .add(HttpApiEndpoint.get("list", "/", { success: Schema.Array(PluginInfo) }))
@@ -43,5 +70,6 @@ export class PluginsApi extends HttpApiGroup.make("plugins")
 export class Api extends HttpApi.make("magentic")
   .add(SystemApi)
   .add(AgentsApi)
+  .add(ConversationsApi)
   .add(PluginsApi)
   .annotateMerge(OpenApi.annotations({ title: "magentic gateway" })) {}

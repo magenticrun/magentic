@@ -12,7 +12,12 @@ import { HttpRouter, FetchHttpClient } from "effect/unstable/http";
 import { HttpApiBuilder, HttpApiScalar } from "effect/unstable/httpapi";
 import { configAgentsPlugin } from "./ConfigAgents.ts";
 import { ToolCallGuardLive } from "./Guard.ts";
-import { AgentsApiHandlersNoDeps, PluginsApiHandlers, SystemApiHandlers } from "./Handlers.ts";
+import {
+  AgentsApiHandlersNoDeps,
+  ConversationsApiHandlersNoDeps,
+  PluginsApiHandlers,
+  SystemApiHandlers,
+} from "./Handlers.ts";
 import { configDir, dataDir, loadExternalPlugin, loadGatewayConfig } from "./Plugins.ts";
 
 /** The one agent every gateway has until `agents/*.yaml` exists. */
@@ -66,8 +71,13 @@ export const HostLayer = Layer.unwrap(
   }),
 );
 
-/** Conversations behind the runner; tools, models, and events come from the host. */
-export const RunnerLayer = Runner.layer.pipe(Layer.provide(ConversationStore.layerMemory));
+/** Conversations on disk under the data directory, so they outlive the gateway. */
+export const ConversationStoreLayer = Layer.unwrap(
+  Effect.map(dataDir, (data) => ConversationStore.layerFile(`${data}/conversations`)),
+);
+
+/** Conversations behind the runner, and beside it for listing; tools, models, and events come from the host. */
+export const RunnerLayer = Runner.layer.pipe(Layer.provideMerge(ConversationStoreLayer));
 
 const AdmissionLayer = Layer.mergeAll(Identity.layerLocal, Policy.layerAllowAll, Audit.layerMemory);
 
@@ -88,7 +98,11 @@ export const ServicesLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer).pipe(
 export const ApiRoutes = HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
   Layer.provide([
     SystemApiHandlers,
-    Layer.mergeAll(AgentsApiHandlersNoDeps, PluginsApiHandlers).pipe(Layer.provide(ServicesLayer)),
+    Layer.mergeAll(
+      AgentsApiHandlersNoDeps,
+      ConversationsApiHandlersNoDeps,
+      PluginsApiHandlers,
+    ).pipe(Layer.provide(ServicesLayer)),
   ]),
 );
 

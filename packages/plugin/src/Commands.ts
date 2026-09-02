@@ -1,4 +1,4 @@
-import type { TokenUsage } from "@magentic/protocol";
+import type { Conversation, TokenUsage } from "@magentic/protocol";
 import type { Effect, Option, Scope } from "effect";
 import { Schema } from "effect";
 import type { PluginSetupError, Registration } from "./Plugin.ts";
@@ -57,6 +57,12 @@ export interface SessionUsage {
   readonly totalOutputTokens: number;
 }
 
+/** A command that could not do what was asked, in words for the transcript. */
+export class CommandError extends Schema.TaggedError<CommandError>()("CommandError", {
+  command: Schema.String,
+  message: Schema.String,
+}) {}
+
 /** The chat a command runs in, and what it may change about it. */
 export interface ChatSession {
   readonly agent: string;
@@ -65,13 +71,15 @@ export interface ChatSession {
   setModel(ref: string): Effect.Effect<void>;
   /** None before the first reply. */
   readonly usage: Effect.Effect<Option.Option<SessionUsage>>;
+  /** The conversation the next input continues; none until the first run, or after `startNew`. */
+  readonly conversation: Effect.Effect<Option.Option<Conversation>>;
+  /** This agent's earlier conversations on the gateway, newest first. */
+  readonly conversations: Effect.Effect<ReadonlyArray<Conversation>, CommandError>;
+  /** Show an earlier conversation and continue it from here. */
+  resume(id: string): Effect.Effect<void, CommandError>;
+  /** Clear the transcript; the next input starts a conversation. */
+  readonly startNew: Effect.Effect<void>;
 }
-
-/** A command that could not do what was asked, in words for the transcript. */
-export class CommandError extends Schema.TaggedError<CommandError>()("CommandError", {
-  command: Schema.String,
-  message: Schema.String,
-}) {}
 
 export interface CommandInput {
   readonly ui: CommandUi;

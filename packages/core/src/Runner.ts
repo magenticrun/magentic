@@ -1,6 +1,12 @@
 import type { AgentDefinition } from "@magentic/plugin";
-import type { Principal, RunEvent } from "@magentic/protocol";
-import { Context, Effect, Layer, Option, Queue, Ref, type Schema, Stream } from "effect";
+import {
+  Conversation,
+  type ConversationUsage,
+  type Principal,
+  type RunEvent,
+  type TokenUsage,
+} from "@magentic/protocol";
+import { Context, DateTime, Effect, Layer, Option, Queue, Ref, type Schema, Stream } from "effect";
 import { Chat, LanguageModel, Prompt, type Response, type Tool } from "effect/unstable/ai";
 import { estimateContext } from "./ContextEstimate.ts";
 import { ConversationStore } from "./ConversationStore.ts";
@@ -17,12 +23,38 @@ export interface RunOptions {
   readonly conversationId: Option.Option<string>;
   /** A `provider/model` reference to run on instead of the agent's own. */
   readonly model: Option.Option<string>;
+  /** Where the surface is working; kept on the conversation from its first run. */
+  readonly directory: Option.Option<string>;
 }
+
+/** How much of the first input names the conversation. */
+const TITLE_LENGTH = 80;
+
+const titleOf = (input: string): string => {
+  const flat = input.replace(/\s+/g, " ").trim();
+  return flat.length > TITLE_LENGTH ? `${flat.slice(0, TITLE_LENGTH - 1)}…` : flat;
+};
+
+/** The usage so far with one more call folded in. */
+const foldUsage = (
+  previous: Option.Option<ConversationUsage>,
+  latest: TokenUsage,
+): ConversationUsage => ({
+  latest,
+  calls: Option.match(previous, { onNone: () => 1, onSome: (u) => u.calls + 1 }),
+  totalInputTokens:
+    Option.match(previous, { onNone: () => 0, onSome: (u) => u.totalInputTokens }) +
+    latest.inputTokens,
+  totalOutputTokens:
+    Option.match(previous, { onNone: () => 0, onSome: (u) => u.totalOutputTokens }) +
+    latest.outputTokens,
+});
 
 /**
  * Turns one input into a stream of events: the model speaks, calls tools,
  * sees their results, and speaks again until it stops calling tools. History
- * is restored from and saved to the ConversationStore around every run.
+ * is restored from and saved to the ConversationStore around every run, with
+ * what the conversation is: its title, model, size, and usage.
  */
 export class Runner extends Context.Service<
   Runner,
@@ -43,7 +75,7 @@ export class Runner extends Context.Service<
         conversationId: string,
         agent: AgentDefinition,
       ) {
-        const saved = yield* conversations.load(conversationId);
+        const saved = yield* conversations.history(conversationId);
         if (Option.isSome(saved)) {
           const restored = yield* Effect.option(Chat.fromJson(saved.value));
           if (Option.isSome(restored)) {
@@ -107,12 +139,17 @@ export class Runner extends Context.Service<
               principal: options.principal,
             });
             const finishReason = yield* Ref.make("unknown");
+            const existing = yield* conversations.get(conversationId);
+            const usageSoFar = yield* Ref.make(
+              Option.flatMap(existing, (info) => Option.fromNullishOr(info.usage)),
+            );
+            const choice = Option.orElse(options.model, () =>
+              Option.fromNullishOr(options.agent.model),
+            );
 
             const loop = Effect.gen(function* () {
               // Resolved per run so a provider signed in after boot is picked up.
-              const model = yield* models.languageModel(
-                Option.orElse(options.model, () => Option.fromNullishOr(options.agent.model)),
-              );
+              const model = yield* models.languageModel(choice);
               let prompt: Prompt.RawInput = options.input;
               while (true) {
                 const calledTool = yield* Ref.make(false);
@@ -138,7 +175,7 @@ export class Runner extends Context.Service<
                 const reported = yield* Ref.get(usage);
                 if (Option.isSome(reported)) {
                   const { inputTokens, outputTokens } = reported.value;
-                  yield* emit({
+                  const event: TokenUsage = {
                     _tag: "TokenUsage",
                     inputTokens: inputTokens.total ?? 0,
                     outputTokens: outputTokens.total ?? 0,
@@ -146,7 +183,11 @@ export class Runner extends Context.Service<
                     cacheWriteTokens: inputTokens.cacheWrite,
                     reasoningTokens: outputTokens.reasoning,
                     breakdown: estimateContext(yield* Ref.get(chat.history), tools.tools),
-                  });
+                  };
+                  yield* Ref.update(usageSoFar, (previous) =>
+                    Option.some(foldUsage(previous, event)),
+                  );
+                  yield* emit(event);
                 }
                 if (!(yield* Ref.get(calledTool))) {
                   return;
@@ -158,9 +199,38 @@ export class Runner extends Context.Service<
 
             const outcome = yield* Effect.exit(loop);
             // Keep whatever history we got, even after a failure, so the person can retry.
-            yield* chat.exportJson.pipe(
-              Effect.flatMap((json) => conversations.save(conversationId, json)),
-              Effect.ignore,
+            yield* Effect.gen(function* () {
+              const now = yield* DateTime.now;
+              const history = yield* Ref.get(chat.history);
+              const resolved = yield* models.resolve(choice).pipe(Effect.option);
+              const model = Option.map(resolved, (r) => r.ref);
+              const usage = yield* Ref.get(usageSoFar);
+              const info = new Conversation({
+                id: conversationId,
+                agent,
+                principal: options.principal.id,
+                title: Option.match(existing, {
+                  onNone: () => titleOf(options.input),
+                  onSome: (before) => before.title,
+                }),
+                model: Option.getOrUndefined(model),
+                directory: Option.match(existing, {
+                  onNone: () => Option.getOrUndefined(options.directory),
+                  onSome: (before) => before.directory,
+                }),
+                createdAt: Option.match(existing, {
+                  onNone: () => now,
+                  onSome: (before) => before.createdAt,
+                }),
+                updatedAt: now,
+                messages: history.content.length,
+                usage: Option.getOrUndefined(usage),
+              });
+              yield* conversations.save(info, yield* chat.exportJson);
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning(`conversation ${conversationId} not saved`, cause),
+              ),
             );
             if (outcome._tag === "Failure") {
               yield* emit({ _tag: "RunFailed", message: describeCause(outcome.cause) });

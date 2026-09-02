@@ -53,8 +53,17 @@ const HostLayer = PluginHost.layer({
   paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
 }).pipe(Layer.provide([WorkspaceLayer, ToolCallGuard.layerAllowAll]));
 
+/** Conversations on disk in a scratch directory, so the file store is what the runner exercises. */
+const StoreLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const dir = yield* fs.makeTempDirectoryScoped({ prefix: "magentic-conversations-" });
+    return ConversationStore.layerFile(dir);
+  }),
+);
+
 const TestLayer = Runner.layer.pipe(
-  Layer.provideMerge(Layer.mergeAll(HostLayer, ConversationStore.layerMemory)),
+  Layer.provideMerge(Layer.mergeAll(HostLayer, StoreLayer)),
   Layer.provideMerge(
     Layer.mergeAll(BunServices.layer, FetchHttpClient.layer, ModelCatalog.layerSnapshot),
   ),
@@ -71,6 +80,7 @@ layer(TestLayer)("Runner", (it) => {
           input: "what does hello.txt say?",
           conversationId: Option.none(),
           model: Option.none(),
+          directory: Option.some("/work/here"),
         }),
       );
       assert.deepStrictEqual(
@@ -118,11 +128,33 @@ layer(TestLayer)("Runner", (it) => {
           input: "and again?",
           conversationId: Option.some(conversationId),
           model: Option.none(),
+          directory: Option.some("/work/elsewhere"),
         }),
       );
       const reply = second.find((e) => e._tag === "TextDelta");
       // system + user + assistant(tool call) + tool result + assistant + user = 6 before this turn
       assert.isTrue(reply?._tag === "TextDelta" && reply.text === "messages=6");
+
+      // What the conversation is, kept on disk beside its history.
+      const store = yield* ConversationStore;
+      const saved = yield* store.get(conversationId);
+      assert.isTrue(Option.isSome(saved));
+      if (Option.isSome(saved)) {
+        assert.strictEqual(saved.value.title, "what does hello.txt say?");
+        assert.strictEqual(saved.value.agent, "reader");
+        assert.strictEqual(saved.value.principal, "alice");
+        assert.strictEqual(saved.value.model, "fake/fake");
+        // The directory is where it started; continuing from elsewhere does not move it.
+        assert.strictEqual(saved.value.directory, "/work/here");
+        assert.strictEqual(saved.value.messages, 7);
+        assert.strictEqual(saved.value.usage?.calls, 3);
+        assert.strictEqual(saved.value.usage?.totalInputTokens, 30);
+      }
+      const listed = yield* store.list;
+      assert.deepStrictEqual(
+        listed.map((c) => c.id),
+        [conversationId],
+      );
     }),
   );
 });

@@ -12,9 +12,14 @@ import { Effect, FileSystem, Layer, Ref, Stream } from "effect";
 import { FetchHttpClient, HttpServer } from "effect/unstable/http";
 import { HttpApiTest } from "effect/unstable/httpapi";
 import { ToolCallGuardLive } from "./Guard.ts";
-import { AgentsApiHandlersNoDeps, PluginsApiHandlers, SystemApiHandlers } from "./Handlers.ts";
+import {
+  AgentsApiHandlersNoDeps,
+  ConversationsApiHandlersNoDeps,
+  PluginsApiHandlers,
+  SystemApiHandlers,
+} from "./Handlers.ts";
 
-const makeClient = HttpApiTest.groups(Api, ["system", "agents", "plugins"]);
+const makeClient = HttpApiTest.groups(Api, ["system", "agents", "conversations", "plugins"]);
 
 const triage = new AgentDefinition({
   name: "triage",
@@ -60,7 +65,7 @@ const HostLayer = PluginHost.layer({
   paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
 }).pipe(Layer.provide([WorkspaceLayer, ToolCallGuardLive.pipe(Layer.provide(AdmissionLayer))]));
 
-const RunnerLayer = Runner.layer.pipe(Layer.provide(ConversationStore.layerMemory));
+const RunnerLayer = Runner.layer.pipe(Layer.provideMerge(ConversationStore.layerMemory));
 
 const ServicesLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer).pipe(
   Layer.provideMerge(HostLayer),
@@ -68,7 +73,7 @@ const ServicesLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer).pipe(
 
 const HandlersLayer = Layer.mergeAll(
   SystemApiHandlers,
-  Layer.mergeAll(AgentsApiHandlersNoDeps, PluginsApiHandlers).pipe(
+  Layer.mergeAll(AgentsApiHandlersNoDeps, ConversationsApiHandlersNoDeps, PluginsApiHandlers).pipe(
     Layer.provideMerge(ServicesLayer),
   ),
 );
@@ -171,6 +176,57 @@ layer(TestLayer)("gateway api", (it) => {
         .pipe(Effect.flatMap(Stream.runCollect));
       const failure = unknown.at(-1);
       assert.isTrue(failure?._tag === "RunFailed" && failure.message.includes('no model "nope"'));
+    }),
+  );
+
+  it.effect("keeps conversations to list, replay, and delete", () =>
+    Effect.gen(function* () {
+      const client = yield* makeClient;
+      const events = yield* client.agents
+        .run({
+          params: { name: "triage" },
+          payload: { input: "read notes", directory: "/work/here" },
+        })
+        .pipe(Effect.flatMap(Stream.runCollect));
+      const started = events[0];
+      const id = started?._tag === "RunStarted" ? started.conversationId : "";
+
+      const listed = yield* client.conversations.list({ query: { agent: "triage" } });
+      const found = listed.find((c) => c.id === id);
+      assert.isTrue(found !== undefined && found.title === "read notes" && found.messages === 5);
+      assert.strictEqual(found?.usage?.calls, 2);
+      const none = yield* client.conversations.list({ query: { agent: "nobody" } });
+      assert.deepStrictEqual(none, []);
+      const here = yield* client.conversations.list({ query: { directory: "/work/here" } });
+      assert.isTrue(here.some((c) => c.id === id));
+      const elsewhere = yield* client.conversations.list({ query: { directory: "/work/there" } });
+      assert.isFalse(elsewhere.some((c) => c.id === id));
+
+      const transcript = yield* client.conversations.transcript({ params: { id } });
+      assert.deepStrictEqual(
+        transcript.map((e) => e._tag),
+        ["User", "Tool", "Assistant"],
+      );
+      const tool = transcript[1];
+      assert.isTrue(
+        tool?._tag === "Tool" &&
+          tool.name === "read_file" &&
+          !tool.isFailure &&
+          JSON.stringify(tool.result) ===
+            JSON.stringify({ path: "notes.txt", content: "remember the milk" }),
+      );
+
+      // Continuing it carries the history: the fake answers a tool result with "read it".
+      const again = yield* client.agents
+        .run({ params: { name: "triage" }, payload: { input: "more", conversationId: id } })
+        .pipe(Effect.flatMap(Stream.runCollect));
+      const continued = yield* client.conversations.get({ params: { id } });
+      assert.strictEqual(continued.messages, 7);
+      assert.strictEqual(again.at(-1)?._tag, "RunFinished");
+
+      yield* client.conversations.remove({ params: { id } });
+      const gone = yield* client.conversations.get({ params: { id } }).pipe(Effect.flip);
+      assert.strictEqual(gone._tag, "ConversationNotFound");
     }),
   );
 

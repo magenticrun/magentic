@@ -227,6 +227,10 @@ export interface ChatSession {
   readonly model: Effect.Effect<Option.Option<string>>;
   setModel(ref: string): Effect.Effect<void>;
   readonly usage: Effect.Effect<Option.Option<SessionUsage>>; // latest call and running totals
+  readonly conversation: Effect.Effect<Option.Option<Conversation>>; // what the next input continues
+  readonly conversations: Effect.Effect<ReadonlyArray<Conversation>, CommandError>; // this agent's, newest first
+  resume(id: string): Effect.Effect<void, CommandError>; // restore the transcript and continue from it
+  readonly startNew: Effect.Effect<void>;
 }
 ```
 
@@ -245,6 +249,17 @@ what the latest model call held (input with the cache split, output with the rea
 split, the share of the model's window), where the runner estimates the context goes
 (system prompt, tool definitions, history by author, at four characters a token, since
 providers report one total) and the running totals.
+
+`/resume` and `/new` live in the CLI (`apps/cli/src/commands/Conversations.ts`) because they
+only make sense where a transcript is drawn. The gateway keeps every conversation under its
+data directory (see `harness.md`, ConversationStore) with a title from the first input, the
+model of the latest run, the directory it started in, and the usage so far; `/resume` lists
+the agent's own for the caller from the current directory (sent with every request, as
+opencode sends its project directory; a conversation recorded without one is only listed
+unfiltered), newest first with age and size at the right, and choosing one replaces the transcript, the
+model, and what `/context` reports with that conversation's. `/resume <id>` names one
+outright; `magentic -c` and `magentic -r <id>` do the same at start. `/new` clears the
+transcript so the next input starts a conversation; the old one stays listed.
 
 ### Events
 
