@@ -83,7 +83,7 @@ export const AgentsApiHandlersNoDeps = HttpApiBuilder.group(
     const conversations = yield* ConversationStore;
 
     const run = Effect.fn("Gateway.run")(function* (name: string, payload: RunRequest) {
-      const { input, conversationId, model, directory } = payload;
+      const { input, attachments, conversationId, model, directory } = payload;
       const agent = yield* registry.get(name);
       const principal = yield* caller;
       // Continuing a conversation means one of the caller's own. An unknown id starts one.
@@ -117,6 +117,7 @@ export const AgentsApiHandlersNoDeps = HttpApiBuilder.group(
         agent,
         principal,
         input,
+        attachments: attachments ?? [],
         conversationId: Option.fromNullishOr(conversationId),
         model: Option.fromNullishOr(model),
         directory: Option.fromNullishOr(directory),

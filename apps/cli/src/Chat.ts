@@ -6,7 +6,7 @@ import {
   type CommandUi,
   type SessionUsage,
 } from "@magentic/plugin";
-import type { Conversation } from "@magentic/protocol";
+import type { Attachment, Conversation } from "@magentic/protocol";
 import { render } from "@opentui/solid";
 import {
   Cause,
@@ -165,7 +165,12 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   // The terminal reports light or dark within a few milliseconds; drawing
   // before the answer would flash the wrong palette.
   yield* Effect.promise(() => renderer.waitForThemeMode(300));
-  const inputs = yield* Queue.unbounded<string>();
+  /** What the person sent: the text, and any images pasted into it. */
+  interface Input {
+    readonly text: string;
+    readonly attachments: ReadonlyArray<Attachment>;
+  }
+  const inputs = yield* Queue.unbounded<Input>();
   const exit = yield* Deferred.make<void>();
   const quit = () => {
     Deferred.doneUnsafe(exit, Effect.void);
@@ -199,8 +204,8 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
       ? yield* contextWindow(models, initialModel.value)
       : 0,
     commands: (yield* commands.list).map(({ name, description }) => ({ name, description })),
-    onSubmit: (text) => {
-      Queue.offerUnsafe(inputs, text);
+    onSubmit: (text, attachments) => {
+      Queue.offerUnsafe(inputs, { text, attachments });
     },
     onInterrupt: () => {
       if (stop !== undefined) {
@@ -254,13 +259,19 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     tui.note("No conversation to continue; this is a new one.");
   }
 
-  const runOnce = Effect.fn("Cli.chat.runOnce")(function* (input: string) {
+  const runOnce = Effect.fn("Cli.chat.runOnce")(function* ({ text, attachments }: Input) {
     const conversationId = Option.getOrUndefined(yield* Ref.get(conversation));
     const chosen = Option.getOrUndefined(yield* Ref.get(model));
     const outcome = yield* client.agents
       .run({
         params: { name: agent.name },
-        payload: { input, conversationId, model: chosen, directory: process.cwd() },
+        payload: {
+          input: text,
+          attachments: attachments.length > 0 ? attachments : undefined,
+          conversationId,
+          model: chosen,
+          directory: process.cwd(),
+        },
       })
       .pipe(
         Effect.flatMap(
@@ -368,13 +379,13 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   const loop = Effect.gen(function* () {
     while (true) {
       const input = yield* Queue.take(inputs);
-      if (input.startsWith("/")) {
-        yield* runCommand(input);
+      if (input.text.startsWith("/")) {
+        yield* runCommand(input.text);
         continue;
       }
       const interrupt = yield* Deferred.make<void>();
       stop = interrupt;
-      tui.addUser(input);
+      tui.addUser(input.text);
       tui.setBusy(true);
       const finished = yield* Effect.race(
         Effect.as(runOnce(input), true),

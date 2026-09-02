@@ -219,6 +219,15 @@ auth login|list|logout` (exists, inline `@clack/prompts` like opencode's, not th
   OpenTUI with the Solid renderer (see `research/opentui-solid.md`): Effect parses arguments
   and owns the renderer lifecycle, OpenTUI's own signal and console handling is disabled, and
   the embedded gateway runs with request logging off so nothing prints over the screen.
+  Assistant text is drawn with OpenTUI's `<markdown>` element, streaming while the run is
+  in flight; the syntax style (`tui/Markdown.ts`) follows the light or dark palette.
+  Pasting follows opencode (`tui/Paste.ts`): a paste over 150 characters or three lines
+  folds into `[Pasted text #1 +N lines]` and unfolds when sent; a placeholder pasted back
+  unfolds first, so it never nests. An image on the clipboard (`ctrl+v`, or the empty paste
+  some terminals send for one) or the pasted path of an image file becomes `[Image #1]` and
+  goes along as a `RunRequest.attachments` entry, base64 on the wire. The runner hands the
+  model bytes, since Effect's provider clients base64-encode a byte array but encode a
+  string a second time, and stores them as base64 in `history.json`, which cannot hold bytes.
 - **Slack** (`packages/surface-slack`): Events API subscription for mentions and DMs;
   interactivity endpoint for approval buttons. Signature verification is the auth. Thread id
   becomes the conversation id. Replies are posted then edited as text streams in.
