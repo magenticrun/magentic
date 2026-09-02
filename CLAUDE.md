@@ -19,14 +19,14 @@ This codebase targets Effect 4 (currently `4.0.0-rc.112`, pinned exactly in the 
 - Errors: `Schema.TaggedError`. Use a `reason` union when one service has many failure modes. Never throw.
 - Validation and domain models: `Schema.Class`, never hand-rolled parsing. Runtime checks come from `Predicate`.
 - Functions returning effects: `Effect.fn("Service.method")` for traced boundaries, `Effect.fnUntraced` on hot paths. Do not wrap a bare `Effect.gen` in a function.
-- HTTP: the `HttpApi` definition lives in `@magentic/protocol`; handlers live in the gateway via `HttpApiBuilder.group`. Test handlers with `HttpApiTest.groups`, not a live server.
+- Wire protocol: the `RpcGroup` (`Api`) lives in `@magentic/protocol`; the gateway implements it with `Api.toLayer` and serves it with `RpcServer.layerHttp` at `/rpc`; surfaces call it through `RpcClient.make(Api)`. Test handlers with `RpcTest.makeClient(Api)`, not a live server. Only `/health` is a plain HTTP route.
 - Tests: `layer(SomeLayer)("name", (it) => it.effect(...))` from `@effect/vitest`, beside the code as `*.test.ts`.
 - Time comes from `DateTime` and `Clock`, config from `Config`, never `Date.now()` or `process.env` directly.
 
 ## Tests
 
 - New test files are opt-in. Creating a `*.test.ts`, or a test-only helper or fixture, needs the user's explicit request or approval first. A request to implement, fix, test, or verify something is not that approval; assume no, and ask only when a new file has a concrete benefit rather than as a routine step.
-- Verify with the existing suite and direct runtime checks: `bun run check`, `HttpApiTest` against handlers, a pty run for the TUI.
+- Verify with the existing suite and direct runtime checks: `bun run check`, `RpcTest.makeClient` against handlers, a pty run for the TUI.
 - When test changes are in scope, assert observable behaviour. Source strings, implementation shape, and the existence of a test are not behaviour.
 
 ## Conventions

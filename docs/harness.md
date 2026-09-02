@@ -5,7 +5,7 @@ people reach from Slack, a terminal, or Cursor. It covers the request pipeline, 
 model, package boundaries, storage, and delivery phases. Identity is in `identity.md`.
 
 Everything below is built on Effect 4 primitives that exist in the installed rc
-(`effect/unstable/ai`, `effect/unstable/httpapi`, `effect/unstable/workflow`,
+(`effect/unstable/ai`, `effect/unstable/rpc`, `effect/unstable/workflow`,
 `effect/unstable/cluster`, `@effect/sql-sqlite-bun`). Where a primitive is "verified in the
 checkout, not yet exercised in this repo" it is marked **verify**.
 
@@ -40,7 +40,7 @@ surface adapter
       → restore chat        ConversationStore.load → Chat.fromJson, or Chat.fromPrompt(system)
       → loop                LanguageModel.generateText / streamText with the wrapped toolkit
       → persist             ConversationStore.save(chat.exportJson), Memory writes
-  → deliver                 surface adapter renders RunEvents (SSE, Slack message edits, MCP progress)
+  → deliver                 surface adapter renders RunEvents (RPC stream, Slack message edits, MCP progress)
   → audit                   run.started, policy.decision, tool.called, approval.*, model.called, run.finished
 ```
 
@@ -64,21 +64,27 @@ Schemas are `Schema.Class` and live in protocol so surfaces and the CLI share th
   decidedBy, decidedAt.
 - `Decision` moves from `@magentic/policy` into protocol because the CLI shows it.
 
-HttpApi groups (all under `Api`):
+The wire protocol is Effect RPC (`effect/unstable/rpc`), not REST. `Api` in
+`@magentic/protocol` is one `RpcGroup`; the gateway implements it with `Api.toLayer` and
+serves it at `POST /rpc` as newline-delimited JSON (`RpcServer.layerHttp`), and every surface
+calls it through `RpcClient.make(Api)`. Decision: every surface we ship is TypeScript and
+imports the protocol package, a run is a stream and RPC streams natively where HTTP needs
+SSE, and nothing here wants a URL or a status code. What is lost is curl and OpenAPI; only
+`GET /health` stays a plain route for that. A non-TypeScript surface would get a generated
+client from the group, or a REST facade, if one ever appears.
 
-| Group           | Endpoints                                                                                                                                      |
-| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `system`        | `GET /health`, `GET /me`                                                                                                                       |
-| `agents`        | `GET /agents`, `GET /agents/:name`, `POST /agents/:name/runs` (returns `RunId`)                                                                |
-| `conversations` | `GET /conversations?agent=`, `GET /conversations/:id`, `GET /conversations/:id/transcript`, `DELETE /conversations/:id`; the caller's own only |
-| `runs`          | `GET /runs/:id`, `GET /runs/:id/events` (SSE), `POST /runs/:id/cancel`                                                                         |
-| `approvals`     | `GET /approvals` (pending for me), `POST /approvals/:id/decide`                                                                                |
-| `sessions`      | `POST /sessions/login`, `POST /sessions/logout`, `GET /tokens`, `POST /tokens`, `DELETE /tokens/:id`                                           |
-| `slack`         | `POST /slack/events`, `POST /slack/interactions` (signed, not bearer)                                                                          |
-| `mcp`           | `POST /mcp` (Streamable HTTP, bearer)                                                                                                          |
+| RPC                                                       | What it does                                                                           |
+| --------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `health`                                                  | Nothing; proves the gateway answers.                                                   |
+| `listAgents`, `getAgent`                                  | What a surface may know of an agent, with the model it would run on today.             |
+| `run` (stream)                                            | One input to an agent; `RunEvent`s until the run ends.                                 |
+| `listConversations`, `getConversation`, `transcript`      | The caller's own conversations; by agent or directory when asked.                      |
+| `rename`, `removeConversation`, `compact`                 | Title, delete, or fold one into a summary.                                             |
+| `listPlugins`                                             | Every plugin the gateway loaded and what it contributed.                               |
+| planned: runs, approvals, sessions and tokens, slack, mcp | Slack events and MCP stay HTTP routes beside `/rpc`, since those callers are not ours. |
 
-All groups except `system.health`, `sessions.login`, and `slack` sit behind the
-`Authentication` middleware (see identity.md).
+Everything except `health` and the login RPCs will sit behind the `Authentication` middleware
+(`RpcMiddleware`, see identity.md).
 
 ## Core services (`@magentic/core`)
 
@@ -232,7 +238,7 @@ because `SqlClient` abstracts the dialect for what we need.
 "<input>"` prints the events as plain lines (exists), `magentic agents` (exists), `magentic
 auth login|list|logout` (exists, inline `@clack/prompts` like opencode's, not the TUI),
   `magentic approvals` (list and decide), `magentic tokens`, `magentic config check`,
-  `magentic reload`. Talks only `@magentic/protocol` through `HttpApiClient`, with one
+  `magentic reload`. Talks only `@magentic/protocol` through `RpcClient`, with one
   exception: when nothing answers at a local gateway URL the CLI builds the gateway layer in
   its own process for the session, so a laptop needs no separate `bun run dev`. The chat is
   OpenTUI with the Solid renderer (see `research/opentui-solid.md`): Effect parses arguments
@@ -329,12 +335,11 @@ policy → audit → model provider → core services → handlers → Slack + M
 
 1. **Runner end to end, in memory.** `ConfigDirectory` with `agents/` and `policy.yaml`,
    ModelProvider (Anthropic), ToolRegistry with `read_file` and `shell`, Runner with
-   policy-wrapped toolkit, `POST /agents/:name/runs` plus SSE, CLI `run` and `config check`.
+   policy-wrapped toolkit, the `run` RPC stream, CLI `run` and `config check`.
    Local identity, memory audit. This is the "locally
    it's just a good agent" milestone.
    Done so far: `Runner` (tool loop over `Chat`, per-agent toolkit subset, in-memory
-   `ConversationStore`), `POST /agents/:name/runs` as `HttpApiSchema.StreamSse` of
-   `RunEvent`, `layerAuto` model selection (ChatGPT login, then OpenAI key, then Anthropic
+   `ConversationStore`), the `run` RPC as a stream of `RunEvent`, `layerAuto` model selection (ChatGPT login, then OpenAI key, then Anthropic
    key), the built-in `assistant` agent with `read_file` and `write_file`, admission through
    `Policy` and a `run.started` audit event, and the CLI chat and `run`. Then the plugin
    system from `plugins.md`: every tool, provider, and agent comes from a plugin hosted by

@@ -14,7 +14,7 @@ A [Bun](https://bun.sh) workspace built on [Effect](https://effect.website) 4.
 | ------------------------- | ------------------------------------------------------------------------------------ |
 | `apps/gateway`            | The server. Hosts agents and runs every request through identity, policy, and audit. |
 | `apps/cli`                | Terminal client (`magentic`).                                                        |
-| `packages/protocol`       | Wire schemas and the `HttpApi` definition shared by the gateway and every surface.   |
+| `packages/protocol`       | Wire schemas and the RPC definition shared by the gateway and every surface.         |
 | `packages/core`           | Agent runtime: agents, skills, tools, memory, cron.                                  |
 | `packages/policy`         | The one policy every request passes through.                                         |
 | `packages/identity`       | Resolves callers to principals via Slack, Okta, or a local fallback.                 |
@@ -26,7 +26,7 @@ A [Bun](https://bun.sh) workspace built on [Effect](https://effect.website) 4.
 
 ```sh
 bun install
-bun run dev          # gateway with reload on http://localhost:4321 (docs at /docs)
+bun run dev          # gateway with reload on http://localhost:4321
 bun run check        # typecheck + lint + tests
 ```
 

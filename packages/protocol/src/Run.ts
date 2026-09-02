@@ -94,7 +94,7 @@ export type Retrying = typeof Retrying.Type;
 export const RunFinished = Schema.TaggedStruct("RunFinished", { reason: Schema.String });
 export const RunFailed = Schema.TaggedStruct("RunFailed", { message: Schema.String });
 
-/** What a surface sees while an agent works. Streamed over SSE. */
+/** What a surface sees while an agent works. Streamed from the `run` RPC. */
 export const RunEvent = Schema.Union([
   RunStarted,
   TextDelta,
@@ -110,8 +110,7 @@ export const RunEvent = Schema.Union([
 ]);
 export type RunEvent = typeof RunEvent.Type;
 
-export class RunDenied extends Schema.TaggedError<RunDenied>()(
-  "RunDenied",
-  { agent: Schema.String, reason: Schema.String },
-  { httpApiStatus: 403 },
-) {}
+export class RunDenied extends Schema.TaggedError<RunDenied>()("RunDenied", {
+  agent: Schema.String,
+  reason: Schema.String,
+}) {}

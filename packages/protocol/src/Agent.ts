@@ -9,8 +9,6 @@ export class AgentInfo extends Schema.Class<AgentInfo>("magentic/protocol/AgentI
   model: Schema.optional(Schema.String),
 }) {}
 
-export class AgentNotFound extends Schema.TaggedError<AgentNotFound>()(
-  "AgentNotFound",
-  { name: Schema.String },
-  { httpApiStatus: 404 },
-) {}
+export class AgentNotFound extends Schema.TaggedError<AgentNotFound>()("AgentNotFound", {
+  name: Schema.String,
+}) {}

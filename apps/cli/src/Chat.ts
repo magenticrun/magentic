@@ -121,20 +121,18 @@ const startingConversation = Effect.fn("Cli.chat.startingConversation")(function
   if (Option.isSome(options.resume)) {
     const id = options.resume.value;
     return Option.some(
-      yield* client.conversations
-        .get({ params: { id } })
+      yield* client
+        .getConversation({ id })
         .pipe(Effect.mapError(() => new ResumeError({ message: `no conversation ${id}` }))),
     );
   }
   if (!options.continue) {
     return Option.none<Conversation>();
   }
-  const all = yield* client.conversations
-    .list({
-      query: {
-        agent: Option.getOrUndefined(options.agent),
-        directory: process.cwd(),
-      },
+  const all = yield* client
+    .listConversations({
+      agent: Option.getOrUndefined(options.agent),
+      directory: process.cwd(),
     })
     .pipe(
       Effect.mapError((error) => new ResumeError({ message: describeCause(Cause.fail(error)) })),
@@ -243,7 +241,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
 
   /** Show an earlier conversation and make it the one the next input continues. */
   const restore = Effect.fn("Cli.chat.restore")(function* (info: Conversation) {
-    const entries = yield* client.conversations.transcript({ params: { id: info.id } });
+    const entries = yield* client.transcript({ id: info.id });
     const latest = Option.fromNullishOr(info.usage);
     yield* Ref.set(conversation, Option.some(info.id));
     yield* Ref.set(usage, latest);
@@ -272,49 +270,45 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   const runOnce = Effect.fn("Cli.chat.runOnce")(function* ({ text, attachments }: Input) {
     const conversationId = Option.getOrUndefined(yield* Ref.get(conversation));
     const chosen = Option.getOrUndefined(yield* Ref.get(model));
-    const outcome = yield* client.agents
+    const outcome = yield* client
       .run({
-        params: { name: agent.name },
-        payload: {
-          input: text,
-          attachments: attachments.length > 0 ? attachments : undefined,
-          conversationId,
-          model: chosen,
-          directory: process.cwd(),
-        },
+        agent: agent.name,
+        input: text,
+        attachments: attachments.length > 0 ? attachments : undefined,
+        conversationId,
+        model: chosen,
+        directory: process.cwd(),
       })
       .pipe(
-        Effect.flatMap(
-          Stream.runForEach((event) =>
-            Effect.gen(function* () {
-              if (event._tag === "RunStarted") {
-                yield* Ref.set(conversation, Option.some(event.conversationId));
-              }
-              if (event._tag === "Compacted") {
-                // What the model holds is the summary now; the next call says how much that is.
-                yield* Ref.set(usage, Option.none());
-              }
-              if (event._tag === "TokenUsage") {
-                yield* Ref.update(usage, (previous) =>
-                  Option.some({
-                    latest: event,
-                    calls: Option.match(previous, { onNone: () => 1, onSome: (u) => u.calls + 1 }),
-                    totalInputTokens:
-                      Option.match(previous, {
-                        onNone: () => 0,
-                        onSome: (u) => u.totalInputTokens,
-                      }) + event.inputTokens,
-                    totalOutputTokens:
-                      Option.match(previous, {
-                        onNone: () => 0,
-                        onSome: (u) => u.totalOutputTokens,
-                      }) + event.outputTokens,
-                  }),
-                );
-              }
-              tui.apply(event);
-            }),
-          ),
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            if (event._tag === "RunStarted") {
+              yield* Ref.set(conversation, Option.some(event.conversationId));
+            }
+            if (event._tag === "Compacted") {
+              // What the model holds is the summary now; the next call says how much that is.
+              yield* Ref.set(usage, Option.none());
+            }
+            if (event._tag === "TokenUsage") {
+              yield* Ref.update(usage, (previous) =>
+                Option.some({
+                  latest: event,
+                  calls: Option.match(previous, { onNone: () => 1, onSome: (u) => u.calls + 1 }),
+                  totalInputTokens:
+                    Option.match(previous, {
+                      onNone: () => 0,
+                      onSome: (u) => u.totalInputTokens,
+                    }) + event.inputTokens,
+                  totalOutputTokens:
+                    Option.match(previous, {
+                      onNone: () => 0,
+                      onSome: (u) => u.totalOutputTokens,
+                    }) + event.outputTokens,
+                }),
+              );
+            }
+            tui.apply(event);
+          }),
         ),
         Effect.exit,
       );
@@ -342,14 +336,14 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
       if (Option.isNone(id)) {
         return Option.none<Conversation>();
       }
-      return yield* client.conversations.get({ params: { id: id.value } }).pipe(Effect.option);
+      return yield* client.getConversation({ id: id.value }).pipe(Effect.option);
     }),
-    conversations: client.conversations
-      .list({ query: { agent: agent.name, directory: process.cwd() } })
+    conversations: client
+      .listConversations({ agent: agent.name, directory: process.cwd() })
       .pipe(Effect.catchCause((cause) => gatewayFailed("resume")(cause))),
     resume: Effect.fn("Cli.chat.resume")(function* (id: string) {
-      const info = yield* client.conversations
-        .get({ params: { id } })
+      const info = yield* client
+        .getConversation({ id })
         .pipe(
           Effect.mapError(
             () => new CommandError({ command: "resume", message: `no conversation ${id}` }),
@@ -377,8 +371,8 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
           message: "Nothing to compact yet; this conversation has not started.",
         });
       }
-      const done = yield* client.conversations
-        .compact({ params: { id: id.value } })
+      const done = yield* client
+        .compact({ id: id.value })
         .pipe(Effect.catchCause((cause) => gatewayFailed("compact")(cause)));
       yield* Ref.set(usage, Option.none());
       tui.apply(done);
@@ -391,8 +385,8 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
           message: "Nothing to rename yet; this conversation has not started.",
         });
       }
-      const renamed = yield* client.conversations
-        .rename({ params: { id: id.value }, payload: { title } })
+      const renamed = yield* client
+        .rename({ id: id.value, title })
         .pipe(Effect.catchCause((cause) => gatewayFailed("rename")(cause)));
       tui.note(`Renamed to "${renamed.title}"`);
     }),
