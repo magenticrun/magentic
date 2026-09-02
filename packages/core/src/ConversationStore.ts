@@ -6,6 +6,9 @@ export class ConversationStoreError extends Schema.TaggedError<ConversationStore
   { id: Schema.String, message: Schema.String },
 ) {}
 
+/** Directories read at once when listing; more than this is bound by the disk anyway. */
+const LIST_CONCURRENCY = 32;
+
 /** Newest activity first. */
 const byRecency = (a: Conversation, b: Conversation) =>
   DateTime.toEpochMillis(b.updatedAt) - DateTime.toEpochMillis(a.updatedAt);
@@ -103,7 +106,8 @@ export class ConversationStore extends Context.Service<
             return [];
           }
           const entries = yield* fs.readDirectory(dir);
-          const found = yield* Effect.forEach(entries, get);
+          // Each conversation is two file reads; hundreds of them in turn is a slow /resume.
+          const found = yield* Effect.forEach(entries, get, { concurrency: LIST_CONCURRENCY });
           return found
             .flatMap((info) => (Option.isSome(info) ? [info.value] : []))
             .toSorted(byRecency);

@@ -21,7 +21,7 @@ import {
   Show,
   Switch,
 } from "solid-js";
-import { createStore, produce } from "solid-js/store";
+import { createStore } from "solid-js/store";
 import { Logo } from "./Logo.tsx";
 import { markdownStyleFor, subtleStyleFor } from "./Markdown.ts";
 import {
@@ -225,82 +225,62 @@ export const createChatTui = (options: {
     busy: false,
   });
 
-  const push = (line: Line) =>
-    setState(
-      produce((s) => {
-        s.lines = [...s.lines, line];
-      }),
-    );
+  // Lines change in place. A line replaced by a copy is a new one to the
+  // transcript's <For>, which drops its renderable and builds another; for
+  // the reply being streamed that would re-parse the whole text every token.
+  // Setting a field leaves the line as it is and redraws only what read it.
+  const push = (line: Line) => setState("lines", state.lines.length, line);
 
-  const appendAssistant = (text: string) =>
-    setState(
-      produce((s) => {
-        const last = s.lines.at(-1);
-        if (last !== undefined && last.kind === "assistant") {
-          s.lines = [...s.lines.slice(0, -1), { kind: "assistant", text: last.text + text }];
-        } else {
-          s.lines = [...s.lines, { kind: "assistant", text }];
-        }
-      }),
-    );
+  const appendAssistant = (text: string) => {
+    const last = state.lines.at(-1);
+    if (last !== undefined && last.kind === "assistant") {
+      setState("lines", state.lines.length - 1, { text: last.text + text });
+    } else {
+      push({ kind: "assistant", text });
+    }
+  };
 
   /** Attach a result to the newest unfinished call of that tool. */
-  const finishTool = (name: string, result: ToolResult) =>
-    setState(
-      produce((s) => {
-        for (let i = s.lines.length - 1; i >= 0; i--) {
-          const line = s.lines[i];
-          if (
-            line !== undefined &&
-            line.kind === "tool" &&
-            line.name === name &&
-            line.result === undefined
-          ) {
-            s.lines = [...s.lines.slice(0, i), { ...line, result }, ...s.lines.slice(i + 1)];
-            return;
-          }
-        }
-        s.lines = [...s.lines, { kind: "tool", name, params: "", result }];
-      }),
-    );
+  const finishTool = (name: string, result: ToolResult) => {
+    for (let i = state.lines.length - 1; i >= 0; i--) {
+      const line = state.lines[i];
+      if (
+        line !== undefined &&
+        line.kind === "tool" &&
+        line.name === name &&
+        line.result === undefined
+      ) {
+        setState("lines", i, { result });
+        return;
+      }
+    }
+    push({ kind: "tool", name, params: "", result });
+  };
 
   /** Grow the thought in progress, or begin one. */
-  const appendThinking = (text: string) =>
-    setState(
-      produce((s) => {
-        const last = s.lines.at(-1);
-        if (last !== undefined && last.kind === "thinking" && last.endedTick === undefined) {
-          s.lines = [...s.lines.slice(0, -1), { ...last, text: last.text + text }];
-        } else {
-          s.lines = [...s.lines, { kind: "thinking", text, startedTick: s.ticks, expanded: false }];
-        }
-      }),
-    );
+  const appendThinking = (text: string) => {
+    const last = state.lines.at(-1);
+    if (last !== undefined && last.kind === "thinking" && last.endedTick === undefined) {
+      setState("lines", state.lines.length - 1, { text: last.text + text });
+    } else {
+      push({ kind: "thinking", text, startedTick: state.ticks, expanded: false });
+    }
+  };
 
   /** The model moved on from thinking; fold the thought. */
-  const finishThinking = () =>
-    setState(
-      produce((s) => {
-        const last = s.lines.at(-1);
-        if (last !== undefined && last.kind === "thinking" && last.endedTick === undefined) {
-          s.lines = [...s.lines.slice(0, -1), { ...last, endedTick: s.ticks }];
-        }
-      }),
-    );
+  const finishThinking = () => {
+    const last = state.lines.at(-1);
+    if (last !== undefined && last.kind === "thinking" && last.endedTick === undefined) {
+      setState("lines", state.lines.length - 1, { endedTick: state.ticks });
+    }
+  };
 
-  const toggleThinking = (index: number) =>
-    setState(
-      produce((s) => {
-        const line = s.lines[index];
-        if (line !== undefined && line.kind === "thinking") {
-          s.lines = [
-            ...s.lines.slice(0, index),
-            { ...line, expanded: !line.expanded },
-            ...s.lines.slice(index + 1),
-          ];
-        }
-      }),
-    );
+  const toggleThinking = (index: number) => {
+    const line = state.lines[index];
+    if (line !== undefined && line.kind === "thinking") {
+      setState("lines", index, { expanded: !line.expanded });
+    }
+  };
 
   // Signals rather than store fields: a dialog carries a callback. A command
   // that asks again replaces the picker in place, and the dialog only closes

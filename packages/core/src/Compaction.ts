@@ -80,7 +80,7 @@ export const isOverflow = (held: number, limits: ModelLimits): boolean => {
 export const keepFor = (limits: ModelLimits): number =>
   Math.min(KEEP_TOKENS, Math.floor(usable(limits) / 4));
 
-const estimate = (text: string): number => Math.ceil(text.length / CHARS_PER_TOKEN);
+const estimate = (chars: number): number => Math.ceil(chars / CHARS_PER_TOKEN);
 
 const truncate = (text: string): string =>
   text.length <= TOOL_OUTPUT_MAX_CHARS
@@ -168,13 +168,19 @@ const summaryMessage = (summary: string): Prompt.UserMessage =>
  * tokens; everything before them is the head that gets summarised.
  */
 const split = (messages: ReadonlyArray<Prompt.Message>, keep: number) => {
+  // Each message is serialised once; a turn's size is its messages joined by "\n\n".
+  const lengths = messages.map((message) => serialise(message).length);
   let cut = messages.length;
   let total = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i]?.role !== "user") {
       continue;
     }
-    const size = estimate(messages.slice(i, cut).map(serialise).join("\n\n"));
+    let chars = 0;
+    for (let j = i; j < cut; j++) {
+      chars += (lengths[j] ?? 0) + (j > i ? 2 : 0);
+    }
+    const size = estimate(chars);
     if (total + size > keep) {
       break;
     }

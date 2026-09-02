@@ -32,6 +32,8 @@ export const GREP_LIMIT = 100;
 const GREP_FILE_LIMIT = 10_000;
 /** Directories a walk enters at most, so a symlink cycle ends. */
 const WALK_DIR_LIMIT = 5_000;
+/** Entries stat'd at once within one directory. */
+const STAT_CONCURRENCY = 32;
 /** A matching line is cut here so one minified file cannot fill the result. */
 const LINE_MAX_CHARS = 250;
 
@@ -252,6 +254,20 @@ export const fileToolHandlers = Effect.gen(function* () {
   });
 
   /**
+   * What each entry of a directory is, in the order given. The stats go out
+   * together: one at a time, a walk over thousands of files waits on each.
+   */
+  const statAll = (dir: string, names: ReadonlyArray<string>) =>
+    Effect.forEach(
+      names,
+      (name) => {
+        const full = path.join(dir, name);
+        return Effect.map(fs.stat(full).pipe(Effect.option), (info) => ({ name, full, info }));
+      },
+      { concurrency: STAT_CONCURRENCY },
+    );
+
+  /**
    * Every file under a directory, depth first with each directory's files
    * before its subdirectories, pruned of what nobody searches. Stops at
    * `limit` files and reports that it did.
@@ -271,10 +287,8 @@ export const fileToolHandlers = Effect.gen(function* () {
       visited += 1;
       const names = yield* fs.readDirectory(dir).pipe(Effect.orElseSucceed(() => []));
       const subdirectories: Array<string> = [];
-      for (const name of names.toSorted(byName)) {
-        const full = path.join(dir, name);
+      for (const { name, full, info } of yield* statAll(dir, names.toSorted(byName))) {
         // A broken link or a vanished entry is skipped, not a failed search.
-        const info = yield* fs.stat(full).pipe(Effect.option);
         if (Option.isNone(info)) {
           continue;
         }
@@ -375,8 +389,7 @@ export const fileToolHandlers = Effect.gen(function* () {
       const names = yield* fs.readDirectory(absolute).pipe(Effect.mapError(ioError(relative)));
       const sorted = names.toSorted(byName);
       const entries: Array<DirEntry> = [];
-      for (const name of sorted.slice(0, LIST_LIMIT)) {
-        const info = yield* fs.stat(path.join(absolute, name)).pipe(Effect.option);
+      for (const { name, info } of yield* statAll(absolute, sorted.slice(0, LIST_LIMIT))) {
         if (Option.isNone(info)) {
           entries.push({ name, type: "other", size: 0 });
           continue;
