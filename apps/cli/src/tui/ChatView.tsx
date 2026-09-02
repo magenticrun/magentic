@@ -169,6 +169,16 @@ export interface CommandInfo {
   readonly description: string;
 }
 
+/**
+ * A message sent while a run was in flight, held until the run ends, the way
+ * Claude Code queues them. The composer's draft as typed, placeholders and
+ * all, so pulling it back into the composer restores it exactly.
+ */
+interface Queued {
+  readonly draft: string;
+  readonly folds: ReadonlyArray<Folded>;
+}
+
 /** A picker waiting for its answer. */
 interface Dialog {
   readonly picker: Picker;
@@ -196,6 +206,7 @@ export interface ChatTui {
   /** Note that the person stopped the run in flight. */
   interrupted(): void;
   setStatus(status: string): void;
+  /** Whether a run is in flight. Messages sent while it is wait, and go out when it ends. */
   setBusy(busy: boolean): void;
 }
 
@@ -211,7 +222,7 @@ export const createChatTui = (options: {
   readonly commands: ReadonlyArray<CommandInfo>;
   /** The message with pasted text unfolded, and the images pasted into it. */
   readonly onSubmit: (text: string, attachments: ReadonlyArray<Attachment>) => void;
-  /** Esc, or ctrl+c, while a run is in flight. */
+  /** Esc, or ctrl+c, while a run is in flight. Anything queued is back in the composer. */
   readonly onInterrupt: () => void;
   readonly onExit: () => void;
 }): ChatTui => {
@@ -300,6 +311,10 @@ export const createChatTui = (options: {
     });
   };
   const dismiss = () => setDialog(undefined);
+
+  // Set by the view, which owns the composer and the queue: what was queued
+  // during a run is sent the moment the run ends.
+  let flushQueue = () => {};
 
   const apply = (event: RunEvent) =>
     batch(() => {
@@ -444,8 +459,8 @@ export const createChatTui = (options: {
           setSelected((n) => (n + 1) % count);
         } else if (key.name === "tab" && chosen !== undefined) {
           complete(chosen);
-        } else if (isEnter(key.name) && chosen !== undefined && !state.busy) {
-          options.onSubmit(`/${chosen.name}`, []);
+        } else if (isEnter(key.name) && chosen !== undefined) {
+          send(`/${chosen.name}`, []);
           clear();
         } else if (key.name === "escape") {
           setDismissed(true);
@@ -458,8 +473,21 @@ export const createChatTui = (options: {
       }
       if (key.name === "escape") {
         if (state.busy && dialog() === undefined) {
-          options.onInterrupt();
+          interrupt();
         }
+        return;
+      }
+      // The up arrow on an empty composer takes the queue back for editing.
+      if (
+        key.name === "up" &&
+        !key.ctrl &&
+        !key.meta &&
+        dialog() === undefined &&
+        queue().length > 0 &&
+        (composer?.plainText ?? "").length === 0
+      ) {
+        key.preventDefault();
+        unqueue();
         return;
       }
       if (key.ctrl && key.name === "v" && dialog() === undefined) {
@@ -474,7 +502,7 @@ export const createChatTui = (options: {
           return;
         }
         if (state.busy) {
-          options.onInterrupt();
+          interrupt();
         }
         setArmed(true);
         clearTimeout(disarm);
@@ -547,15 +575,89 @@ export const createChatTui = (options: {
       setRows(1);
       setDraft("");
     };
+    // Messages sent while a run is in flight wait here, listed over the
+    // composer, and go out together when the run ends.
+    const [queue, setQueue] = createSignal<ReadonlyArray<Queued>>([]);
+    /** Every fold in play, queued ones first: placeholders are numbered across all of them. */
+    const allFolds = () => [...queue().flatMap((q) => q.folds), ...folds];
+    /** Send now, or queue for after the run. */
+    const send = (draft: string, drafted: ReadonlyArray<Folded>) => {
+      if (state.busy) {
+        setQueue((held) => [...held, { draft, folds: drafted }]);
+      } else {
+        options.onSubmit(unfold(draft, drafted), attached(draft, drafted));
+      }
+    };
+    /**
+     * What was queued, as one message; consecutive messages join with a line
+     * break, the way Claude Code sends them, and a command goes on its own.
+     */
+    const flush = () => {
+      const held = queue();
+      if (held.length === 0) {
+        return;
+      }
+      setQueue([]);
+      let run: Array<Queued> = [];
+      const sendBatch = () => {
+        if (run.length === 0) {
+          return;
+        }
+        const text = run.map((q) => q.draft).join("\n");
+        const batched = run.flatMap((q) => q.folds);
+        options.onSubmit(unfold(text, batched), attached(text, batched));
+        run = [];
+      };
+      for (const item of held) {
+        if (item.draft.startsWith("/")) {
+          sendBatch();
+          options.onSubmit(item.draft, []);
+        } else {
+          run.push(item);
+        }
+      }
+      sendBatch();
+    };
+    flushQueue = flush;
+    /** The queue back in the composer, ahead of whatever is being typed, placeholders restored. */
+    const unqueue = () => {
+      const held = queue();
+      if (composer === undefined || held.length === 0) {
+        return;
+      }
+      setQueue([]);
+      const current = composer.plainText;
+      const drafts = held.map((q) => q.draft);
+      const text = (current.length === 0 ? drafts : [...drafts, current]).join("\n");
+      const restored = [...held.flatMap((q) => q.folds), ...folds];
+      composer.extmarks.clear();
+      composer.setText(text);
+      const styleId = composerStyleFor(palette()).getStyleId(FOLD_STYLE);
+      for (const entry of restored) {
+        const start = text.indexOf(entry.placeholder);
+        if (start >= 0) {
+          const range = { start, end: start + entry.placeholder.length, virtual: true };
+          composer.extmarks.create(styleId === null ? range : { ...range, styleId });
+        }
+      }
+      folds = restored;
+      composer.cursorOffset = text.length;
+      onDraft();
+    };
+    /** Stop the run; what was queued for after it comes back to be edited or sent again. */
+    const interrupt = () => {
+      unqueue();
+      options.onInterrupt();
+    };
     const submit = () => {
       if (composer === undefined) {
         return;
       }
       const draft = composer.plainText.trim();
-      if (draft.length === 0 || state.busy || dialog() !== undefined) {
+      if (draft.length === 0 || dialog() !== undefined) {
         return;
       }
-      options.onSubmit(unfold(draft, folds), attached(draft, folds));
+      send(draft, folds);
       clear();
     };
 
@@ -578,11 +680,11 @@ export const createChatTui = (options: {
         composer?.insertText(text);
         return;
       }
-      const index = folds.filter((f) => f.kind === "text").length + 1;
+      const index = allFolds().filter((f) => f.kind === "text").length + 1;
       fold({ kind: "text", placeholder: textPlaceholder(index, text), text });
     };
     const attach = (attachment: Attachment) => {
-      const index = folds.filter((f) => f.kind === "file").length + 1;
+      const index = allFolds().filter((f) => f.kind === "file").length + 1;
       fold({ kind: "file", placeholder: imagePlaceholder(index), attachment });
     };
     /** Pasted text is an image when it is the path of one; a dropped file pastes its path. */
@@ -841,6 +943,18 @@ export const createChatTui = (options: {
             <text fg={palette().muted}>(esc to interrupt · {elapsed()}s)</text>
           </box>
         </Show>
+        <Show when={queue().length > 0}>
+          <box flexDirection="column" flexShrink={0} paddingLeft={1} paddingRight={1}>
+            <For each={queue()}>
+              {(item) => (
+                <text fg={palette().muted} wrapMode="none" truncate>
+                  {"> "}
+                  {clip(item.draft)}
+                </text>
+              )}
+            </For>
+          </box>
+        </Show>
         <Show when={popover()}>
           {(listed) => (
             <box flexDirection="column" flexShrink={0} paddingLeft={1} paddingRight={1}>
@@ -892,7 +1006,7 @@ export const createChatTui = (options: {
             focusedTextColor={palette().text}
             cursorColor={palette().text}
             placeholderColor={palette().placeholder}
-            placeholder={state.busy ? "Waiting for the agent…" : "Message the agent"}
+            placeholder={state.busy ? "Queue a message for after this turn" : "Message the agent"}
             onContentChange={onDraft}
             onSubmit={submit}
           />
@@ -926,7 +1040,7 @@ export const createChatTui = (options: {
               when={armed() ? "ctrl+c again to quit" : flash()}
               fallback={
                 <text fg={palette().muted} wrapMode="none" truncate>
-                  shift+enter newline
+                  {queue().length > 0 ? "↑ to edit queued messages" : "shift+enter newline"}
                 </text>
               }
             >
@@ -956,6 +1070,11 @@ export const createChatTui = (options: {
     reset: () => setState({ lines: [], contextTokens: 0, status: "" }),
     interrupted: () => push({ kind: "error", text: "Interrupted" }),
     setStatus: (status) => setState("status", status),
-    setBusy: (busy) => setState("busy", busy),
+    setBusy: (busy) => {
+      setState("busy", busy);
+      if (!busy) {
+        flushQueue();
+      }
+    },
   };
 };
