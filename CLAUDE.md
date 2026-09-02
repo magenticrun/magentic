@@ -23,6 +23,12 @@ This codebase targets Effect 4 (currently `4.0.0-rc.112`, pinned exactly in the 
 - Tests: `layer(SomeLayer)("name", (it) => it.effect(...))` from `@effect/vitest`, beside the code as `*.test.ts`.
 - Time comes from `DateTime` and `Clock`, config from `Config`, never `Date.now()` or `process.env` directly.
 
+## Tests
+
+- New test files are opt-in. Creating a `*.test.ts`, or a test-only helper or fixture, needs the user's explicit request or approval first. A request to implement, fix, test, or verify something is not that approval; assume no, and ask only when a new file has a concrete benefit rather than as a routine step.
+- Verify with the existing suite and direct runtime checks: `bun run check`, `HttpApiTest` against handlers, a pty run for the TUI.
+- When test changes are in scope, assert observable behaviour. Source strings, implementation shape, and the existence of a test are not behaviour.
+
 ## Conventions
 
 - One `tsconfig.base.json`; packages only extend it. Strict mode stays on.

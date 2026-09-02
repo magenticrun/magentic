@@ -10,7 +10,13 @@
     ],
     "catalog": {
       "effect": "4.0.0-rc.112",
-      "@effect/platform-bun": "4.0.0-rc.112"
+      "@effect/platform-bun": "4.0.0-rc.112",
+      "@effect/ai-openai": "4.0.0-rc.112",
+      "@effect/ai-anthropic": "4.0.0-rc.112",
+      "@clack/prompts": "1.7.0",
+      "@opentui/core": "0.5.10",
+      "@opentui/solid": "0.5.10",
+      "solid-js": "1.9.12"
     }
   },
   "type": "module",
@@ -18,7 +24,7 @@
     "dev": "bun run --filter @magentic/gateway dev",
     "test": "bun --bun vitest run",
     "test:watch": "bun --bun vitest",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p apps/cli/tsconfig.json",
     "lint": "oxlint && oxfmt --check",
     "format": "oxlint --fix; oxfmt",
     "check": "bun run typecheck && bun run lint && bun run test"
@@ -26,12 +32,15 @@
   "devDependencies": {
     "@effect/language-service": "^0.87.2",
     "@effect/vitest": "4.0.0-rc.112",
+    "@magentic/plugin": "workspace:*",
+    "@magentic/protocol": "workspace:*",
     "@oxlint/plugins": "1.81.0",
     "@types/bun": "^1.4.0",
     "effect": "catalog:",
     "oxfmt": "^0.66.0",
     "oxlint": "^1.81.0",
     "typescript": "^5.9.0",
+    "vite-plugin-solid": "2.11.14",
     "vitest": "^4.1.11"
   }
 }

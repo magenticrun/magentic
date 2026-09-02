@@ -1,4 +1,11 @@
 {
   "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "preserve",
+    "jsxImportSource": "@opentui/solid",
+    // Solid's JSX.Element union names DOM types; without the DOM lib it collapses to `any`
+    // and `<Show>` callback children lose their inferred parameter types.
+    "lib": ["ESNext", "DOM"]
+  },
   "include": ["src"]
 }

@@ -1,4 +1,7 @@
 export * from "./Agent.ts";
 export * from "./AgentRequest.ts";
 export * from "./Api.ts";
+export * from "./Capability.ts";
+export * from "./Plugin.ts";
 export * from "./Principal.ts";
+export * from "./Run.ts";
