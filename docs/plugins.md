@@ -242,8 +242,11 @@ agent's own `model:` for that run. Against a remote gateway the providers a comm
 the ones signed in on the CLI's machine, the same limit `auth login` has today.
 
 `/model` is the first: favourites (kept in `favourites.json` under `paths.data`) at the top
-with the provider at the right, providers below, a provider's models on selection, `f` to
-favourite or unfavourite, and `/model provider/model` to set it outright. `/context` reads
+with the provider at the right, the signed-in providers below (one nobody signed in to has
+nothing to offer, so it is not listed), a provider's models on selection, `f` to favourite
+or unfavourite, and `/model provider/model` to set it outright. The CLI remembers the choice
+in `chat.json` under its data directory and starts the next chat on it while the machine can
+still run it; a resumed conversation's model does not overwrite it. `/context` reads
 `session.usage`, folded by the surface from the runner's `TokenUsage` events, and prints
 what the latest model call held (input with the cache split, output with the reasoning
 split, the share of the model's window), where the runner estimates the context goes

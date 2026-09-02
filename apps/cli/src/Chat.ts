@@ -1,4 +1,5 @@
 import { CommandRegistry, ModelRegistry } from "@magentic/core";
+import { dataDir } from "@magentic/gateway";
 import {
   CommandError,
   type ChatSession,
@@ -12,7 +13,9 @@ import {
   DateTime,
   Deferred,
   Effect,
+  FileSystem,
   Option,
+  Path,
   Predicate,
   Queue,
   Ref,
@@ -55,6 +58,38 @@ const parseCommand = (input: string): { readonly name: string; readonly args: st
     ? { name: body, args: "" }
     : { name: body.slice(0, at), args: body.slice(at).trim() };
 };
+
+/** What the person last chose with `/model`, kept under the data directory for the next chat. */
+const ChatPreferences = Schema.fromJsonString(
+  Schema.Struct({ version: Schema.Literal(1), model: Schema.optional(Schema.String) }),
+);
+
+const preferencesFile = Effect.gen(function* () {
+  const path = yield* Path.Path;
+  return path.join(yield* dataDir, "chat.json");
+});
+
+/** The remembered model, when the file is there and readable; nothing here is worth failing for. */
+const loadLastModel = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const file = yield* preferencesFile;
+  if (!(yield* fs.exists(file))) {
+    return Option.none<string>();
+  }
+  const stored = yield* Schema.decodeEffect(ChatPreferences)(yield* fs.readFileString(file));
+  return Option.fromNullishOr(stored.model);
+}).pipe(Effect.orElseSucceed(() => Option.none<string>()));
+
+const saveLastModel = Effect.fn("Cli.chat.saveLastModel")(function* (ref: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const file = yield* preferencesFile;
+  yield* fs.makeDirectory(path.dirname(file), { recursive: true });
+  yield* fs.writeFileString(
+    file,
+    yield* Schema.encodeEffect(ChatPreferences)({ version: 1, model: ref }),
+  );
+});
 
 /**
  * How many tokens a model can hold, when the providers on this machine know
@@ -140,8 +175,17 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   // The run in flight, so Esc can stop it without ending the session.
   let stop: Deferred.Deferred<void> | undefined;
 
-  // What runs use; starts as what the gateway said the agent runs on.
-  const model = yield* Ref.make(Option.fromNullishOr(agent.model));
+  // What runs use: the model last chosen with /model when this machine can
+  // still run it, otherwise what the gateway said the agent runs on.
+  const remembered = yield* loadLastModel.pipe(
+    Effect.flatMap((ref) =>
+      Option.isSome(ref)
+        ? models.resolve(ref).pipe(Effect.option, Effect.map(Option.map((r) => r.ref)))
+        : Effect.succeed(Option.none<string>()),
+    ),
+  );
+  const initialModel = Option.orElse(remembered, () => Option.fromNullishOr(agent.model));
+  const model = yield* Ref.make(initialModel);
   // Folded from the usage events, for /context.
   const usage = yield* Ref.make(Option.none<SessionUsage>());
   // The conversation the next input continues; the gateway names it on the first run.
@@ -150,8 +194,10 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   const tui = createChatTui({
     agent: agent.name,
     gateway: embedded ? `${options.baseUrl} (started here)` : options.baseUrl,
-    model: Option.fromNullishOr(agent.model),
-    contextWindow: Predicate.isString(agent.model) ? yield* contextWindow(models, agent.model) : 0,
+    model: initialModel,
+    contextWindow: Option.isSome(initialModel)
+      ? yield* contextWindow(models, initialModel.value)
+      : 0,
     commands: (yield* commands.list).map(({ name, description }) => ({ name, description })),
     onSubmit: (text) => {
       Queue.offerUnsafe(inputs, text);
@@ -168,6 +214,16 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   const setModel = Effect.fn("Cli.chat.setModel")(function* (ref: string) {
     yield* Ref.set(model, Option.some(ref));
     tui.setModel(ref, yield* contextWindow(models, ref));
+  });
+  // Commands run without the platform in their context; hand it over for the file write.
+  const platform = yield* Effect.context<FileSystem.FileSystem | Path.Path>();
+  /** A choice made here is the one the next chat starts on; a resumed conversation's is not. */
+  const chooseModel = Effect.fn("Cli.chat.chooseModel")(function* (ref: string) {
+    yield* setModel(ref);
+    yield* saveLastModel(ref).pipe(
+      Effect.provideContext(platform),
+      Effect.catchCause((cause) => Effect.sync(() => tui.error(describeCause(cause)))),
+    );
   });
 
   /** Show an earlier conversation and make it the one the next input continues. */
@@ -254,7 +310,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   const session: ChatSession = {
     agent: agent.name,
     model: Ref.get(model),
-    setModel,
+    setModel: chooseModel,
     usage: Ref.get(usage),
     conversation: Effect.gen(function* () {
       const id = yield* Ref.get(conversation);

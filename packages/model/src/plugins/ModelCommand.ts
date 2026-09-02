@@ -31,7 +31,7 @@ const failed = (message: string) => new CommandError({ command: NAME, message })
 
 /**
  * `/model`: pick the model the chat runs on. Favourites come first, then the
- * providers; choosing a provider lists its models. `f` on a model row keeps
+ * signed-in providers; choosing a provider lists its models. `f` on a model row keeps
  * it in the favourites file for next time. `/model provider/model` sets it
  * outright.
  */
@@ -84,7 +84,8 @@ export const modelCommandPlugin = define<FileSystem.FileSystem | Path.Path>({
     };
 
     const run = Effect.fn("model.run")(function* ({ ui, session, args }: CommandInput) {
-      const all = yield* views();
+      // Only what can run: a provider nobody signed in to has nothing to offer here.
+      const all = (yield* views()).filter((v) => v.signedIn);
       const favourites = yield* Ref.make(yield* loadFavourites);
 
       const choose = Effect.fn("model.choose")(function* (ref: string) {
@@ -92,11 +93,15 @@ export const modelCommandPlugin = define<FileSystem.FileSystem | Path.Path>({
         yield* ui.notify(`Model set to ${ref}`);
       });
 
+      if (all.length === 0) {
+        return yield* ui.notify("No provider is signed in; run `magentic auth login` first.");
+      }
+
       if (args.length > 0) {
         const found = lookup(all, args);
         if (Option.isNone(found)) {
           const known = all.map((v) => v.provider.id).join(", ");
-          return yield* failed(`no model "${args}"; providers: ${known}`);
+          return yield* failed(`no model "${args}"; signed-in providers: ${known}`);
         }
         return yield* choose(formatModelRef(found.value.view.provider.id, found.value.model.id));
       }
@@ -135,7 +140,6 @@ export const modelCommandPlugin = define<FileSystem.FileSystem | Path.Path>({
         const providers: ReadonlyArray<PickItem> = all.map((v) => ({
           id: `provider:${v.provider.id}`,
           label: v.provider.name,
-          detail: v.signedIn ? "signed in" : "not signed in",
         }));
         const picker: Picker = {
           title: "Select model",
