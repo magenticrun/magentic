@@ -222,6 +222,24 @@ layer(TestLayer)("gateway api", (it) => {
         .pipe(Effect.flatMap(Stream.runCollect));
       const continued = yield* client.conversations.get({ params: { id } });
       assert.strictEqual(continued.messages, 7);
+
+      // Compacting folds the context into a summary; the fake writes back the request's last text.
+      const compacted = yield* client.conversations.compact({ params: { id } });
+      assert.strictEqual(compacted.messagesBefore, 7);
+      assert.strictEqual(compacted.messagesAfter, 2);
+      assert.match(compacted.summary, /^echo: /);
+      const folded = yield* client.conversations.transcript({ params: { id } });
+      assert.deepStrictEqual(
+        folded.map((e) => e._tag),
+        ["User", "Tool", "Assistant", "User", "Assistant", "Summary"],
+      );
+      // Nothing new since the summary, so a second compaction has nothing to fold.
+      const nothing = yield* client.conversations.compact({ params: { id } }).pipe(Effect.flip);
+      assert.strictEqual(nothing._tag, "CompactionFailed");
+      const missing = yield* client.conversations
+        .compact({ params: { id: "nope" } })
+        .pipe(Effect.flip);
+      assert.strictEqual(missing._tag, "ConversationNotFound");
       assert.strictEqual(again.at(-1)?._tag, "RunFinished");
 
       yield* client.conversations.remove({ params: { id } });

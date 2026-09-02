@@ -79,6 +79,8 @@ export interface ChatSession {
   resume(id: string): Effect.Effect<void, CommandError>;
   /** Clear the transcript; the next input starts a conversation. */
   readonly startNew: Effect.Effect<void>;
+  /** Fold the conversation so far into a summary the model continues from. */
+  readonly compact: Effect.Effect<void, CommandError>;
 }
 
 export interface CommandInput {

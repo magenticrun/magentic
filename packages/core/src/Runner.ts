@@ -1,6 +1,7 @@
 import type { AgentDefinition } from "@magentic/plugin";
 import {
   type Attachment,
+  type Compacted,
   Conversation,
   type ConversationUsage,
   type Principal,
@@ -22,6 +23,15 @@ import {
   Stream,
 } from "effect";
 import { Chat, LanguageModel, Prompt, type Response, type Tool } from "effect/unstable/ai";
+import {
+  compactContext,
+  CompactionError,
+  isOverflow,
+  join,
+  keepFor,
+  type ModelLimits,
+  partition,
+} from "./Compaction.ts";
 import { estimateContext } from "./ContextEstimate.ts";
 import { ConversationStore } from "./ConversationStore.ts";
 import { describeCause } from "./Errors.ts";
@@ -41,6 +51,13 @@ export interface RunOptions {
   readonly model: Option.Option<string>;
   /** Where the surface is working; kept on the conversation from its first run. */
   readonly directory: Option.Option<string>;
+}
+
+export interface CompactOptions {
+  readonly conversationId: string;
+  readonly agent: AgentDefinition;
+  /** The `provider/model` to write the summary with; the agent's own otherwise. */
+  readonly model: Option.Option<string>;
 }
 
 /** The input as the model sees it: bare text, or one user message carrying the files too. */
@@ -126,15 +143,29 @@ const foldUsage = (
 });
 
 /**
+ * A conversation open for a run: the chat holds what the model sees, the
+ * archive what earlier compactions folded away, kept so the stored history
+ * still shows everything.
+ */
+interface Opened {
+  readonly chat: Chat.Service;
+  readonly archived: Ref.Ref<ReadonlyArray<Prompt.Message>>;
+}
+
+/**
  * Turns one input into a stream of events: the model speaks, calls tools,
  * sees their results, and speaks again until it stops calling tools. History
  * is restored from and saved to the ConversationStore around every run, with
- * what the conversation is: its title, model, size, and usage.
+ * what the conversation is: its title, model, size, and usage. When the
+ * context nears the model's window the conversation is compacted, as
+ * `compact` does on request.
  */
 export class Runner extends Context.Service<
   Runner,
   {
     run(options: RunOptions): Stream.Stream<RunEvent>;
+    /** Fold the conversation so far into a summary the next run continues from. */
+    compact(options: CompactOptions): Effect.Effect<Compacted, CompactionError>;
   }
 >()("magentic/core/Runner") {
   /** Runs agents with the tools the registry grants each of them. */
@@ -154,11 +185,62 @@ export class Runner extends Context.Service<
         if (Option.isSome(saved)) {
           const restored = yield* Effect.option(Chat.fromJson(saved.value));
           if (Option.isSome(restored)) {
-            yield* Ref.update(restored.value.history, forModel);
-            return restored.value;
+            const chat = restored.value;
+            const { archived, context } = partition(forModel(yield* Ref.get(chat.history)));
+            yield* Ref.set(chat.history, context);
+            const opened: Opened = { chat, archived: yield* Ref.make(archived) };
+            return opened;
           }
         }
-        return yield* Chat.fromPrompt(Prompt.empty.pipe(Prompt.setSystem(agent.prompt)));
+        const chat = yield* Chat.fromPrompt(Prompt.empty.pipe(Prompt.setSystem(agent.prompt)));
+        const opened: Opened = {
+          chat,
+          archived: yield* Ref.make<ReadonlyArray<Prompt.Message>>([]),
+        };
+        return opened;
+      });
+
+      /** The whole history, as the store keeps it. */
+      const exportHistory = Effect.fn("Runner.exportHistory")(function* (opened: Opened) {
+        const context = yield* Ref.get(opened.chat.history);
+        yield* Ref.set(
+          opened.chat.history,
+          forDisk(join(yield* Ref.get(opened.archived), context)),
+        );
+        return yield* opened.chat.exportJson;
+      });
+
+      /** The model's token limits from its catalog entry; zeros when unknown. */
+      const limitsOf = Effect.fn("Runner.limitsOf")(function* (choice: Option.Option<string>) {
+        const resolved = yield* models.resolve(choice).pipe(Effect.option);
+        if (Option.isNone(resolved)) {
+          const none: ModelLimits = { context: 0, output: 0 };
+          return none;
+        }
+        const known = yield* resolved.value.provider.models;
+        const info = known.find((m) => m.id === resolved.value.model);
+        const limits: ModelLimits = { context: info?.context ?? 0, output: info?.output ?? 0 };
+        return limits;
+      });
+
+      /** Compact what the model sees, moving what the summary replaced to the archive. */
+      const compactOpened = Effect.fn("Runner.compactOpened")(function* (
+        opened: Opened,
+        model: LanguageModel.Service,
+        keep: number,
+      ) {
+        const done = yield* compactContext(yield* Ref.get(opened.chat.history), keep).pipe(
+          Effect.provideService(LanguageModel.LanguageModel, model),
+        );
+        yield* Ref.set(opened.chat.history, done.context);
+        yield* Ref.update(opened.archived, (archived) => [...archived, ...done.dropped]);
+        const event: Compacted = {
+          _tag: "Compacted",
+          summary: done.summary,
+          messagesBefore: done.messagesBefore,
+          messagesAfter: done.messagesAfter,
+        };
+        return event;
       });
 
       const toEvents = (
@@ -209,7 +291,8 @@ export class Runner extends Context.Service<
               Effect.andThen(Queue.offer(queue, event), bus.publish({ runId, agent, event }));
             yield* emit({ _tag: "RunStarted", runId, conversationId });
 
-            const chat = yield* openChat(conversationId, options.agent);
+            const opened = yield* openChat(conversationId, options.agent);
+            const { chat } = opened;
             const tools = yield* registry.forAgent(options.agent, {
               runId,
               principal: options.principal,
@@ -226,6 +309,19 @@ export class Runner extends Context.Service<
             const loop = Effect.gen(function* () {
               // Resolved per run so a provider signed in after boot is picked up.
               const model = yield* models.languageModel(choice);
+              const limits = yield* limitsOf(choice);
+              // A summary that cannot be written is logged, not a failed run.
+              const compactIfFull = (held: number) =>
+                isOverflow(held, limits)
+                  ? Effect.gen(function* () {
+                      yield* emit({ _tag: "CompactionStarted" });
+                      yield* emit(yield* compactOpened(opened, model, keepFor(limits)));
+                    }).pipe(
+                      Effect.catchTag("CompactionError", (error) =>
+                        Effect.logWarning(`conversation ${conversationId} not compacted`, error),
+                      ),
+                    )
+                  : Effect.void;
               let prompt = promptOf(options.input, options.attachments);
               while (true) {
                 const calledTool = yield* Ref.make(false);
@@ -264,6 +360,7 @@ export class Runner extends Context.Service<
                     Option.some(foldUsage(previous, event)),
                   );
                   yield* emit(event);
+                  yield* compactIfFull(event.inputTokens + event.outputTokens);
                 }
                 if (!(yield* Ref.get(calledTool))) {
                   return;
@@ -277,7 +374,7 @@ export class Runner extends Context.Service<
             // Keep whatever history we got, even after a failure, so the person can retry.
             yield* Effect.gen(function* () {
               const now = yield* DateTime.now;
-              const history = yield* Ref.get(chat.history);
+              const context = yield* Ref.get(chat.history);
               const resolved = yield* models.resolve(choice).pipe(Effect.option);
               const model = Option.map(resolved, (r) => r.ref);
               const usage = yield* Ref.get(usageSoFar);
@@ -299,11 +396,10 @@ export class Runner extends Context.Service<
                   onSome: (before) => before.createdAt,
                 }),
                 updatedAt: now,
-                messages: history.content.length,
+                messages: context.content.length,
                 usage: Option.getOrUndefined(usage),
               });
-              yield* Ref.update(chat.history, forDisk);
-              yield* conversations.save(info, yield* chat.exportJson);
+              yield* conversations.save(info, yield* exportHistory(opened));
             }).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning(`conversation ${conversationId} not saved`, cause),
@@ -318,7 +414,42 @@ export class Runner extends Context.Service<
           }),
         );
 
-      return Runner.of({ run });
+      const compact = Effect.fn("Runner.compact")(function* (options: CompactOptions) {
+        const existing = yield* conversations.get(options.conversationId);
+        if (Option.isNone(existing)) {
+          return yield* new CompactionError({
+            reason: "nothing",
+            message: `no conversation ${options.conversationId}`,
+          });
+        }
+        const choice = Option.orElse(options.model, () =>
+          Option.fromNullishOr(options.agent.model),
+        );
+        const model = yield* models
+          .languageModel(choice)
+          .pipe(
+            Effect.mapError(
+              (error) => new CompactionError({ reason: "model", message: error.message }),
+            ),
+          );
+        const opened = yield* openChat(options.conversationId, options.agent);
+        // Everything goes into the summary: the person asked for a fresh start.
+        const event = yield* compactOpened(opened, model, 0);
+        const now = yield* DateTime.now;
+        const info = new Conversation({
+          ...existing.value,
+          updatedAt: now,
+          messages: event.messagesAfter,
+        });
+        yield* Effect.flatMap(exportHistory(opened), (json) => conversations.save(info, json)).pipe(
+          Effect.mapError(
+            (error) => new CompactionError({ reason: "store", message: error.message }),
+          ),
+        );
+        return event;
+      });
+
+      return Runner.of({ run, compact });
     }),
   );
 }

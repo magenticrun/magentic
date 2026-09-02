@@ -1,6 +1,7 @@
 import type { TranscriptEntry } from "@magentic/protocol";
 import { Effect, Ref, type Schema } from "effect";
 import { Chat, type Prompt } from "effect/unstable/ai";
+import { isSummary, summaryOf } from "./Compaction.ts";
 
 /** Tool parts carry `unknown`; on the wire they were JSON, so that is what they still are. */
 // SAFETY: tool parameters and results in a history were decoded from, and encode to, JSON.
@@ -8,8 +9,8 @@ const asJson = (value: Prompt.ToolCallPart["params"]) => value as Schema.Json;
 
 /**
  * What was said, in order, from a chat history: each user text, each
- * assistant text, and each tool call with the result it got. Reasoning stays
- * out; the person never saw it as text.
+ * assistant text, each tool call with the result it got, and each summary
+ * a compaction left. Reasoning stays out; the person never saw it as text.
  */
 export const transcriptOf = (history: Prompt.Prompt): ReadonlyArray<TranscriptEntry> => {
   const entries: Array<TranscriptEntry> = [];
@@ -25,6 +26,10 @@ export const transcriptOf = (history: Prompt.Prompt): ReadonlyArray<TranscriptEn
   for (const message of history.content) {
     switch (message.role) {
       case "user": {
+        if (isSummary(message)) {
+          entries.push({ _tag: "Summary", text: summaryOf(message) });
+          break;
+        }
         const text = message.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
         if (text.length > 0) {
           entries.push({ _tag: "User", text: text.join("") });

@@ -14,6 +14,7 @@ import {
   AgentInfo,
   AgentRequest,
   Api,
+  CompactionFailed,
   type Conversation,
   ConversationNotFound,
   RunDenied,
@@ -132,12 +133,14 @@ export const AgentsApiHandlersNoDeps = HttpApiBuilder.group(
   }),
 );
 
-/** Handlers without their dependencies, so tests can supply their own store. */
+/** Handlers without their dependencies, so tests can supply their own store and runner. */
 export const ConversationsApiHandlersNoDeps = HttpApiBuilder.group(
   Api,
   "conversations",
   Effect.fn(function* (handlers) {
     const store = yield* ConversationStore;
+    const registry = yield* AgentRegistry;
+    const runner = yield* Runner;
     const caller = callerVia(yield* Identity);
 
     const list = Effect.fn("Gateway.conversations.list")(function* (
@@ -171,11 +174,24 @@ export const ConversationsApiHandlersNoDeps = HttpApiBuilder.group(
       yield* store.remove(id).pipe(Effect.orDie);
     });
 
+    /** The summary is written by the model the conversation last ran on. */
+    const compact = Effect.fn("Gateway.conversations.compact")(function* (id: string) {
+      const principal = yield* caller;
+      const info = yield* owned(store, principal.id, id);
+      const agent = yield* registry
+        .get(info.agent)
+        .pipe(Effect.mapError((error) => new CompactionFailed({ id, message: error.message })));
+      return yield* runner
+        .compact({ conversationId: id, agent, model: Option.fromNullishOr(info.model) })
+        .pipe(Effect.mapError((error) => new CompactionFailed({ id, message: error.message })));
+    });
+
     return handlers.handleAll({
       list: ({ query }) => list(query.agent, query.directory),
       get: ({ params }) => Effect.flatMap(caller, (p) => owned(store, p.id, params.id)),
       transcript: ({ params }) => transcript(params.id),
       remove: ({ params }) => remove(params.id),
+      compact: ({ params }) => compact(params.id),
     });
   }),
 );

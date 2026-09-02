@@ -45,11 +45,25 @@ export const TranscriptTool = Schema.TaggedStruct("Tool", {
   result: Schema.optional(Schema.Json),
   isFailure: Schema.Boolean,
 });
-export const TranscriptEntry = Schema.Union([TranscriptUser, TranscriptAssistant, TranscriptTool]);
+/** Where a compaction happened: the summary the model continued from. */
+export const TranscriptSummary = Schema.TaggedStruct("Summary", { text: Schema.String });
+export const TranscriptEntry = Schema.Union([
+  TranscriptUser,
+  TranscriptAssistant,
+  TranscriptTool,
+  TranscriptSummary,
+]);
 export type TranscriptEntry = typeof TranscriptEntry.Type;
 
 export class ConversationNotFound extends Schema.TaggedError<ConversationNotFound>()(
   "ConversationNotFound",
   { id: Schema.String },
   { httpApiStatus: 404 },
+) {}
+
+/** The conversation could not be compacted: nothing to fold yet, or the model gave no summary. */
+export class CompactionFailed extends Schema.TaggedError<CompactionFailed>()(
+  "CompactionFailed",
+  { id: Schema.String, message: Schema.String },
+  { httpApiStatus: 422 },
 ) {}

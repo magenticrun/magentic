@@ -7,9 +7,14 @@ import {
   OpenApi,
 } from "effect/unstable/httpapi";
 import { AgentInfo, AgentNotFound } from "./Agent.ts";
-import { Conversation, ConversationNotFound, TranscriptEntry } from "./Conversation.ts";
+import {
+  CompactionFailed,
+  Conversation,
+  ConversationNotFound,
+  TranscriptEntry,
+} from "./Conversation.ts";
 import { PluginInfo } from "./Plugin.ts";
-import { RunDenied, RunEvent, RunRequest } from "./Run.ts";
+import { Compacted, RunDenied, RunEvent, RunRequest } from "./Run.ts";
 
 // The API definition lives here, apart from the gateway, so surfaces can derive
 // typed clients from it without pulling in server code.
@@ -57,6 +62,12 @@ export class ConversationsApi extends HttpApiGroup.make("conversations")
       params: { id: Schema.String },
       success: HttpApiSchema.NoContent,
       error: ConversationNotFound,
+    }),
+    /** Fold the conversation so far into a summary the next run continues from. */
+    HttpApiEndpoint.post("compact", "/:id/compact", {
+      params: { id: Schema.String },
+      success: Compacted,
+      error: [ConversationNotFound, CompactionFailed],
     }),
   )
   .prefix("/conversations")

@@ -2,11 +2,17 @@ import { define, ModelInfo } from "@magentic/plugin";
 import { Effect, Layer, Option, Ref, Stream } from "effect";
 import { LanguageModel, type Response } from "effect/unstable/ai";
 
+/** Token limits the fake model claims; 0 when a test does not care, as the catalog would say. */
+export interface FakeLimits {
+  readonly context: number;
+  readonly output: number;
+}
+
 /**
  * A provider plugin whose model replays `script`. Always "signed in", so a
  * test host with this plugin needs no credentials. Its id is `fake`.
  */
-export const fakeProviderPlugin = (script: FakeScript) =>
+export const fakeProviderPlugin = (script: FakeScript, limits?: FakeLimits) =>
   define({
     id: "fake",
     description: "A scripted model for tests.",
@@ -25,8 +31,8 @@ export const fakeProviderPlugin = (script: FakeScript) =>
               name: "Fake",
               reasoning: false,
               toolCall: true,
-              context: 0,
-              output: 0,
+              context: limits?.context ?? 0,
+              output: limits?.output ?? 0,
             }),
           ]),
           defaultModel: "fake",
