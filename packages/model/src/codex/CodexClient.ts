@@ -1,6 +1,7 @@
-import { OpenAiClient } from "@effect/ai-openai";
+import type { OpenAiClient } from "@effect/ai-openai";
 import { Effect, Layer } from "effect";
 import { HttpClient, HttpClientError, HttpClientRequest } from "effect/unstable/http";
+import * as Clients from "../Clients.ts";
 import { CODEX_API_URL, CODEX_ORIGINATOR, CODEX_USER_AGENT } from "./Constants.ts";
 import { CodexAuth } from "./CodexAuth.ts";
 import { withStreamOnlyBackend } from "./CodexStreamShim.ts";
@@ -59,6 +60,7 @@ export const layerClient: Layer.Layer<
 > = Layer.unwrap(
   Effect.gen(function* () {
     const auth = yield* CodexAuth;
+    const { OpenAiClient } = yield* Clients.openai;
     const sessionId = crypto.randomUUID();
     return OpenAiClient.layer({
       apiUrl: CODEX_API_URL,
