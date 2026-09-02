@@ -75,11 +75,19 @@ layer(TestLayer)("Runner", (it) => {
       );
       assert.deepStrictEqual(
         events.map((e) => e._tag),
-        ["RunStarted", "ToolCall", "ToolResult", "TextDelta", "RunFinished"],
+        [
+          "RunStarted",
+          "ToolCall",
+          "ToolResult",
+          "TokenUsage",
+          "TextDelta",
+          "TokenUsage",
+          "RunFinished",
+        ],
       );
       const call = events[1];
       const result = events[2];
-      const text = events[3];
+      const text = events[4];
       assert.isTrue(call?._tag === "ToolCall" && call.name === "read_file");
       assert.isTrue(
         result?._tag === "ToolResult" &&
@@ -88,6 +96,17 @@ layer(TestLayer)("Runner", (it) => {
       );
       // The agent lists only read_file, so that is all the model was offered.
       assert.isTrue(text?._tag === "TextDelta" && text.text === "tools=read_file");
+      // Usage arrives once per model call, with the estimate over the history so far.
+      const usage = events[5];
+      assert.isTrue(usage?._tag === "TokenUsage" && usage.inputTokens === 10);
+      if (usage?._tag === "TokenUsage") {
+        assert.strictEqual(usage.breakdown.toolCount, 1);
+        assert.isAbove(usage.breakdown.system, 0);
+        assert.isAbove(usage.breakdown.tools, 0);
+        assert.isAbove(usage.breakdown.toolCalls, 0);
+        // system, user, assistant (tool call), tool (result), assistant (text)
+        assert.strictEqual(usage.breakdown.messages, 5);
+      }
 
       const started = events[0];
       const conversationId = started?._tag === "RunStarted" ? started.conversationId : "";

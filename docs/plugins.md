@@ -226,6 +226,7 @@ export interface ChatSession {
   readonly agent: string;
   readonly model: Effect.Effect<Option.Option<string>>;
   setModel(ref: string): Effect.Effect<void>;
+  readonly usage: Effect.Effect<Option.Option<SessionUsage>>; // latest call and running totals
 }
 ```
 
@@ -238,7 +239,12 @@ the ones signed in on the CLI's machine, the same limit `auth login` has today.
 
 `/model` is the first: favourites (kept in `favourites.json` under `paths.data`) at the top
 with the provider at the right, providers below, a provider's models on selection, `f` to
-favourite or unfavourite, and `/model provider/model` to set it outright.
+favourite or unfavourite, and `/model provider/model` to set it outright. `/context` reads
+`session.usage`, folded by the surface from the runner's `TokenUsage` events, and prints
+what the latest model call held (input with the cache split, output with the reasoning
+split, the share of the model's window), where the runner estimates the context goes
+(system prompt, tool definitions, history by author, at four characters a token, since
+providers report one total) and the running totals.
 
 ### Events
 

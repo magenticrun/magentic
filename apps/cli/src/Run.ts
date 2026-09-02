@@ -21,6 +21,7 @@ export const run = Effect.fn("Cli.run")(function* (options: RunOptions) {
     switch (event._tag) {
       case "RunStarted":
       case "ReasoningDelta":
+      case "TokenUsage":
         return Effect.void;
       case "TextDelta":
         return terminal.display(event.text).pipe(Effect.orDie);

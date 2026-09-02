@@ -41,6 +41,16 @@ export type FakeScript = (call: {
   readonly options: LanguageModel.ProviderOptions;
 }) => ReadonlyArray<Response.PartEncoded>;
 
+/** The finish a real provider streams last, with usage counted at one token per part. */
+const finish = (parts: ReadonlyArray<Response.PartEncoded>): Response.StreamPartEncoded => ({
+  type: "finish",
+  reason: parts.some((part) => part.type === "tool-call") ? "tool-calls" : "stop",
+  usage: {
+    inputTokens: { total: 10, uncached: 10 },
+    outputTokens: { total: parts.length },
+  },
+});
+
 /** Splits a text or reasoning part into the start / delta / end parts a real provider streams. */
 const toStreamParts = (
   parts: ReadonlyArray<Response.PartEncoded>,
@@ -87,7 +97,9 @@ export const layerFake = (script: FakeScript): Layer.Layer<LanguageModel.Languag
         generateText: (options) => next(options).pipe(Effect.map((parts) => [...parts])),
         streamText: (options) =>
           Stream.unwrap(
-            next(options).pipe(Effect.map((parts) => Stream.fromIterable(toStreamParts(parts)))),
+            next(options).pipe(
+              Effect.map((parts) => Stream.fromIterable([...toStreamParts(parts), finish(parts)])),
+            ),
           ),
       });
     }),

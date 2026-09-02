@@ -1,7 +1,7 @@
 import type { Picked, Picker, PickItem } from "@magentic/plugin";
 import { useKeyboard } from "@opentui/solid";
 import { Option } from "effect";
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
 import type { Palette } from "./Theme.ts";
 
 /** Rows past this many scroll inside the dialog. */
@@ -29,7 +29,8 @@ const isEnter = (name: string) => name === "return" || name === "kpenter" || nam
 
 /**
  * A picker drawn in the chat: sections, a cursor, a detail column at the
- * right, and one keystroke per action. Answers once, through `onDone`.
+ * right, and one keystroke per action. Answers through `onDone`; a new
+ * `picker` prop is the next question, drawn in the same frame.
  */
 export const PickerView = (props: {
   readonly picker: Picker;
@@ -38,14 +39,31 @@ export const PickerView = (props: {
 }) => {
   const rows = createMemo(() => flatten(props.picker));
   const items = createMemo(() => rows().flatMap((row) => (row.kind === "item" ? [row.item] : [])));
-  const start = Math.max(
-    0,
-    items().findIndex((item) => item.id === props.picker.cursor),
+  const start = createMemo(() =>
+    Math.max(
+      0,
+      items().findIndex((item) => item.id === props.picker.cursor),
+    ),
   );
-  const [cursor, setCursor] = createSignal(start);
   // Open with the starting row in the middle, so there is context both ways.
-  const [top, setTop] = createSignal(
-    Math.max(0, Math.min(start + 1 - Math.floor(MAX_ROWS / 2), rows().length - MAX_ROWS)),
+  const centred = () =>
+    Math.max(0, Math.min(start() + 1 - Math.floor(MAX_ROWS / 2), rows().length - MAX_ROWS));
+  const [cursor, setCursor] = createSignal(start());
+  const [top, setTop] = createSignal(centred());
+
+  // A replacement picker with the same title is this list redrawn (a favourite
+  // toggled), so the viewport stays put; a different list opens centred.
+  createEffect(
+    on(
+      () => props.picker,
+      (picker, previous) => {
+        setCursor(start());
+        if (previous === undefined || previous.title !== picker.title) {
+          setTop(centred());
+        }
+      },
+      { defer: true },
+    ),
   );
 
   // Keep the cursor's row inside the window, with its section title when there is room.

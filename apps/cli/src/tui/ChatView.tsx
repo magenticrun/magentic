@@ -1,5 +1,5 @@
 import type { TextareaOptions, TextareaRenderable, ThemeMode } from "@opentui/core";
-import type { Picked, Picker } from "@magentic/plugin";
+import { parseModelRef, type Picked, type Picker } from "@magentic/plugin";
 import type { RunEvent } from "@magentic/protocol";
 import { type JSX, useKeyboard, useRenderer } from "@opentui/solid";
 import { Option, Predicate, type Schema } from "effect";
@@ -42,6 +42,10 @@ type State = {
   gateway: string;
   /** The `provider/model` runs use, when known. */
   model: Option.Option<string>;
+  /** Tokens the latest model call held, input and output; 0 before the first reply. */
+  contextTokens: number;
+  /** How many tokens the model can hold; 0 when the catalog does not say. */
+  contextWindow: number;
   /** What the agent is doing right now; only shown while busy. */
   status: string;
   lines: Array<Line>;
@@ -66,6 +70,17 @@ const COMPOSER_KEYS: NonNullable<TextareaOptions["keyBindings"]> = [
   { name: "return", shift: true, action: "newline" },
   { name: "kpenter", shift: true, action: "newline" },
 ];
+
+/** `842`, `3.2k`, `12k`, `1M`: two or three figures, whatever the size. */
+const formatTokens = (count: number): string => {
+  if (count >= 1_000_000) {
+    return `${Number((count / 1_000_000).toFixed(1))}M`;
+  }
+  if (count >= 10_000) {
+    return `${Math.round(count / 1000)}k`;
+  }
+  return count >= 1000 ? `${Number((count / 1000).toFixed(1))}k` : `${count}`;
+};
 
 const isEnter = (name: string) => name === "return" || name === "kpenter" || name === "linefeed";
 
@@ -113,9 +128,12 @@ export interface ChatTui {
   /** A line from a command. */
   note(text: string): void;
   error(text: string): void;
-  setModel(ref: string): void;
-  /** Show a picker over the composer until `done` is called with the answer. */
+  /** The model later runs use, and how many tokens it can hold (0 when unknown). */
+  setModel(ref: string, contextWindow: number): void;
+  /** Show a picker over the composer; `done` gets the answer. A second `pick` replaces it. */
   pick(picker: Picker, done: (picked: Option.Option<Picked>) => void): void;
+  /** Close the picker, if one is open: the command that asked has ended. */
+  dismiss(): void;
   /** Note that the person stopped the run in flight. */
   interrupted(): void;
   setStatus(status: string): void;
@@ -127,6 +145,8 @@ export const createChatTui = (options: {
   readonly gateway: string;
   /** The `provider/model` the agent runs on, when the gateway could tell. */
   readonly model: Option.Option<string>;
+  /** How many tokens the model can hold; 0 when unknown. */
+  readonly contextWindow: number;
   /** Slash commands the composer completes. */
   readonly commands: ReadonlyArray<CommandInfo>;
   readonly onSubmit: (text: string) => void;
@@ -138,6 +158,8 @@ export const createChatTui = (options: {
     agent: options.agent,
     gateway: options.gateway,
     model: options.model,
+    contextTokens: 0,
+    contextWindow: options.contextWindow,
     status: "",
     lines: [],
     busy: false,
@@ -182,16 +204,24 @@ export const createChatTui = (options: {
       }),
     );
 
-  // Signals rather than store fields: a dialog carries a callback.
+  // Signals rather than store fields: a dialog carries a callback. A command
+  // that asks again replaces the picker in place, and the dialog only closes
+  // when the command ends, so nothing flashes between two questions.
   const [dialog, setDialog] = createSignal<Dialog | undefined>(undefined);
-  const pick = (picker: Picker, done: Dialog["done"]) =>
+  const pick = (picker: Picker, done: Dialog["done"]) => {
+    let answered = false;
     setDialog({
       picker,
       done: (picked) => {
-        setDialog(undefined);
+        if (answered) {
+          return;
+        }
+        answered = true;
         done(picked);
       },
     });
+  };
+  const dismiss = () => setDialog(undefined);
 
   const apply = (event: RunEvent) =>
     batch(() => {
@@ -212,6 +242,9 @@ export const createChatTui = (options: {
         case "ToolResult":
           setState("status", "Thinking…");
           finishTool(event.name, { ok: !event.isFailure, text: summarise(event.result) });
+          return;
+        case "TokenUsage":
+          setState("contextTokens", event.inputTokens + event.outputTokens);
           return;
         case "RunFinished":
           setState("status", "");
@@ -347,6 +380,27 @@ export const createChatTui = (options: {
       setDismissed(false);
       setSelected(0);
     });
+    /** The footer shows the provider and model apart; a bare provider means its default model. */
+    const modelParts = () =>
+      Option.map(state.model, (ref) => {
+        const parsed = parseModelRef(ref);
+        return {
+          provider: parsed.provider,
+          model: Option.getOrElse(parsed.model, () => "default"),
+        };
+      });
+    /** `3% of 1M context`, or the bare count when the window is unknown; nothing before the first reply. */
+    const contextInfo = () => {
+      const used = state.contextTokens;
+      if (used === 0) {
+        return undefined;
+      }
+      if (state.contextWindow === 0) {
+        return `${formatTokens(used)} tokens in context`;
+      }
+      const share = (used / state.contextWindow) * 100;
+      return `${share < 1 ? "<1" : Math.round(share)}% of ${formatTokens(state.contextWindow)} context`;
+    };
     const popover = () =>
       dialog() === undefined && !dismissed() && suggestions().length > 0
         ? suggestions()
@@ -445,8 +499,14 @@ export const createChatTui = (options: {
             )}
           </For>
         </scrollbox>
-        <Show when={dialog()} keyed>
-          {(open) => <PickerView picker={open.picker} palette={palette()} onDone={open.done} />}
+        <Show when={dialog()}>
+          {(open) => (
+            <PickerView
+              picker={open().picker}
+              palette={palette()}
+              onDone={(picked) => open().done(picked)}
+            />
+          )}
         </Show>
         <Show when={state.busy}>
           <box flexDirection="row" flexShrink={0} paddingLeft={1}>
@@ -510,32 +570,45 @@ export const createChatTui = (options: {
             onSubmit={submit}
           />
         </box>
-        <box
-          flexDirection="row"
-          justifyContent="space-between"
-          flexShrink={0}
-          paddingLeft={1}
-          paddingRight={1}
-        >
-          <Show
-            when={armed()}
-            fallback={
-              <text fg={palette().muted} wrapMode="none" truncate flexShrink={1}>
-                shift+enter newline
-              </text>
-            }
-          >
-            <text fg={palette().accent} wrapMode="none" truncate flexShrink={1}>
-              ctrl+c again to quit
-            </text>
-          </Show>
-          <text fg={palette().text} wrapMode="none" flexShrink={0} marginLeft={1}>
-            {state.agent} <span style={{ fg: palette().muted }}>agent · </span>
-            {Option.match(state.model, {
-              onNone: () => <span style={{ fg: palette().muted }}>no model signed in</span>,
-              onSome: (ref) => ref,
+        <box flexDirection="column" flexShrink={0} paddingLeft={1} paddingRight={1}>
+          <box flexDirection="row">
+            {Option.match(modelParts(), {
+              onNone: () => (
+                <text fg={palette().muted} wrapMode="none" truncate>
+                  no model signed in
+                </text>
+              ),
+              onSome: ({ provider, model }) => (
+                <text fg={palette().accent} wrapMode="none" truncate>
+                  <span style={{ fg: palette().muted }}>{provider} · </span>
+                  {model}
+                </text>
+              ),
             })}
-          </text>
+            <Show when={contextInfo()}>
+              {(info) => (
+                <text fg={palette().muted} wrapMode="none" flexShrink={0}>
+                  {" · "}
+                  {info()}
+                </text>
+              )}
+            </Show>
+          </box>
+          {/* The left half is free for later; the hint keeps to the right. */}
+          <box flexDirection="row" justifyContent="flex-end">
+            <Show
+              when={armed()}
+              fallback={
+                <text fg={palette().muted} wrapMode="none" truncate>
+                  shift+enter newline
+                </text>
+              }
+            >
+              <text fg={palette().accent} wrapMode="none" truncate>
+                ctrl+c again to quit
+              </text>
+            </Show>
+          </box>
         </box>
       </box>
     );
@@ -547,8 +620,9 @@ export const createChatTui = (options: {
     addUser: (text) => push({ kind: "user", text }),
     note: (text) => push({ kind: "note", text }),
     error: (text) => push({ kind: "error", text }),
-    setModel: (ref) => setState("model", Option.some(ref)),
+    setModel: (ref, contextWindow) => setState({ model: Option.some(ref), contextWindow }),
     pick,
+    dismiss,
     interrupted: () => push({ kind: "error", text: "Interrupted" }),
     setStatus: (status) => setState("status", status),
     setBusy: (busy) => setState("busy", busy),

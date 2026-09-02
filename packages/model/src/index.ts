@@ -6,6 +6,7 @@ export * from "./plugins/ApiKeyProviders.ts";
 export * from "./plugins/OpenAiCodex.ts";
 export * from "./plugins/AnthropicCompat.ts";
 export * from "./plugins/ModelCommand.ts";
+export * from "./plugins/ContextCommand.ts";
 export * from "./Stores.ts";
 
 import type { ModelCatalog, Plugin } from "@magentic/plugin";
