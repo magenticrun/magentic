@@ -27,12 +27,22 @@ const startingConversation = Effect.fn("Cli.startingConversation")(function* (
   client: GatewayClient,
   options: PickUpOptions,
 ) {
+  if (Option.isSome(options.session) && options.continue) {
+    return yield* new ResumeError({
+      message: "cannot use --continue with --session; --session already names the conversation",
+    });
+  }
   if (Option.isSome(options.session)) {
     const id = options.session.value;
     return Option.some(
       yield* client
         .getConversation({ id })
-        .pipe(Effect.mapError(() => new ResumeError({ message: `no conversation ${id}` }))),
+        .pipe(
+          Effect.catchTag(
+            "ConversationNotFound",
+            () => new ResumeError({ message: `no conversation ${id}` }),
+          ),
+        ),
     );
   }
   if (!options.continue) {
