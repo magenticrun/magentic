@@ -51,6 +51,10 @@ const resolveInput = Effect.fn("Cli.print.resolveInput")(function* (given: strin
   return parts.length === 0 ? Option.none<string>() : Option.some(parts.join("\n\n"));
 });
 
+/** Enough of a call id to pair a result with its call; ids can be long. */
+const callRef = (id: string): string =>
+  id.length === 0 ? "" : ` #${id.length > 8 ? id.slice(-6) : id}`;
+
 /** One event as the gateway would put it on the wire, on one line. */
 const encodeEvent = Schema.encodeSync(Schema.fromJsonString(RunEvent));
 
@@ -126,10 +130,10 @@ export const print = Effect.fn("Cli.print")(function* (options: PrintOptions) {
           Effect.andThen(terminal.display(event.text).pipe(Effect.orDie)),
         );
       case "ToolCall":
-        return Console.error(`→ ${event.name} ${summarise(event.params)}`);
+        return Console.error(`→ ${event.name}${callRef(event.id)} ${summarise(event.params)}`);
       case "ToolResult":
         return Console.error(
-          `← ${event.name} ${event.isFailure ? "failed" : "ok"} ${summarise(event.result)}`,
+          `← ${event.name}${callRef(event.id)} ${event.isFailure ? "failed" : "ok"} ${summarise(event.result)}`,
         );
       case "RunFinished":
         return Effect.gen(function* () {
