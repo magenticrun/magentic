@@ -547,7 +547,9 @@ layer(Layer.empty)("built-in plugins", (it) => {
       const ids = new Set(builtinPlugins.map((loaded) => loaded.plugin.id));
       assert.isTrue(ids.has("file-tools"));
       assert.isTrue(ids.has("shell"));
+      assert.isTrue(ids.has("http-fetch"));
       assert.isTrue(assistant.tools.includes("shell"));
+      assert.isTrue(assistant.tools.includes("http_fetch"));
     }),
   );
 });

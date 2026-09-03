@@ -13,9 +13,13 @@
   "dependencies": {
     "@magentic/plugin": "workspace:*",
     "@magentic/protocol": "workspace:*",
-    "effect": "catalog:"
+    "@mozilla/readability": "catalog:",
+    "effect": "catalog:",
+    "linkedom": "catalog:",
+    "turndown": "catalog:"
   },
   "devDependencies": {
-    "@effect/platform-bun": "catalog:"
+    "@effect/platform-bun": "catalog:",
+    "@types/turndown": "catalog:"
   }
 }

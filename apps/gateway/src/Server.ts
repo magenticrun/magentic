@@ -19,6 +19,7 @@ import { Api, RPC_PATH } from "@magentic/protocol";
 import {
   BackgroundTasks,
   fileToolsPlugin,
+  httpFetchPlugin,
   shellToolPlugin,
   ToolOutputDir,
   WorkspaceRoot,
@@ -43,7 +44,7 @@ export const assistant = new AgentDefinition({
   description: "General assistant that can explore, change, and run things in the workspace.",
   prompt: `You are magentic, an assistant working inside a software workspace.
 
-Your tools are read_file, write_file, edit_file, list_dir, glob, grep, and shell, with task_output, task_stop, and task_list for commands shell left running in the background. The file tools and shell are the only way you can see or change the workspace.
+Your tools are read_file, write_file, edit_file, list_dir, glob, grep, shell, and http_fetch, with task_output, task_stop, and task_list for commands shell left running in the background. The file tools and shell are the only way you can see or change the workspace; http_fetch reads pages on the public internet as markdown, the way a reader view shows them.
 
 Working with files:
 - Paths are relative to the workspace root.
@@ -82,6 +83,7 @@ Answering:
     "task_output",
     "task_stop",
     "task_list",
+    "http_fetch",
   ],
 });
 
@@ -134,6 +136,7 @@ export const checkBind = (
 export const builtinPlugins = [
   builtin(fileToolsPlugin),
   builtin(shellToolPlugin),
+  builtin(httpFetchPlugin),
   ...modelPlugins.map(builtin),
   builtin(assistantPlugin),
 ];
