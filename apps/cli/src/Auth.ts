@@ -1,19 +1,13 @@
 import { ModelRegistry } from "@magentic/core";
 import { apiKeysFile, Codex, modelPlugins } from "@magentic/model";
 import type { ModelProviderRegistration } from "@magentic/plugin";
-import { Config, Effect, Option, Path, Result, Runtime, Schema } from "effect";
+import { Config, Effect, Option, Path, Result, Schema } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { runLogin } from "./auth/Login.ts";
 import { LocalHost } from "./Host.ts";
 import * as Prompt from "./auth/Prompt.ts";
 import { promptUi } from "./auth/PromptUi.ts";
-
-/** A failure that was already explained on the terminal. Only the exit code is left. */
-class Reported extends Schema.TaggedError<Reported>()("Reported", {
-  message: Schema.String,
-}) {
-  override readonly [Runtime.errorReported] = false;
-}
+import { Reported } from "./Reported.ts";
 
 const providerIds = modelPlugins.map((p) => p.id).join(", ");
 

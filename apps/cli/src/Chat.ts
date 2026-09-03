@@ -8,7 +8,7 @@ import {
 import type { Attachment, Conversation } from "@magentic/protocol";
 import { render } from "@opentui/solid";
 import {
-  Cause,
+  type Cause,
   Config,
   DateTime,
   Deferred,
@@ -23,26 +23,19 @@ import {
   Schema,
   Stream,
 } from "effect";
-import { resolveAgent } from "./Agents.ts";
+import type { Message } from "./Attachments.ts";
 import { ago } from "./commands/Conversations.ts";
-import { ensureGateway, type GatewayClient } from "./Gateway.ts";
+import { ensureGateway } from "./Gateway.ts";
+import { pickUp, type PickUpOptions } from "./Resume.ts";
 import { createChatTui } from "./tui/ChatView.tsx";
 import { acquireRenderer } from "./tui/Tui.ts";
 import { VERSION } from "./Version.ts";
 
-export interface ChatOptions {
+export interface ChatOptions extends PickUpOptions {
   readonly baseUrl: string;
-  readonly agent: Option.Option<string>;
-  /** Pick up the most recent conversation, of the agent when one is named. */
-  readonly continue: boolean;
-  /** Pick up this conversation. */
-  readonly resume: Option.Option<string>;
+  /** Sent as soon as the chat is up, as pi sends the messages on its command line. */
+  readonly initial: Option.Option<Message>;
 }
-
-/** The conversation asked for cannot be picked up, in words for the terminal. */
-export class ResumeError extends Schema.TaggedError<ResumeError>()("ResumeError", {
-  message: Schema.String,
-}) {}
 
 /** `/name the rest` into its name and trimmed arguments. */
 const parseCommand = (input: string): { readonly name: string; readonly args: string } => {
@@ -114,37 +107,6 @@ const modelFacts = Effect.fn("Cli.chat.modelFacts")(function* (
 });
 
 /**
- * The conversation the flags ask to pick up: the one named, or the newest
- * (of the agent, when one is named). None when nothing was asked, or nothing
- * is there yet to continue.
- */
-const startingConversation = Effect.fn("Cli.chat.startingConversation")(function* (
-  client: GatewayClient,
-  options: ChatOptions,
-) {
-  if (Option.isSome(options.resume)) {
-    const id = options.resume.value;
-    return Option.some(
-      yield* client
-        .getConversation({ id })
-        .pipe(Effect.mapError(() => new ResumeError({ message: `no conversation ${id}` }))),
-    );
-  }
-  if (!options.continue) {
-    return Option.none<Conversation>();
-  }
-  const all = yield* client
-    .listConversations({
-      agent: Option.getOrUndefined(options.agent),
-      directory: process.cwd(),
-    })
-    .pipe(
-      Effect.mapError((error) => new ResumeError({ message: describeCause(Cause.fail(error)) })),
-    );
-  return Option.fromNullishOr(all[0]);
-});
-
-/**
  * The full-screen chat. Inputs come from the view through a queue; each one
  * becomes a run whose events are folded back into the transcript, or, when
  * it starts with a slash, a command from the local plugin host. What is sent
@@ -158,16 +120,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   const renderer = yield* acquireRenderer;
   const themed = yield* Effect.forkChild(Effect.promise(() => renderer.waitForThemeMode(300)));
   const { client } = yield* ensureGateway(options.baseUrl);
-  const starting = yield* startingConversation(client, options);
-  const agent = yield* resolveAgent(
-    client,
-    Option.orElse(options.agent, () => Option.map(starting, (c) => c.agent)),
-  );
-  if (Option.isSome(starting) && starting.value.agent !== agent.name) {
-    return yield* new ResumeError({
-      message: `conversation ${starting.value.id} is with ${starting.value.agent}, not ${agent.name}`,
-    });
-  }
+  const { agent, starting } = yield* pickUp(client, options);
   const commands = yield* CommandRegistry;
   const models = yield* ModelRegistry;
 
@@ -176,7 +129,6 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     readonly text: string;
     readonly attachments: ReadonlyArray<Attachment>;
     /** ctrl+t: the next thinking level, not a message. */
-    readonly cycleReasoning?: boolean;
   }
   const inputs = yield* Queue.unbounded<Input>();
   const exit = yield* Deferred.make<void>();
@@ -195,6 +147,8 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     runId?: string;
   }
   let inFlight: InFlight | undefined;
+  /** The run whose queue was last taken back, which the stop that follows is for. */
+  let retracted: InFlight | undefined;
 
   // What runs use: the model last chosen with /model when this machine can
   // still run it, otherwise what the gateway said the agent runs on.
@@ -265,7 +219,12 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
       );
     },
     onRetract: () => {
-      const runId = inFlight?.runId;
+      const run = inFlight;
+      if (run === undefined) {
+        return Promise.resolve([]);
+      }
+      retracted = run;
+      const runId = run.runId;
       if (runId === undefined) {
         return Promise.resolve([]);
       }
@@ -275,12 +234,18 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
           .pipe(Effect.catchCause(() => Effect.succeed<ReadonlyArray<string>>([]))),
       );
     },
+    // Now, not in turn behind the run: the queue waits for the run to end.
     onCycleReasoning: () => {
-      Queue.offerUnsafe(inputs, { text: "", attachments: [], cycleReasoning: true });
+      void runPromise(cycleReasoning);
     },
+    // The stop follows a retract; a run that ended in between, letting the
+    // queue start the next one, is not the run the person meant to stop.
     onInterrupt: () => {
-      if (inFlight !== undefined) {
-        Deferred.doneUnsafe(inFlight.stop, Effect.void);
+      const run = inFlight;
+      const meant = retracted;
+      retracted = undefined;
+      if (run !== undefined && (meant === undefined || meant === run)) {
+        Deferred.doneUnsafe(run.stop, Effect.void);
       }
     },
     onExit: quit,
@@ -373,6 +338,9 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   } else if (options.continue) {
     tui.note("No conversation to continue; this is a new one.");
   }
+  if (Option.isSome(options.initial) && options.initial.value.text.length > 0) {
+    yield* Queue.offer(inputs, options.initial.value);
+  }
 
   const runOnce = Effect.fn("Cli.chat.runOnce")(function* (
     { text, attachments }: Input,
@@ -398,10 +366,6 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
               yield* Ref.set(conversation, Option.some(event.conversationId));
               run.runId = event.runId;
               yield* Deferred.succeed(run.named, event.runId);
-            }
-            if (event._tag === "Compacted") {
-              // What the model holds is the summary now; the next call says how much that is.
-              yield* Ref.set(usage, Option.none());
             }
             if (event._tag === "TokenUsage") {
               yield* Ref.update(usage, (previous) => {
@@ -484,7 +448,8 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
       const done = yield* client
         .compact({ id: id.value })
         .pipe(Effect.catchCause((cause) => gatewayFailed("compact")(cause)));
-      yield* Ref.set(usage, Option.none());
+      // The totals stand; only the latest call's picture of the context is
+      // stale until the next call, which the gateway counted this one into.
       tui.apply(done);
     }),
     rename: Effect.fn("Cli.chat.rename")(function* (title: string) {
@@ -527,10 +492,6 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   const loop = Effect.gen(function* () {
     while (true) {
       const input = yield* Queue.take(inputs);
-      if (input.cycleReasoning === true) {
-        yield* cycleReasoning;
-        continue;
-      }
       if (input.text.startsWith("/")) {
         yield* runCommand(input.text);
         continue;

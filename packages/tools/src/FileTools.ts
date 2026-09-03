@@ -253,10 +253,11 @@ export const pageOf = (
   offset: number | undefined,
   limit: number | undefined,
 ): Page => {
-  // A trailing line break ends the last line; it does not start an empty one.
+  // A trailing line break ends the last line; it does not start an empty one,
+  // and an empty file has no lines at all.
   const trailing = text.endsWith("\n");
-  const all = trailing ? text.slice(0, -1).split("\n") : text.split("\n");
-  const total = text.length === 0 ? 0 : all.length;
+  const all = text.length === 0 ? [] : (trailing ? text.slice(0, -1) : text).split("\n");
+  const total = all.length;
   const from = Math.max(1, offset ?? 1);
   const want = Math.min(READ_LINE_LIMIT, Math.max(1, limit ?? READ_LINE_LIMIT));
   const kept: Array<string> = [];
@@ -318,7 +319,9 @@ export const fileToolHandlers = Effect.gen(function* () {
         return false;
       }
       const relative = path.relative(realRoot, real.value);
-      return !relative.startsWith("..") && !path.isAbsolute(relative);
+      return (
+        relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+      );
     });
 
   const notFound = (requested: string) =>
@@ -584,9 +587,10 @@ export const fileToolHandlers = Effect.gen(function* () {
           }
           const lines = text.value.split("\n");
           for (let i = 0; i < lines.length && hits.length <= GREP_LIMIT; i++) {
-            const line = lines[i];
+            // Without the carriage return of a CRLF file, or `$` would never match.
+            const line = lines[i]?.replace(/\r$/, "");
             if (line !== undefined && regex.test(line)) {
-              hits.push({ path: file.path, line: i + 1, text: cutLine(line.replace(/\r$/, "")) });
+              hits.push({ path: file.path, line: i + 1, text: cutLine(line) });
             }
           }
           return hits;

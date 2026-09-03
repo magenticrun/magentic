@@ -7,8 +7,15 @@ export type Protocol = "anthropic" | "openai-responses";
 
 const OpenAiEffort = Schema.Literals(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const isOpenAiEffort = Schema.is(OpenAiEffort);
-const AnthropicEffort = Schema.Literals(["low", "medium", "high"]);
+/**
+ * What the Messages API takes as `output_config.effort`. The client's config
+ * type in rc.112 stops at `high`, but it copies the value into the request
+ * as it is, and the catalog lists `xhigh` and `max` for the models that
+ * take them.
+ */
+const AnthropicEffort = Schema.Literals(["low", "medium", "high", "xhigh", "max"]);
 const isAnthropicEffort = Schema.is(AnthropicEffort);
+type ClientEffort = "low" | "medium" | "high";
 
 /**
  * The request configuration that makes a catalog model think at `level`,
@@ -42,7 +49,10 @@ export const reasoningContext = (
         return isAnthropicEffort(level)
           ? Effect.map(Clients.anthropic, ({ AnthropicLanguageModel }) =>
               Option.some(
-                Context.make(AnthropicLanguageModel.Config, { output_config: { effort: level } }),
+                Context.make(AnthropicLanguageModel.Config, {
+                  // SAFETY: the level is one of AnthropicEffort, which the API accepts; the client sends it unchecked and only its config type lags behind.
+                  output_config: { effort: level as ClientEffort },
+                }),
               ),
             )
           : Effect.succeedNone;

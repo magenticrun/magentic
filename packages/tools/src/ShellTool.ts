@@ -57,7 +57,7 @@ export const Shell = Tool.make("shell", {
     ),
   }),
   success: Schema.Struct({
-    /** Null when the command was killed for running too long. */
+    /** Null when the command did not exit on its own: killed for running too long, or by a signal. */
     exitCode: Schema.NullOr(Schema.Int),
     stdout: Schema.String,
     stderr: Schema.String,
@@ -220,8 +220,13 @@ export const shellToolHandlers = Effect.gen(function* () {
           });
         const stdout = yield* collect(handle.stdout, "stdout");
         const stderr = yield* collect(handle.stderr, "stderr");
+        // A child a signal killed has no exit code, which the spawner reports
+        // as a failure; what the command wrote before that still comes back.
         const exit = yield* handle.exitCode.pipe(
-          Effect.mapError(spawnFailed),
+          Effect.tapError((error) =>
+            Effect.logDebug(`shell: no exit code for ${callId}: ${error.message}`),
+          ),
+          Effect.result,
           Effect.timeoutOption(limit),
         );
         if (Option.isNone(exit)) {
@@ -243,7 +248,10 @@ export const shellToolHandlers = Effect.gen(function* () {
         const [out, err] = yield* Effect.all([settle(stdout), settle(stderr)], { concurrency: 2 });
         const finished = yield* Clock.currentTimeMillis;
         const result: typeof Shell.successSchema.Type = {
-          exitCode: Option.isSome(exit) ? Number(exit.value) : null,
+          exitCode:
+            Option.isSome(exit) && exit.value._tag === "Success"
+              ? Number(exit.value.success)
+              : null,
           stdout: out.text,
           stderr: err.text,
           truncated: out.truncated || err.truncated,

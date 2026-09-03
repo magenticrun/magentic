@@ -2,7 +2,10 @@ import type { Attachment } from "@magentic/protocol";
 import { createHostClipboard, type HostClipboardService, SyntaxStyle } from "@opentui/core";
 import { readFile } from "node:fs/promises";
 import { basename, extname } from "node:path";
+import { IMAGE_EXTENSIONS, toAttachment } from "../Attachments.ts";
 import type { Palette } from "./Theme.ts";
+
+export { toAttachment };
 
 /**
  * A paste this long, or with this many lines, is folded into a placeholder in
@@ -75,17 +78,6 @@ export const writeClipboard = async (text: string): Promise<boolean> => {
   const result = await host.writeText(text);
   return result.status === "written";
 };
-
-export const toAttachment = (mediaType: string, data: Uint8Array, fileName?: string): Attachment =>
-  fileName === undefined ? { mediaType, data } : { mediaType, data, fileName };
-
-const IMAGE_EXTENSIONS = new Map([
-  [".png", "image/png"],
-  [".jpg", "image/jpeg"],
-  [".jpeg", "image/jpeg"],
-  [".gif", "image/gif"],
-  [".webp", "image/webp"],
-]);
 
 /**
  * Dropping a file on most terminals pastes its path, quoted or with spaces

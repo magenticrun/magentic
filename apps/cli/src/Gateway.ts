@@ -10,7 +10,7 @@ class GatewayUnreachable extends Schema.TaggedError<GatewayUnreachable>()("Gatew
 }) {}
 
 /** A typed client for the gateway at `baseUrl`, alive as long as the scope. */
-export const gatewayClient = (baseUrl: string) =>
+const gatewayClient = (baseUrl: string) =>
   RpcClient.make(Api).pipe(
     Effect.provide(
       RpcClient.layerProtocolHttp({ url: `${baseUrl}${RPC_PATH}` }).pipe(

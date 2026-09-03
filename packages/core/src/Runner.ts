@@ -147,19 +147,19 @@ export const STEP_LIMIT_REASON = "step-limit";
 export const INTERRUPTED_REASON = "interrupted";
 
 /** What the model reads in place of a result its tool call never got. */
-const INTERRUPTED_RESULT = {
-  error:
-    "The run was interrupted before this tool finished. Call it again if its result is still needed.",
+const UNFINISHED_RESULT = {
+  error: "The run ended before this tool finished. Call it again if its result is still needed.",
 };
 
 /**
- * The history of an interrupted run as the next call can send it. The chat
- * keeps what the model said up to the interruption, so a tool call it made
- * may be left without a result, which the providers reject. Each such call
- * gets a failed result saying why, so the next call goes through and the
- * model knows it was cut off.
+ * The history of a run that ended early, whether stopped or failed, as the
+ * next call can send it. The chat keeps what the model said up to that
+ * point, so a tool call it made may be left without a result, which the
+ * providers reject. Each such call gets a failed result saying why, so the
+ * next call goes through and the model knows it was cut off. Nothing changes
+ * when every call has its result.
  */
-const settleInterrupted = (history: Prompt.Prompt): Prompt.Prompt => {
+const settleUnfinished = (history: Prompt.Prompt): Prompt.Prompt => {
   const answered = new Set<string>();
   const calls: Array<Prompt.ToolCallPart> = [];
   for (const message of history.content) {
@@ -189,7 +189,7 @@ const settleInterrupted = (history: Prompt.Prompt): Prompt.Prompt => {
         id: call.id,
         name: call.name,
         isFailure: true,
-        result: INTERRUPTED_RESULT,
+        result: UNFINISHED_RESULT,
         providerExecuted: false,
       }),
     ),
@@ -310,26 +310,29 @@ export class Runner extends Context.Service<
       const bus = yield* RunEventBus;
       const steering = yield* Steering;
 
+      /**
+       * The conversation's chat, restored from the store when it has one. A
+       * history that cannot be read fails rather than being started over: the
+       * fresh chat would be saved over it at the end of the run.
+       */
       const openChat = Effect.fn("Runner.openChat")(function* (
         conversationId: string,
         agent: AgentDefinition,
       ) {
         const saved = yield* conversations.history(conversationId);
-        if (Option.isSome(saved)) {
-          const restored = yield* Effect.option(Chat.fromJson(saved.value));
-          if (Option.isSome(restored)) {
-            const chat = restored.value;
-            const { archived, context } = partition(forModel(yield* Ref.get(chat.history)));
-            yield* Ref.set(chat.history, context);
-            const opened: Opened = { chat, archived: yield* Ref.make(archived) };
-            return opened;
-          }
+        if (Option.isNone(saved)) {
+          const chat = yield* Chat.fromPrompt(Prompt.empty.pipe(Prompt.setSystem(agent.prompt)));
+          const opened: Opened = {
+            chat,
+            archived: yield* Ref.make<ReadonlyArray<Prompt.Message>>([]),
+          };
+          return opened;
         }
-        const chat = yield* Chat.fromPrompt(Prompt.empty.pipe(Prompt.setSystem(agent.prompt)));
-        const opened: Opened = {
-          chat,
-          archived: yield* Ref.make<ReadonlyArray<Prompt.Message>>([]),
-        };
+        const chat = yield* Chat.fromJson(saved.value);
+        const { archived, context } = partition(forModel(yield* Ref.get(chat.history)));
+        // The agent's prompt as it is now, not as it was when the conversation began.
+        yield* Ref.set(chat.history, Prompt.setSystem(context, agent.prompt));
+        const opened: Opened = { chat, archived: yield* Ref.make(archived) };
         return opened;
       });
 
@@ -374,7 +377,35 @@ export class Runner extends Context.Service<
         };
       });
 
-      /** Compact what the model sees, moving what the summary replaced to the archive. */
+      /**
+       * One call's usage as the surface hears it: the provider's counts, the
+       * cost at the model's prices when the catalog has them, and where the
+       * context now goes.
+       */
+      const tokenUsage = (
+        reported: Response.Usage,
+        cost: Option.Option<ModelCost>,
+        history: Prompt.Prompt,
+        tools: Record<string, Tool.Any>,
+      ): TokenUsage => {
+        const { inputTokens, outputTokens } = reported;
+        const counted: TokenUsage = {
+          _tag: "TokenUsage",
+          inputTokens: inputTokens.total ?? 0,
+          outputTokens: outputTokens.total ?? 0,
+          cacheReadTokens: inputTokens.cacheRead,
+          cacheWriteTokens: inputTokens.cacheWrite,
+          reasoningTokens: outputTokens.reasoning,
+          breakdown: estimateContext(history, tools),
+        };
+        return Option.isSome(cost) ? { ...counted, cost: costOf(cost.value, reported) } : counted;
+      };
+
+      /**
+       * Compact what the model sees, moving what the summary replaced to the
+       * archive. The summary call's usage comes back with the event so the
+       * caller counts it: it is a model call like any other.
+       */
       const compactOpened = Effect.fn("Runner.compactOpened")(function* (
         opened: Opened,
         model: LanguageModel.Service,
@@ -391,7 +422,7 @@ export class Runner extends Context.Service<
           messagesBefore: done.messagesBefore,
           messagesAfter: done.messagesAfter,
         };
-        return event;
+        return { event, usage: done.usage };
       });
 
       const toEvents = (
@@ -440,15 +471,26 @@ export class Runner extends Context.Service<
             const agent = options.agent.name;
             const emit = (event: RunEvent) =>
               Effect.andThen(Queue.offer(queue, event), bus.publish({ runId, agent, event }));
+            // Open to steering before the surface hears the run started, so
+            // an input sent as soon as it does is steered in, not turned away.
+            const steers = yield* steering.open(runId, options.principal.id);
             yield* emit({ _tag: "RunStarted", runId, conversationId });
 
-            const opened = yield* openChat(conversationId, options.agent);
+            const restored = yield* Effect.result(openChat(conversationId, options.agent));
+            if (restored._tag === "Failure") {
+              yield* emit({
+                _tag: "RunFailed",
+                message: `conversation ${conversationId} cannot be read: ${restored.failure.message}`,
+              });
+              yield* Queue.end(queue);
+              return;
+            }
+            const opened = restored.success;
             const { chat } = opened;
             const tools = yield* registry.forAgent(options.agent, {
               runId,
               principal: options.principal,
             });
-            const steers = yield* steering.open(runId, options.principal.id);
             const finishReason = yield* Ref.make("unknown");
             const existing = yield* conversations.get(conversationId);
             const usageSoFar = yield* Ref.make(
@@ -472,7 +514,18 @@ export class Runner extends Context.Service<
                 isOverflow(held, limits)
                   ? Effect.gen(function* () {
                       yield* emit({ _tag: "CompactionStarted" });
-                      yield* emit(yield* compactOpened(opened, model, keepFor(limits)));
+                      const done = yield* compactOpened(opened, model, keepFor(limits));
+                      yield* emit(done.event);
+                      const summarised = tokenUsage(
+                        done.usage,
+                        cost,
+                        yield* Ref.get(chat.history),
+                        tools.tools,
+                      );
+                      yield* Ref.update(usageSoFar, (previous) =>
+                        Option.some(foldUsage(previous, summarised)),
+                      );
+                      yield* emit(summarised);
                     }).pipe(
                       Effect.catchTag("CompactionError", (error) =>
                         Effect.logWarning(`conversation ${conversationId} not compacted`, error),
@@ -547,19 +600,12 @@ export class Runner extends Context.Service<
                 // Once the call is in the history, so the estimate matches what was counted.
                 const reported = yield* Ref.get(usage);
                 if (Option.isSome(reported)) {
-                  const { inputTokens, outputTokens } = reported.value;
-                  const counted: TokenUsage = {
-                    _tag: "TokenUsage",
-                    inputTokens: inputTokens.total ?? 0,
-                    outputTokens: outputTokens.total ?? 0,
-                    cacheReadTokens: inputTokens.cacheRead,
-                    cacheWriteTokens: inputTokens.cacheWrite,
-                    reasoningTokens: outputTokens.reasoning,
-                    breakdown: estimateContext(yield* Ref.get(chat.history), tools.tools),
-                  };
-                  const event: TokenUsage = Option.isSome(cost)
-                    ? { ...counted, cost: costOf(cost.value, reported.value) }
-                    : counted;
+                  const event = tokenUsage(
+                    reported.value,
+                    cost,
+                    yield* Ref.get(chat.history),
+                    tools.tools,
+                  );
                   yield* Ref.update(usageSoFar, (previous) =>
                     Option.some(foldUsage(previous, event)),
                   );
@@ -630,17 +676,19 @@ export class Runner extends Context.Service<
             // interrupted fiber runs nothing past the loop but its finalizers.
             // The turn is saved all the same, with what the model said so far,
             // so the next input follows it rather than a history in which the
-            // stopped input was never sent.
+            // stopped input was never sent. A run that fails mid-turn is saved
+            // the same way: a tool call left open would fail every call after.
             const outcome = yield* Effect.exit(loop).pipe(
               Effect.onInterrupt(() =>
                 Effect.gen(function* () {
-                  yield* Ref.update(chat.history, settleInterrupted);
+                  yield* Ref.update(chat.history, settleUnfinished);
                   yield* save;
                   yield* emit({ _tag: "RunFinished", reason: INTERRUPTED_REASON });
                   yield* Queue.end(queue);
                 }),
               ),
             );
+            yield* Ref.update(chat.history, settleUnfinished);
             yield* save;
             if (outcome._tag === "Failure") {
               yield* emit({ _tag: "RunFailed", message: describeCause(outcome.cause) });
@@ -669,14 +717,26 @@ export class Runner extends Context.Service<
               (error) => new CompactionError({ reason: "model", message: error.message }),
             ),
           );
-        const opened = yield* openChat(options.conversationId, options.agent);
+        const opened = yield* openChat(options.conversationId, options.agent).pipe(
+          Effect.mapError(
+            (error) =>
+              new CompactionError({
+                reason: "store",
+                message: `conversation ${options.conversationId} cannot be read: ${error.message}`,
+              }),
+          ),
+        );
         // Everything goes into the summary: the person asked for a fresh start.
-        const event = yield* compactOpened(opened, model, 0);
+        const { event, usage } = yield* compactOpened(opened, model, 0);
+        const { cost } = yield* infoOf(choice, Option.none());
+        // No tools are offered to the summariser, so none are in the estimate.
+        const summarised = tokenUsage(usage, cost, yield* Ref.get(opened.chat.history), {});
         const now = yield* DateTime.now;
         const info = new Conversation({
           ...existing.value,
           updatedAt: now,
           messages: event.messagesAfter,
+          usage: foldUsage(Option.fromNullishOr(existing.value.usage), summarised),
         });
         yield* Effect.flatMap(exportHistory(opened), (json) => conversations.save(info, json)).pipe(
           Effect.mapError(

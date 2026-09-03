@@ -9,48 +9,61 @@ import { withStreamOnlyBackend } from "./CodexStreamShim.ts";
 const isUnauthorized = (error: HttpClientError.HttpClientError) =>
   error.reason._tag === "StatusCodeError" && error.reason.response.status === 401;
 
+/** Auth failures surface through the HTTP error channel the OpenAI client already handles. */
+const asTransport = (
+  request: HttpClientRequest.HttpClientRequest,
+  error: { readonly message: string },
+) =>
+  new HttpClientError.HttpClientError({
+    reason: new HttpClientError.TransportError({
+      request,
+      description: error.message,
+      cause: error,
+    }),
+  });
+
 /**
  * Turns any HttpClient into one that speaks to the Codex backend as the
  * logged-in ChatGPT account: bearer token and account header on every request,
  * one refresh-and-retry on a 401.
+ *
+ * The token is read inside the effect that is retried, not in the request
+ * pipeline in front of it, so the second try carries the refreshed token
+ * whatever else is composed around this client. A refresh the backend
+ * rejects ends the call with its reason, which says to log in again, instead
+ * of a second 401 that says nothing.
  */
 export const withCodexAuth =
   (auth: CodexAuth["Service"], sessionId: string) =>
   (client: HttpClient.HttpClient): HttpClient.HttpClient =>
-    client.pipe(
-      HttpClient.mapRequestEffect((request) =>
-        auth.current.pipe(
-          Effect.map((tokens) =>
-            request.pipe(
-              HttpClientRequest.bearerToken(tokens.accessToken),
-              HttpClientRequest.setHeaders({
-                "ChatGPT-Account-ID": tokens.accountId,
-                originator: CODEX_ORIGINATOR,
-                "User-Agent": CODEX_USER_AGENT,
-                "session-id": sessionId,
-              }),
+    HttpClient.transform(client, (_, request) => {
+      const send = auth.current.pipe(
+        Effect.mapError((error) => asTransport(request, error)),
+        Effect.flatMap((tokens) =>
+          client.postprocess(
+            Effect.succeed(
+              request.pipe(
+                HttpClientRequest.bearerToken(tokens.accessToken),
+                HttpClientRequest.setHeaders({
+                  "ChatGPT-Account-ID": tokens.accountId,
+                  originator: CODEX_ORIGINATOR,
+                  "User-Agent": CODEX_USER_AGENT,
+                  "session-id": sessionId,
+                }),
+              ),
             ),
           ),
-          // Auth failures surface through the HTTP error channel the OpenAI client already handles.
-          Effect.mapError(
-            (error) =>
-              new HttpClientError.HttpClientError({
-                reason: new HttpClientError.TransportError({
-                  request,
-                  description: error.message,
-                  cause: error,
-                }),
-              }),
-          ),
         ),
-      ),
-      HttpClient.transformResponse(
+      );
+      return send.pipe(
         Effect.tapError((error) =>
-          isUnauthorized(error) ? auth.refresh.pipe(Effect.ignore) : Effect.void,
+          isUnauthorized(error)
+            ? auth.refresh.pipe(Effect.mapError((failure) => asTransport(request, failure)))
+            : Effect.void,
         ),
-      ),
-      HttpClient.retry({ times: 1, while: isUnauthorized }),
-    );
+        Effect.retry({ times: 1, while: isUnauthorized }),
+      );
+    });
 
 /** An OpenAI client pointed at the ChatGPT subscription backend. */
 export const layerClient: Layer.Layer<

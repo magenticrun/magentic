@@ -106,11 +106,13 @@ const annotate = <T extends Tool.Any>(tool: T, definition: McpToolDefinition): T
  * a struct with one optional JSON slot per property the server declared,
  * which is the loosest object schema the provider accepts. A key the server
  * did not declare is dropped on the way in; the server validates the rest.
+ * A schema that declares no properties says nothing about its keys, so any
+ * JSON object passes: it may take them through `additionalProperties`.
  */
 const argumentsDecoder = (inputSchema: McpToolDefinition["inputSchema"]): Schema.Top => {
   const names = Object.keys(inputSchema.properties ?? {});
   return names.length === 0
-    ? Schema.Record(Schema.String, Schema.Never)
+    ? Schema.Record(Schema.String, Schema.Json)
     : Schema.Struct(Object.fromEntries(names.map((name) => [name, Schema.optional(Schema.Json)])));
 };
 
