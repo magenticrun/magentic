@@ -36,7 +36,7 @@ import {
   Semaphore,
   Stream,
 } from "effect";
-import type { Tool, Toolkit } from "effect/unstable/ai";
+import { Tool, type Toolkit } from "effect/unstable/ai";
 import { AgentRegistry } from "../AgentRegistry.ts";
 import { describeCause } from "../Errors.ts";
 import { RunEventBus } from "../EventBus.ts";
@@ -202,6 +202,16 @@ export class PluginHost extends Context.Service<
                 return yield* new PluginSetupError({
                   plugin: ref.id,
                   message: `tool ${name} is already registered by another plugin`,
+                });
+              }
+              // Providers take an object schema for a tool's parameters and
+              // nothing else; an empty Schema.Struct({}) renders as anyOf
+              // object or array and would fail every run of every agent
+              // offered the tool, so it is refused here, by name.
+              if (Tool.getJsonSchema(tool).type !== "object") {
+                return yield* new PluginSetupError({
+                  plugin: ref.id,
+                  message: `tool ${name}'s parameters are not an object schema; give it at least one, optional, parameter`,
                 });
               }
               taken.add(name);

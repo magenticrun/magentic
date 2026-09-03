@@ -5,7 +5,7 @@ import {
   type CommandUi,
   type SessionUsage,
 } from "@magentic/plugin";
-import type { Attachment, Conversation } from "@magentic/protocol";
+import type { Attachment, Conversation, RunEvent } from "@magentic/protocol";
 import { render } from "@opentui/solid";
 import {
   type Cause,
@@ -21,6 +21,7 @@ import {
   Queue,
   Ref,
   Schema,
+  Scope,
   Stream,
 } from "effect";
 import type { Message } from "./Attachments.ts";
@@ -111,7 +112,10 @@ const modelFacts = Effect.fn("Cli.chat.modelFacts")(function* (
  * becomes a run whose events are folded back into the transcript, or, when
  * it starts with a slash, a command from the local plugin host. What is sent
  * during a run is steered into it: the model reads it before its next call.
- * Esc stops the run in flight; ctrl+c twice ends the session.
+ * Esc stops the run in flight; ctrl+c twice ends the session. The chat
+ * follows its conversation at the gateway, so a run the gateway starts on
+ * its own, when a background task ends after the model has answered, shows
+ * and takes steering like one the person started.
  */
 export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   // The terminal reports light or dark within a few milliseconds, or never;
@@ -149,6 +153,13 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   let inFlight: InFlight | undefined;
   /** The run whose queue was last taken back, which the stop that follows is for. */
   let retracted: InFlight | undefined;
+  // The follow lives with the chat, not with any one run, so nothing the
+  // gateway starts between runs is missed; it is restarted when the
+  // conversation or the thinking level changes.
+  const scope = yield* Scope.Scope;
+  let following: { readonly id: string; readonly fiber: Fiber.Fiber<void> } | undefined;
+  /** A run the gateway started, while it is in flight, and the fiber that stops it on Esc. */
+  let followedRun: { readonly run: InFlight; readonly stopper: Fiber.Fiber<void> } | undefined;
 
   // What runs use: the model last chosen with /model when this machine can
   // still run it, otherwise what the gateway said the agent runs on.
@@ -308,6 +319,10 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     });
     tui.setReasoning(next);
     yield* persist;
+    // The runs the gateway starts think as hard as the person's do.
+    if (following !== undefined) {
+      yield* follow(following.id);
+    }
   });
 
   /** Show an earlier conversation and make it the one the next input continues. */
@@ -329,6 +344,115 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     );
     const now = yield* DateTime.now;
     tui.note(`Resumed "${info.title}" · ${info.messages} messages · ${ago(info.updatedAt, now)}`);
+    yield* follow(info.id);
+    yield* refreshTasks;
+  });
+
+  /** Fold one call's usage into the session's, for /context. */
+  const account = (event: RunEvent) =>
+    event._tag === "TokenUsage"
+      ? Ref.update(usage, (previous) => {
+          const before = Option.getOrUndefined(previous);
+          const spent = before?.totalCost;
+          return Option.some({
+            latest: event,
+            calls: (before?.calls ?? 0) + 1,
+            totalInputTokens: (before?.totalInputTokens ?? 0) + event.inputTokens,
+            totalOutputTokens: (before?.totalOutputTokens ?? 0) + event.outputTokens,
+            totalCost: event.cost === undefined ? spent : (spent ?? 0) + event.cost,
+          });
+        })
+      : Effect.void;
+
+  const TASK_TOOLS = new Set(["shell", "task_output", "task_stop", "task_list"]);
+  /** Whether the event may have changed which background tasks still run. */
+  const touchesTasks = (event: RunEvent): boolean =>
+    (event._tag === "ToolResult" && TASK_TOOLS.has(event.name)) ||
+    event._tag === "Notified" ||
+    event._tag === "RunFinished" ||
+    event._tag === "RunFailed";
+
+  /** How many of the conversation's background tasks still run, as the gateway says; one that cannot say leaves the count. */
+  const refreshTasks = Effect.gen(function* () {
+    const id = yield* Ref.get(conversation);
+    if (Option.isNone(id)) {
+      tui.setTasks(0);
+      return;
+    }
+    const listed = yield* client.listTasks({ conversationId: id.value }).pipe(Effect.option);
+    if (Option.isSome(listed)) {
+      tui.setTasks(listed.value.filter((task) => task.running).length);
+    }
+  });
+
+  /** One event, whoever's run it is: counted, drawn, and the task count refreshed when it may have moved. */
+  const observe = (event: RunEvent) =>
+    Effect.gen(function* () {
+      yield* account(event);
+      tui.apply(event);
+      if (touchesTasks(event)) {
+        yield* refreshTasks;
+      }
+    });
+
+  /** An event of a run the gateway started: in flight like the person's own, steered and stopped the same way. */
+  const onFollowed = (event: RunEvent) =>
+    Effect.gen(function* () {
+      if (event._tag === "RunStarted") {
+        const run: InFlight = {
+          stop: yield* Deferred.make<void>(),
+          named: yield* Deferred.make<string>(),
+          ended: yield* Deferred.make<void>(),
+          runId: event.runId,
+        };
+        yield* Deferred.succeed(run.named, event.runId);
+        // Esc asks the gateway to stop a run it started; the follow then hears the end.
+        const stopper = yield* Effect.forkIn(
+          Deferred.await(run.stop).pipe(
+            Effect.andThen(client.stopRun({ runId: event.runId }).pipe(Effect.ignore)),
+          ),
+          scope,
+        );
+        followedRun = { run, stopper };
+        inFlight = run;
+        tui.setBusy(true);
+      }
+      yield* observe(event);
+      if (
+        (event._tag === "RunFinished" || event._tag === "RunFailed") &&
+        followedRun !== undefined
+      ) {
+        const { run, stopper } = followedRun;
+        followedRun = undefined;
+        if (inFlight === run) {
+          inFlight = undefined;
+        }
+        yield* Deferred.succeed(run.ended, undefined);
+        yield* Fiber.interrupt(stopper);
+        tui.setBusy(false);
+      }
+    });
+
+  const stopFollowing = Effect.suspend(() => {
+    const current = following;
+    following = undefined;
+    return current === undefined ? Effect.void : Fiber.interrupt(current.fiber);
+  });
+
+  /** Follow the conversation at the gateway, in place of whatever was followed before. */
+  const follow = Effect.fn("Cli.chat.follow")(function* (conversationId: string) {
+    yield* stopFollowing;
+    const level = Option.getOrUndefined(yield* Ref.get(reasoning));
+    const fiber = yield* Effect.forkIn(
+      client.follow({ conversationId, agent: agent.name, reasoning: level }).pipe(
+        Stream.runForEach(onFollowed),
+        Effect.catchCause((cause) =>
+          Effect.sync(() => tui.error(`Not following the conversation: ${describeCause(cause)}`)),
+        ),
+      ),
+      scope,
+    );
+    following = { id: conversationId, fiber };
   });
 
   if (Option.isSome(starting)) {
@@ -366,21 +490,12 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
               yield* Ref.set(conversation, Option.some(event.conversationId));
               run.runId = event.runId;
               yield* Deferred.succeed(run.named, event.runId);
+              // A first run names the conversation; from here the gateway's own runs in it are heard.
+              if (following?.id !== event.conversationId) {
+                yield* follow(event.conversationId);
+              }
             }
-            if (event._tag === "TokenUsage") {
-              yield* Ref.update(usage, (previous) => {
-                const before = Option.getOrUndefined(previous);
-                const spent = before?.totalCost;
-                return Option.some({
-                  latest: event,
-                  calls: (before?.calls ?? 0) + 1,
-                  totalInputTokens: (before?.totalInputTokens ?? 0) + event.inputTokens,
-                  totalOutputTokens: (before?.totalOutputTokens ?? 0) + event.outputTokens,
-                  totalCost: event.cost === undefined ? spent : (spent ?? 0) + event.cost,
-                });
-              });
-            }
-            tui.apply(event);
+            yield* observe(event);
           }),
         ),
         Effect.exit,
@@ -432,6 +547,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
       yield* restore(info).pipe(Effect.catchCause((cause) => gatewayFailed("resume")(cause)));
     }),
     startNew: Effect.gen(function* () {
+      yield* stopFollowing;
       yield* Ref.set(conversation, Option.none());
       yield* Ref.set(usage, Option.none());
       tui.reset();

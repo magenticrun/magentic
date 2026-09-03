@@ -3,7 +3,7 @@ import { Context, Effect, Option, Schema } from "effect";
 import * as Clients from "./Clients.ts";
 
 /** The protocols Effect has clients for, and this module knows how to ask to think. */
-export type Protocol = "anthropic" | "openai-responses";
+export type Protocol = "anthropic" | "openai-responses" | "openai-compat";
 
 const OpenAiEffort = Schema.Literals(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const isOpenAiEffort = Schema.is(OpenAiEffort);
@@ -33,6 +33,14 @@ export const reasoningContext = (
     return Effect.succeedNone;
   }
   switch (protocol) {
+    // Chat completions takes the effort as a plain field, and the config is
+    // spread into the request, so a provider that does not know it ignores it.
+    case "openai-compat":
+      return isOpenAiEffort(level)
+        ? Effect.map(Clients.openaiCompat, ({ OpenAiLanguageModel }) =>
+            Option.some(Context.make(OpenAiLanguageModel.Config, { reasoning_effort: level })),
+          )
+        : Effect.succeedNone;
     case "openai-responses":
       return isOpenAiEffort(level)
         ? Effect.map(Clients.openai, ({ OpenAiLanguageModel }) =>

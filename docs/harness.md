@@ -99,7 +99,19 @@ Each is a `Context.Service` with static layers. Ids are `magentic/core/<Name>`.
   `list_dir`, `glob`, `grep`, `shell`, `http_fetch`, `load_skill`, `remember`, `recall`. The
   file tools stay inside the `WorkspaceRoot`; `glob` and `grep` walk the tree themselves,
   skipping `node_modules`, `.git`, and hidden directories, so nothing depends on ripgrep. Each declares `capability` and `risk` through
-  `Tool.make(...).annotate(...)`.
+  `Tool.make(...).annotate(...)`. `shell` with `background: true` leaves the command
+  running and returns a task id at once; `task_output` reads what it printed since the last
+  read, waiting for it to end when asked, `task_stop` kills it, and `task_list` names the
+  conversation's tasks, running or ended, for a model that lost an id, after a compaction
+  for one. `BackgroundTasks` in `@magentic/tools` keeps them, each the caller's alone, in
+  the gateway's scope (`BackgroundTasksLayer` in `Server.ts`, which the shell plugin takes
+  from the host), so they outlive the calls that started them, die with the gateway, and
+  can be listed for a surface through the `listTasks` RPC as well as for the model; output
+  streams into a bounded buffer the next read takes and into two files under
+  `tool-output/` that hold all of it. A task that ends with nobody waiting on it posts a
+  notice to its conversation. Foreground commands keep their timeout; background ones have
+  none unless the call gives one, and at most 32 exist at once, the oldest ended going
+  first.
 - **SkillRegistry**: scans `skills/**/SKILL.md`, parses frontmatter, exposes `list` and
   `load(name)`. Summaries are injected into the system prompt; the body is loaded via the
   `load_skill` tool so context stays small.
@@ -116,6 +128,29 @@ Each is a `Context.Service` with static layers. Ids are `magentic/core/<Name>`.
   is for tests. This is the opencode session model without the generated title.
 - **Runner**: the loop above. `run(request): Stream<RunEvent, RunError>`. Owns the tool
   wrapping. Depends on `LanguageModel`, `Policy`, `Audit`, `ApprovalService`.
+  Before each model call it takes what was steered in and what the harness has to say, the
+  `Notices` a plugin posted for the conversation (`@magentic/plugin`, a background command's
+  end for one), and once more when the model has answered: a notice then makes it speak
+  again, as pi's follow-up queue does, emitting `Notified`. A notice that lands between runs
+  starts a run of its own when a surface follows the conversation, as Claude Code
+  re-invokes the model the moment a task ends: `Notices.posted` announces it, the
+  gateway's `Wakeups` service (`apps/gateway/src/Wakeups.ts`) calls `Runner.wake`, and the
+  run's events go to every follower over the `follow` RPC, which also carries the agent
+  and thinking level the runs use; the model is the conversation's last. Nobody following,
+  the notice waits for the next input to the conversation and goes before it, since a
+  model call nobody asked for and nobody watches is not worth its cost. Runs on one
+  conversation take turns behind a per-conversation lock in the runner: a wake-up queued
+  behind a run waits for it, and one that finds the notices already taken ends without an
+  event. At most one wake-up is queued or in flight per conversation; a notice that lands
+  while one is speaking wakes it once more when it ends. A follower stops a run the gateway
+  started with `stopRun`; its own end when it stops reading them. Notices reach the model
+  as a user message marked in its options, like a compaction summary, so transcripts show
+  them as `Notice` entries and not as the person's words. This is the Claude Code shape
+  (start, read, stop, list, and a wake-up on exit) rather than Codex's, where the model
+  polls, since a wake-up costs one extra call only when there is news. The TUI follows its
+  conversation from the first `RunStarted` and shows the gateway's runs as it does its own,
+  steered and stopped the same way, with the count of tasks still running in its footer;
+  print mode exits when its run ends, so a task ending later is heard at the next input.
   `compact(conversation)` folds the context into a summary on request; the loop does the
   same on its own after a model call whose usage reaches the window less a reserve
   (`Compaction.ts`, after opencode: 20k tokens or the model's output limit, whichever is

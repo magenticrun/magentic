@@ -13,10 +13,16 @@ import {
 import { Identity } from "@magentic/identity";
 import { mcpPlugin, McpServers } from "@magentic/mcp";
 import { layerCredentialStores, modelPlugins } from "@magentic/model";
-import { define, ModelCatalog } from "@magentic/plugin";
+import { define, ModelCatalog, Notices } from "@magentic/plugin";
 import { Policy } from "@magentic/policy";
 import { Api, RPC_PATH } from "@magentic/protocol";
-import { fileToolsPlugin, shellToolPlugin, WorkspaceRoot } from "@magentic/tools";
+import {
+  BackgroundTasks,
+  fileToolsPlugin,
+  shellToolPlugin,
+  ToolOutputDir,
+  WorkspaceRoot,
+} from "@magentic/tools";
 import { Config, Effect, type FileSystem, Layer, type Path, Schema } from "effect";
 import {
   FetchHttpClient,
@@ -29,6 +35,7 @@ import { configAgentsPlugin } from "./ConfigAgents.ts";
 import { ToolCallGuardLive } from "./Guard.ts";
 import { RpcHandlers } from "./Handlers.ts";
 import { loadExternalPlugin, loadGatewayConfig } from "./Plugins.ts";
+import { Wakeups } from "./Wakeups.ts";
 
 /** The one agent every gateway has until `agents/*.yaml` exists. */
 export const assistant = new AgentDefinition({
@@ -36,7 +43,7 @@ export const assistant = new AgentDefinition({
   description: "General assistant that can explore, change, and run things in the workspace.",
   prompt: `You are magentic, an assistant working inside a software workspace.
 
-Your tools are read_file, write_file, edit_file, list_dir, glob, grep, and shell. They are the only way you can see or change the workspace.
+Your tools are read_file, write_file, edit_file, list_dir, glob, grep, and shell, with task_output, task_stop, and task_list for commands shell left running in the background. The file tools and shell are the only way you can see or change the workspace.
 
 Working with files:
 - Paths are relative to the workspace root.
@@ -55,6 +62,7 @@ Running commands:
 - Verify your changes with the project's own commands when it has them, such as its typecheck, lint, or test scripts. Read package.json or the README to find them; do not guess.
 - Never commit, push, or change git configuration unless asked. Stage only the files you changed.
 - Do not run anything that reaches outside the workspace or deletes things wholesale unless asked.
+- For a server, a watcher, or a run that takes a while, set background to true: the call returns a taskId at once and you carry on. You are told when the task ends, so do not poll it; task_output reads what it printed or waits for it when you need the result now, task_stop ends it, and task_list names the ones you started. Stop a server you started once you are done with it, unless asked to leave it running.
 
 Answering:
 - Be concise and direct. Lead with the answer; skip preamble and closing summaries.
@@ -63,7 +71,18 @@ Answering:
 - Use GitHub-flavored markdown. No emojis unless asked.
 - After a change, say what you changed, what you ran, and what you could not verify.
 - Do not add comments or documentation unless asked. Never write secrets into files.`,
-  tools: ["read_file", "write_file", "edit_file", "list_dir", "glob", "grep", "shell"],
+  tools: [
+    "read_file",
+    "write_file",
+    "edit_file",
+    "list_dir",
+    "glob",
+    "grep",
+    "shell",
+    "task_output",
+    "task_stop",
+    "task_list",
+  ],
 });
 
 export const assistantPlugin = define({
@@ -141,6 +160,17 @@ export const HostLayer = Layer.unwrap(
   }),
 );
 
+/**
+ * Background tasks in the gateway's own scope, with the full outputs of
+ * commands beside the conversations under the data directory: the shell
+ * plugin runs them, and the handlers list them for a surface.
+ */
+export const BackgroundTasksLayer = BackgroundTasks.layer.pipe(
+  Layer.provideMerge(
+    Layer.unwrap(Effect.map(dataDir, (data) => ToolOutputDir.layer(`${data}/tool-output`))),
+  ),
+);
+
 /** Conversations on disk under the data directory, so they outlive the gateway. */
 export const ConversationStoreLayer = Layer.unwrap(
   Effect.map(dataDir, (data) => ConversationStore.layerFile(`${data}/conversations`)),
@@ -148,13 +178,17 @@ export const ConversationStoreLayer = Layer.unwrap(
 
 /**
  * Conversations behind the runner, and beside it for listing, as is the
- * steering the handlers offer to; tools, models, and events come from the host.
+ * steering the handlers offer to; tools, models, events, and the notices
+ * come from the host's side.
  */
 export const RunnerLayer = Runner.layer.pipe(
   Layer.provideMerge(Layer.mergeAll(ConversationStoreLayer, Steering.layer)),
 );
 
 const AdmissionLayer = Layer.mergeAll(Identity.layerLocal, Policy.layerAllowAll, Audit.layerMemory);
+
+/** The runner with what admits a run; the wake-ups start runs through both. */
+const CoreLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer);
 
 /**
  * Identity, policy, and audit meet the runner here and nowhere else. The
@@ -163,7 +197,10 @@ const AdmissionLayer = Layer.mergeAll(Identity.layerLocal, Policy.layerAllowAll,
  * The MCP standings the plugin reports stay visible so the handlers can
  * serve them.
  */
-export const ServicesLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer).pipe(
+export const ServicesLayer = Layer.mergeAll(
+  CoreLayer,
+  Wakeups.layer.pipe(Layer.provide(CoreLayer)),
+).pipe(
   Layer.provideMerge(
     HostLayer.pipe(
       Layer.provide([
@@ -174,6 +211,9 @@ export const ServicesLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer).pipe(
       Layer.provideMerge(McpServers.layer),
     ),
   ),
+  Layer.provideMerge(BackgroundTasksLayer),
+  // One notice board for the runner and the wake-ups that read it and the tasks that post to it.
+  Layer.provideMerge(Notices.layer),
 );
 
 /** The RPCs at `/rpc`: newline-delimited JSON, a run's events streamed in the response body. */

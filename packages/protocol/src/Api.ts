@@ -10,7 +10,16 @@ import {
 import { ConversationId } from "./ConversationId.ts";
 import { McpServerInfo } from "./Mcp.ts";
 import { PluginInfo } from "./Plugin.ts";
-import { Compacted, RunDenied, RunEvent, RunNotFound, RunRequest, SteerRequest } from "./Run.ts";
+import {
+  Compacted,
+  FollowRequest,
+  RunDenied,
+  RunEvent,
+  RunNotFound,
+  RunRequest,
+  SteerRequest,
+} from "./Run.ts";
+import { BackgroundTask } from "./Task.ts";
 
 // The API definition lives here, apart from the gateway, so surfaces derive
 // typed clients from it without pulling in server code. It is Effect RPC over
@@ -40,6 +49,27 @@ export const Api = RpcGroup.make(
   Rpc.make("steer", { payload: SteerRequest.fields, error: RunNotFound }),
   /** Take back what was steered but has not reached the model yet; the inputs, oldest first. */
   Rpc.make("unsteer", { payload: { runId: Schema.String }, success: Schema.Array(Schema.String) }),
+  /**
+   * The runs the gateway starts on its own in the conversation, streamed as
+   * they happen. While a surface follows, a notice that lands between runs
+   * (a background task's end, for one) starts a run at once, as Claude Code
+   * re-invokes the model, rather than waiting for the next input; those
+   * runs take steering like any other. Following ends when the surface
+   * stops reading; nobody following, notices wait for the next input.
+   */
+  Rpc.make("follow", {
+    payload: FollowRequest.fields,
+    success: RunEvent,
+    error: Schema.Union([AgentNotFound, RunDenied, ConversationNotFound]),
+    stream: true,
+  }),
+  /** Stop a run the gateway started; one the surface started ends when the surface stops reading it. */
+  Rpc.make("stopRun", { payload: { runId: Schema.String }, error: RunNotFound }),
+  /** The caller's background tasks, oldest first, running or ended; of one conversation when asked. */
+  Rpc.make("listTasks", {
+    payload: { conversationId: Schema.optional(ConversationId) },
+    success: Schema.Array(BackgroundTask),
+  }),
   /** The caller's conversations, newest first, of one agent or directory when asked. */
   Rpc.make("listConversations", {
     payload: {

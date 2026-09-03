@@ -5,10 +5,10 @@ import { builtin, ConversationStore, PluginHost, Runner, Steering } from "@magen
 import { Identity } from "@magentic/identity";
 import { mcpPlugin, McpServers } from "@magentic/mcp";
 import { fakeProviderPlugin, type FakeScript } from "@magentic/model";
-import { AgentDefinition, define, ModelCatalog } from "@magentic/plugin";
+import { AgentDefinition, define, ModelCatalog, Notices } from "@magentic/plugin";
 import { Policy } from "@magentic/policy";
 import { Api, RPC_PATH, RunNotFound } from "@magentic/protocol";
-import { fileToolsPlugin, WorkspaceRoot } from "@magentic/tools";
+import { BackgroundTasks, fileToolsPlugin, ToolOutputDir, WorkspaceRoot } from "@magentic/tools";
 import { DateTime, Effect, Exit, FileSystem, Layer, Ref, Stream } from "effect";
 import {
   FetchHttpClient,
@@ -28,6 +28,7 @@ import {
 import { ToolCallGuardLive } from "./Guard.ts";
 import { RpcHandlers } from "./Handlers.ts";
 import { assistant, builtinPlugins, checkBind } from "./Server.ts";
+import { Wakeups } from "./Wakeups.ts";
 
 /** The handlers called directly, no server or serialization between. */
 const makeClient = RpcTest.makeClient(Api);
@@ -128,8 +129,26 @@ const handlersWith = (policy: Layer.Layer<Policy>) => {
   const RunnerLayer = Runner.layer.pipe(
     Layer.provideMerge(Layer.mergeAll(ConversationStore.layerMemory, Steering.layer)),
   );
-  const ServicesLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer).pipe(
+  const CoreLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer);
+  const ServicesLayer = Layer.mergeAll(
+    CoreLayer,
+    Wakeups.layer.pipe(Layer.provide(CoreLayer)),
+  ).pipe(
     Layer.provideMerge(HostLayer),
+    Layer.provideMerge(
+      BackgroundTasks.layer.pipe(
+        Layer.provideMerge(
+          Layer.unwrap(
+            Effect.gen(function* () {
+              const fs = yield* FileSystem.FileSystem;
+              const data = yield* fs.makeTempDirectoryScoped({ prefix: "magentic-data-" });
+              return ToolOutputDir.layer(`${data}/tool-output`);
+            }),
+          ),
+        ),
+      ),
+    ),
+    Layer.provideMerge(Notices.layer),
   );
   return RpcHandlers.pipe(Layer.provideMerge(ServicesLayer), Layer.provideMerge(PlatformLayer));
 };
@@ -248,6 +267,58 @@ layer(TestLayer)("gateway api", (it) => {
       assert.deepStrictEqual(error, new RunNotFound({ runId: "gone" }));
       // Nothing to take back either; the surface sends it as a new run instead.
       assert.deepStrictEqual(yield* client.unsteer({ runId: "gone" }), []);
+    }),
+  );
+
+  it.effect("wakes a followed conversation on a notice, as the caller, and lists its tasks", () =>
+    Effect.gen(function* () {
+      const client = yield* makeClient;
+      const notices = yield* Notices;
+      const events = yield* Stream.runCollect(client.run({ agent: "triage", input: "hello" }));
+      const started = events[0];
+      const id = started?._tag === "RunStarted" ? started.conversationId : "";
+      // Posted before anyone follows: the follow speaks to it at once.
+      yield* notices.post(id, "the task ended");
+      const woken = yield* client.follow({ conversationId: id, agent: "triage" }).pipe(
+        Stream.takeUntil((e) => e._tag === "RunFinished" || e._tag === "RunFailed"),
+        Stream.runCollect,
+      );
+      assert.deepStrictEqual(
+        woken.map((e) => e._tag),
+        ["RunStarted", "Notified", "TextDelta", "TokenUsage", "RunFinished"],
+      );
+      const reply = woken[2];
+      assert.strictEqual(
+        reply?._tag === "TextDelta" ? reply.text : reply,
+        "echo: From the harness, not the person, while you worked:\n\nthe task ended",
+      );
+      const transcript = yield* client.transcript({ id });
+      assert.deepStrictEqual(
+        transcript.map((e) => e._tag),
+        ["User", "Assistant", "Notice", "Assistant"],
+      );
+      const recorded = yield* Ref.get(yield* AuditMemory);
+      assert.include(
+        recorded.map((e) => e.action),
+        "run.woken",
+      );
+      // The run has ended; there is nothing by that id to stop.
+      const runId = started?._tag === "RunStarted" ? started.runId : "";
+      const gone = yield* client.stopRun({ runId }).pipe(Effect.flip);
+      assert.deepStrictEqual(gone, new RunNotFound({ runId }));
+      // No shell plugin here, so no tasks; the list is the caller's, empty.
+      assert.deepStrictEqual(yield* client.listTasks({ conversationId: id }), []);
+      assert.deepStrictEqual(yield* client.listTasks({}), []);
+    }),
+  );
+
+  it.effect("refuses to follow an agent that does not exist", () =>
+    Effect.gen(function* () {
+      const client = yield* makeClient;
+      const error = yield* client
+        .follow({ conversationId: "0f0f0f0f-0000-4000-8000-000000000000", agent: "nope" })
+        .pipe(Stream.runDrain, Effect.flip);
+      assert.strictEqual(error._tag, "AgentNotFound");
     }),
   );
 

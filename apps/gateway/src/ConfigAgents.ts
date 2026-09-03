@@ -11,7 +11,7 @@ const AgentFile = Schema.Struct({
   model: Schema.optional(Schema.String),
   prompt: PromptSource,
   tools: Schema.optional(Schema.Array(Schema.String)),
-  /** Model calls one run may make; the runner's default otherwise. */
+  /** Model calls one run may make; unbounded otherwise. */
   maxSteps: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
 });
 

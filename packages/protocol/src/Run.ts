@@ -40,6 +40,19 @@ export const SteerRequest = Schema.Struct({
 });
 export type SteerRequest = typeof SteerRequest.Type;
 
+/**
+ * Follow a conversation: the runs the gateway starts in it on its own go to
+ * the follower, on the agent named here and the model the conversation last
+ * ran on, thinking as hard as the follower's own runs do.
+ */
+export const FollowRequest = Schema.Struct({
+  conversationId: ConversationId,
+  agent: Schema.String,
+  /** How hard the model should think in those runs; absent means the provider's default. */
+  reasoning: Schema.optional(Schema.String),
+});
+export type FollowRequest = typeof FollowRequest.Type;
+
 export const RunStarted = Schema.TaggedStruct("RunStarted", {
   runId: Schema.String,
   /** Send this back with the next input to keep the history. */
@@ -64,6 +77,13 @@ export const ToolResult = Schema.TaggedStruct("ToolResult", {
  */
 export const Steered = Schema.TaggedStruct("Steered", { inputs: Schema.Array(Schema.String) });
 export type Steered = typeof Steered.Type;
+/**
+ * Notices from the harness reached the model, a background command's end
+ * for one: they are one user message in the history now, marked as not the
+ * person's, and the next model call sees them.
+ */
+export const Notified = Schema.TaggedStruct("Notified", { notices: Schema.Array(Schema.String) });
+export type Notified = typeof Notified.Type;
 /**
  * Where the context goes, estimated at four characters a token from what the
  * runner sent, since providers report one total. `toolCalls` covers the
@@ -123,7 +143,8 @@ export type Retrying = typeof Retrying.Type;
  * `step-limit` when the run stopped at the agent's step limit, tool results
  * still in the history for the next input to continue from, or
  * `interrupted` when the surface stopped it, what the model said so far
- * kept the same way.
+ * kept the same way. A run the gateway started on its own ends the same
+ * ways; one that found nothing to say emits no events at all.
  */
 export const RunFinished = Schema.TaggedStruct("RunFinished", { reason: Schema.String });
 export const RunFailed = Schema.TaggedStruct("RunFailed", { message: Schema.String });
@@ -136,6 +157,7 @@ export const RunEvent = Schema.Union([
   ToolCall,
   ToolResult,
   Steered,
+  Notified,
   TokenUsage,
   CompactionStarted,
   Compacted,

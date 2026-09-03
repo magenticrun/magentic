@@ -455,9 +455,17 @@ one today.
 
 ## The built-ins, rewritten as plugins
 
+A tool's parameters must render as a JSON Schema of type `object`; the host refuses a
+toolkit with one that does not, naming the tool. An empty `Schema.Struct({})` is the usual
+way to trip this (Effect renders it as `anyOf` object or array, which OpenAI-style providers
+reject at every model call): give a tool that takes nothing at least one optional parameter.
+
 - `@magentic/tools`: `fileTools` plugin registering `read_file`, `write_file`, `edit_file`,
   `list_dir`, `glob`, and `grep` from the existing `FileToolsLayer`. `shell` and `http_fetch` arrive as their own plugins so they can
-  be disabled individually.
+  be disabled individually; the `shell` plugin also registers `task_output`, `task_stop`,
+  and `task_list` for commands it left running in the background, and takes the
+  `BackgroundTasks` and `ToolOutputDir` it runs them with from the host, which keeps the
+  tasks in its own scope so it can list them for a surface too.
 - `@magentic/mcp`: the `mcp` plugin above, given the `mcp:` section as its options.
 - `@magentic/model`: `openaiCodex`, `openai`, `anthropic`, `zai`, `opencodeZen` plugins, each one
   `ModelProviderRegistration`. `Providers.ts` in the CLI is deleted; `magentic auth login`

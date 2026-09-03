@@ -6,5 +6,6 @@ export * from "./Commands.ts";
 export * from "./Context.ts";
 export * from "./Events.ts";
 export * from "./Models.ts";
+export * from "./Notices.ts";
 export * from "./Plugin.ts";
 export * from "./Tools.ts";

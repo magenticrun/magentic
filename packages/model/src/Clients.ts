@@ -10,3 +10,5 @@ import { Effect } from "effect";
 export const anthropic = Effect.promise(() => import("@effect/ai-anthropic"));
 
 export const openai = Effect.promise(() => import("@effect/ai-openai"));
+
+export const openaiCompat = Effect.promise(() => import("@effect/ai-openai-compat"));

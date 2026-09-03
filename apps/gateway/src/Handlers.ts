@@ -19,12 +19,15 @@ import {
   CompactionFailed,
   Conversation,
   ConversationNotFound,
+  type FollowRequest,
   RunDenied,
   RunNotFound,
   type RunRequest,
   type SteerRequest,
 } from "@magentic/protocol";
+import { BackgroundTasks } from "@magentic/tools";
 import { Config, DateTime, Effect, Option, Stream } from "effect";
+import { Wakeups } from "./Wakeups.ts";
 
 /** Until sessions exist, the OS user is the caller. */
 const localSubject = Config.string("USER").pipe(Config.withDefault("local"));
@@ -49,7 +52,7 @@ const owned = Effect.fn("Gateway.ownedConversation")(function* (
   return found.value;
 });
 
-/** Every RPC the gateway answers. Needs the runner, the registries, the MCP standings, and identity, policy, and audit. */
+/** Every RPC the gateway answers. Needs the runner and the wake-ups, the registries, the background tasks, the MCP standings, and identity, policy, and audit. */
 export const RpcHandlers = Api.toLayer(
   Effect.gen(function* () {
     const host = yield* PluginHost;
@@ -62,6 +65,8 @@ export const RpcHandlers = Api.toLayer(
     const audit = yield* Audit;
     const mcp = yield* McpServers;
     const steering = yield* Steering;
+    const wakeups = yield* Wakeups;
+    const tasks = yield* BackgroundTasks;
 
     /** What a surface may know, with the model the agent would run on today. */
     const toInfo = Effect.fn("Gateway.toInfo")(function* (agent: AgentDefinition) {
@@ -131,6 +136,52 @@ export const RpcHandlers = Api.toLayer(
       return taken.map((s) => s.input);
     });
 
+    /**
+     * Follow one of the caller's conversations, or one about to be theirs:
+     * a first run is saved when it ends, and the surface follows it as soon
+     * as it hears the id. The policy is asked once here, as it is for a run.
+     */
+    const follow = Effect.fn("Gateway.follow")(function* (payload: FollowRequest) {
+      const agent = yield* registry.get(payload.agent);
+      const principal = yield* caller;
+      const found = yield* store.get(payload.conversationId);
+      if (Option.isSome(found) && found.value.principal !== principal.id) {
+        return yield* new ConversationNotFound({ id: payload.conversationId });
+      }
+      const request = new AgentRequest({
+        id: crypto.randomUUID(),
+        agent: agent.name,
+        surface: "cli",
+        principal,
+        input: "",
+        createdAt: yield* DateTime.now,
+      });
+      const decision = yield* policy.evaluate(request);
+      if (decision._tag !== "Allow") {
+        return yield* new RunDenied({ agent: agent.name, reason: decision.reason });
+      }
+      return wakeups.follow({
+        conversationId: payload.conversationId,
+        agent,
+        principal,
+        reasoning: Option.fromNullishOr(payload.reasoning),
+      });
+    });
+
+    const stopRun = Effect.fn("Gateway.stopRun")(function* (runId: string) {
+      const principal = yield* caller;
+      if (!(yield* wakeups.stop(runId, principal.id))) {
+        return yield* new RunNotFound({ runId });
+      }
+    });
+
+    const listTasks = Effect.fn("Gateway.listTasks")(function* (
+      conversationId: string | undefined,
+    ) {
+      const principal = yield* caller;
+      return yield* tasks.list(principal.id, Option.fromNullishOr(conversationId));
+    });
+
     const list = Effect.fn("Gateway.conversations.list")(function* (
       agent: string | undefined,
       directory: string | undefined,
@@ -189,6 +240,9 @@ export const RpcHandlers = Api.toLayer(
       run: ({ agent, ...request }) => Stream.unwrap(run(agent, request)),
       steer: (request) => steer(request),
       unsteer: ({ runId }) => unsteer(runId),
+      follow: (request) => Stream.unwrap(follow(request)),
+      stopRun: ({ runId }) => stopRun(runId),
+      listTasks: ({ conversationId }) => listTasks(conversationId),
       listConversations: ({ agent, directory }) => list(agent, directory),
       getConversation: ({ id }) => Effect.flatMap(caller, (p) => owned(store, p.id, id)),
       transcript: ({ id }) => transcript(id),
