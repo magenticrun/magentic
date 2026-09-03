@@ -74,7 +74,14 @@ export const print = Effect.fn("Cli.print")(function* (options: PrintOptions) {
     return yield* new Reported({ message });
   });
 
-  const input = yield* resolveInput(options.message.text);
+  const resolved = yield* resolveInput(options.message.text).pipe(Effect.exit);
+  if (resolved._tag === "Failure") {
+    if (Cause.hasInterruptsOnly(resolved.cause)) {
+      return yield* Effect.failCause(resolved.cause);
+    }
+    return yield* failed(describeCause(resolved.cause));
+  }
+  const input = resolved.value;
   if (Option.isNone(input)) {
     return yield* failed("nothing to send; pass a message as an argument or pipe it on stdin");
   }
