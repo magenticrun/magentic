@@ -18,7 +18,11 @@
       "@opentui/core": "0.5.10",
       "@opentui/solid": "0.5.10",
       "solid-js": "1.9.12",
-      "@modelcontextprotocol/client": "2.0.0"
+      "@modelcontextprotocol/client": "2.0.0",
+      "turndown": "7.2.0",
+      "@types/turndown": "5.0.5",
+      "@mozilla/readability": "0.6.0",
+      "linkedom": "0.18.12"
     }
   },
   "type": "module",

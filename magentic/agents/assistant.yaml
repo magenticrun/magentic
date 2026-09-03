@@ -14,5 +14,6 @@ tools:
     task_output,
     task_stop,
     task_list,
+    http_fetch,
     "mcp:*",
   ]
