@@ -186,20 +186,21 @@ This is a Bun workspace built on [Effect](https://effect.website) 4. Read [CLAUD
 
 ## Repository layout
 
-| Path                | Responsibility                                                                    |
-| ------------------- | --------------------------------------------------------------------------------- |
-| `apps/gateway`      | Gateway server: configuration, plugin hosting, RPC routes, and service wiring.    |
-| `apps/cli`          | `magentic` terminal client and full-screen chat.                                  |
-| `packages/protocol` | Shared schemas and Effect RPC API.                                                |
-| `packages/core`     | Agent runtime, conversations, plugin host, retries, and configuration primitives. |
-| `packages/plugin`   | Public plugin contract and model catalog.                                         |
-| `packages/model`    | Model-provider plugins, API keys, and Codex login.                                |
-| `packages/tools`    | Workspace-confined file and shell tools.                                          |
-| `packages/mcp`      | MCP client plugin and MCP-provided tools.                                         |
-| `packages/identity` | Identity abstractions and local identity implementation.                          |
-| `packages/policy`   | Policy decisions and enforcement interfaces.                                      |
-| `packages/audit`    | Audit interfaces and current in-memory implementation.                            |
-| `docs/`             | Design notes, configuration details, and research.                                |
+| Path                     | Responsibility                                                                                       |
+| ------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `apps/gateway`           | Gateway server: configuration, plugin hosting, RPC routes, and service wiring.                       |
+| `apps/cli`               | `magentic` terminal client and full-screen chat.                                                     |
+| `packages/protocol`      | Shared schemas and Effect RPC API.                                                                   |
+| `packages/core`          | Agent runtime, conversations, plugin host, retries, and configuration primitives.                    |
+| `packages/plugin`        | Public plugin contract and model catalog.                                                            |
+| `packages/model`         | Model-provider plugins, API keys, and Codex login.                                                   |
+| `packages/tools`         | Workspace-confined file and shell tools.                                                             |
+| `packages/mcp`           | MCP client plugin and MCP-provided tools.                                                            |
+| `packages/bridge-github` | GitHub bridge plugin: mentions on issues and pull requests become runs; forge tools push as the App. |
+| `packages/identity`      | Identity abstractions and local identity implementation.                                             |
+| `packages/policy`        | Policy decisions and enforcement interfaces.                                                         |
+| `packages/audit`         | Audit interfaces and current in-memory implementation.                                               |
+| `docs/`                  | Design notes, configuration details, and research.                                                   |
 
 ## Documentation
 

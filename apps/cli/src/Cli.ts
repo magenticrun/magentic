@@ -154,6 +154,8 @@ const pluginList = Command.make(
         ...plugin.providers.map((p) => `provider ${p}`),
         ...plugin.agents.map((a) => `agent ${a}`),
         ...plugin.commands.map((c) => `command /${c}`),
+        ...plugin.bridges.map((b) => `bridge ${b}`),
+        ...plugin.routes.map((r) => `route ${r}`),
       ].join(", ");
       const status = plugin.status === "failed" ? `failed: ${plugin.error ?? ""}` : plugin.status;
       yield* Console.log(`${plugin.id}\t${plugin.source}\t${status}\t${contributed}`);

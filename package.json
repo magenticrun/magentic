@@ -40,6 +40,7 @@
   "devDependencies": {
     "@effect/tsgo": "^0.40.0",
     "@effect/vitest": "4.0.0-rc.112",
+    "@magentic/bridge-github": "workspace:*",
     "@magentic/plugin": "workspace:*",
     "@magentic/protocol": "workspace:*",
     "@oxlint/plugins": "1.81.0",

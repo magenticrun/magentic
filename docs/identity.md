@@ -16,9 +16,11 @@ downstream authenticates again.
   merged list.
 - **Credentials are never stored raw.** Session and personal access tokens are stored as a
   SHA-256 hash. The plain token is shown once at issue time.
-- **Machine principals are explicit.** Cron and API keys act as `system:*` or `token:*`
-  principals with an `onBehalfOf` user, so policy can be stricter and audit still names a
-  person.
+- **Machine principals are explicit.** Cron, API keys, and bridges act as `system:*` or
+  `token:*` principals with an `onBehalfOf` user, so policy can be stricter and audit still
+  names a person. A bridge run is `system:bridge/github` on behalf of `github:12345`, with
+  the groups the bridge resolved (`github:write`, `github:org-member`); the gateway mints
+  it from what the plugin identified, never the plugin itself.
 
 ## Credential kinds
 
@@ -39,7 +41,7 @@ that are configured.
 
 ```ts
 interface IdentityProvider {
-  readonly name: IdentityProviderName; // "slack" | "okta" | "local"
+  readonly name: IdentityProviderName; // "slack", "okta", "local", or a bridge's name: open, validated at registration
   resolve(subject: string): Effect<ProviderIdentity, IdentityError>; // display name, email, groups
 }
 ```

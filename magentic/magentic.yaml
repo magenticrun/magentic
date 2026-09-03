@@ -1,3 +1,14 @@
+# The GitHub bridge: mentions of the App on issues and pull requests become runs of the
+# `github` agent, answered in the thread. Needs GITHUB_APP_PRIVATE_KEY and
+# GITHUB_WEBHOOK_SECRET in the environment; see docs/plugins.md.
+# plugins:
+#   use:
+#     - - "@magentic/bridge-github"
+#       - app: { id: 123456, slug: magentic-bot }
+#         delivery: webhook
+#         agent: github
+#         allow: { minimum: write }
+
 mcp:
   github:
     type: local

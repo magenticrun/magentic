@@ -1,6 +1,6 @@
 import { CapabilityAnnotation } from "@magentic/plugin";
 import type { CallToolResult, Tool as McpToolDefinition } from "@modelcontextprotocol/client";
-import { Effect, Option, Schema } from "effect";
+import { Effect, Option, Predicate, Schema } from "effect";
 import { Tool, Toolkit } from "effect/unstable/ai";
 import { type McpConnection, ToolArguments } from "./McpConnection.ts";
 
@@ -99,22 +99,24 @@ const annotate = <T extends Tool.Any>(tool: T, definition: McpToolDefinition): T
 
 /**
  * A dynamic tool built from a JSON Schema decodes its arguments with
- * `Schema.Unknown`, and the OpenAI provider cannot derive a codec from that
- * when a call comes back: it wants an object at the root, so every call to
- * the tool failed. The model still sees the server's schema, which
- * `Tool.getJsonSchema` prefers over the decoder; only the decoder changes, to
- * a struct with one optional JSON slot per property the server declared,
- * which is the loosest object schema the provider accepts. A key the server
- * did not declare is dropped on the way in; the server validates the rest.
- * A schema that declares no properties says nothing about its keys, so any
- * JSON object passes: it may take them through `additionalProperties`.
+ * `Schema.Unknown`, and neither provider can derive a codec from that when a
+ * call comes back: each wants an object at the root, so every call to the
+ * tool failed. The model still sees the server's schema, which
+ * `Tool.getJsonSchema` prefers over the decoder; only the decoder changes.
+ * The server wrote its schema for its own validator and gets the arguments
+ * exactly as the model sent them, so the decoder only asks for a JSON
+ * object. It is `Schema.Any` with a check rather than a struct or a record
+ * because the providers rewrite those on their way to a codec: a record
+ * becomes an array of entries, a struct with no properties a union with
+ * array, and both are refused at the root. A check on `Any` passes through
+ * untouched, and its `toJsonSchema` is what makes the root an object.
  */
-const argumentsDecoder = (inputSchema: McpToolDefinition["inputSchema"]): Schema.Top => {
-  const names = Object.keys(inputSchema.properties ?? {});
-  return names.length === 0
-    ? Schema.Record(Schema.String, Schema.Json)
-    : Schema.Struct(Object.fromEntries(names.map((name) => [name, Schema.optional(Schema.Json)])));
-};
+const JsonObject = Schema.Any.check(
+  Schema.makeFilter((input) => Predicate.isObject(input) && !Array.isArray(input), {
+    expected: "a JSON object",
+    toJsonSchema: () => ({ type: "object" }),
+  }),
+);
 
 const withArgumentsDecoder = <T extends Tool.Any>(tool: T, decoder: Schema.Top): T =>
   // SAFETY: a clone with the prototype and every field of `tool`; the one field replaced is a
@@ -137,7 +139,7 @@ const makeTool = (name: string, definition: McpToolDefinition) =>
         // The server wrote the schema for its own validator, not for OpenAI's strict
         // mode, which rejects any optional property; the server checks the arguments.
         .annotate(Tool.Strict, false),
-      argumentsDecoder(definition.inputSchema),
+      JsonObject,
     ),
     definition,
   );

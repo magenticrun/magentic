@@ -7,6 +7,7 @@ import {
   ConversationStore,
   dataDir,
   PluginHost,
+  PluginRoutes,
   Runner,
   Steering,
 } from "@magentic/core";
@@ -29,9 +30,11 @@ import {
   FetchHttpClient,
   type HttpClient,
   HttpRouter,
+  HttpServerRequest,
   HttpServerResponse,
 } from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
+import { BridgesLayer } from "./Bridges.ts";
 import { configAgentsPlugin } from "./ConfigAgents.ts";
 import { ToolCallGuardLive } from "./Guard.ts";
 import { RpcHandlers } from "./Handlers.ts";
@@ -190,7 +193,7 @@ export const RunnerLayer = Runner.layer.pipe(
 
 const AdmissionLayer = Layer.mergeAll(Identity.layerLocal, Policy.layerAllowAll, Audit.layerMemory);
 
-/** The runner with what admits a run; the wake-ups start runs through both. */
+/** The runner with what admits a run; the wake-ups and the bridges start runs through both. */
 const CoreLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer);
 
 /**
@@ -203,6 +206,7 @@ const CoreLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer);
 export const ServicesLayer = Layer.mergeAll(
   CoreLayer,
   Wakeups.layer.pipe(Layer.provide(CoreLayer)),
+  BridgesLayer.pipe(Layer.provide(CoreLayer)),
 ).pipe(
   Layer.provideMerge(
     HostLayer.pipe(
@@ -227,7 +231,37 @@ export const RpcRoute = RpcServer.layerHttp({ group: Api, path: RPC_PATH, protoc
 /** For anything that only wants to know the gateway is up, curl included. */
 export const HealthRoute = HttpRouter.add("GET", "/health", HttpServerResponse.empty());
 
-export const AllRoutes = Layer.mergeAll(RpcRoute, HealthRoute);
+/**
+ * The routes plugins registered, under `/plugins/<id>/`: a bridge's webhook
+ * receiver, for one. Dispatched at request time from the host's registry,
+ * so a plugin that failed to set up serves nothing and the prefix is the
+ * gateway's to keep.
+ */
+export const pluginRoutes = Layer.unwrap(
+  Effect.map(PluginRoutes, (routes) =>
+    HttpRouter.add(
+      "*",
+      "/plugins/:plugin/*",
+      Effect.gen(function* () {
+        const request = yield* HttpServerRequest.HttpServerRequest;
+        const params = yield* HttpRouter.params;
+        const plugin = params.plugin ?? "";
+        const path = params["*"] ?? "";
+        const entry = (yield* routes.entries).find(
+          (route) =>
+            route.plugin === plugin && route.path === path && route.method === request.method,
+        );
+        return entry === undefined
+          ? HttpServerResponse.empty({ status: 404 })
+          : yield* entry.handle(request);
+      }),
+    ),
+  ),
+);
+
+export const PluginRoute = pluginRoutes.pipe(Layer.provide(ServicesLayer));
+
+export const AllRoutes = Layer.mergeAll(RpcRoute, HealthRoute, PluginRoute);
 
 export interface ServerOptions {
   /** Drop request and listen logs, for a gateway embedded in another program. */

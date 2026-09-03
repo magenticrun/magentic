@@ -2,8 +2,12 @@ import {
   type AgentDefinition,
   type AgentDraft,
   AgentAlreadyRegistered,
+  type BridgeHandle,
+  type BridgeRegistration,
   capabilityOf,
   type CommandRegistration,
+  type HttpRouteHandler,
+  type HttpRouteMethod,
   type ModelProviderRegistration,
   type Plugin,
   type PluginContext,
@@ -22,6 +26,7 @@ import {
   type Capability,
   PluginInfo,
   type PluginSource,
+  RegisteredName,
   type RunEvent,
 } from "@magentic/protocol";
 import {
@@ -31,7 +36,7 @@ import {
   Layer,
   Option,
   Ref,
-  type Schema,
+  Schema,
   Scope,
   Semaphore,
   Stream,
@@ -40,6 +45,7 @@ import { Tool, type Toolkit } from "effect/unstable/ai";
 import { AgentRegistry } from "../AgentRegistry.ts";
 import { describeCause } from "../Errors.ts";
 import { RunEventBus } from "../EventBus.ts";
+import { BridgeBackend, PluginRoutes, ROUTE_PATH, type RouteEntry } from "./Bridges.ts";
 import { commandRegistryOver, CommandRegistry } from "./CommandRegistry.ts";
 import { modelRegistryOver, ModelRegistry } from "./ModelRegistry.ts";
 import { openRegistry, type PluginRef, type Registry } from "./Registry.ts";
@@ -101,7 +107,14 @@ export class PluginHost extends Context.Service<
   static readonly layer = <const Plugins extends ReadonlyArray<LoadedPlugin<any>>>(
     options: PluginHostOptions<Plugins>,
   ): Layer.Layer<
-    PluginHost | ToolRegistry | ModelRegistry | AgentRegistry | CommandRegistry | RunEventBus,
+    | PluginHost
+    | ToolRegistry
+    | ModelRegistry
+    | AgentRegistry
+    | CommandRegistry
+    | RunEventBus
+    | BridgeBackend
+    | PluginRoutes,
     never,
     PluginRequirements<Plugins> | PluginServices | ToolCallGuard
   > =>
@@ -110,6 +123,7 @@ export class PluginHost extends Context.Service<
         const hostScope = yield* Scope.Scope;
         const guard = yield* ToolCallGuard;
         const bus = yield* RunEventBus.make;
+        const backend = yield* BridgeBackend.make;
         const disabled = new Set(options.disabled ?? []);
 
         // Agents: transforms replay into a fresh draft on every rebuild.
@@ -158,6 +172,86 @@ export class PluginHost extends Context.Service<
         const toolHooks = yield* openRegistry<ToolHookEntry>();
         const providers = yield* openRegistry<ModelProviderRegistration>();
         const commands = yield* openRegistry<CommandRegistration>();
+        const bridges = yield* openRegistry<BridgeRegistration>();
+        const routes = yield* openRegistry<RouteEntry>();
+
+        const isName = Schema.is(RegisteredName);
+
+        /**
+         * A bridge gets a handle over the gateway's runner, not the runner:
+         * the surface and provider it registered go with every ask, so the
+         * principal is minted from what the host checked, never from what
+         * the plugin says at run time.
+         */
+        const registerBridge = Effect.fn("PluginHost.registerBridge")(function* (
+          ref: PluginRef,
+          bridge: BridgeRegistration,
+        ) {
+          for (const [field, value] of [
+            ["surface", bridge.surface],
+            ["provider", bridge.provider],
+          ] as const) {
+            if (!isName(value)) {
+              return yield* new PluginSetupError({
+                plugin: ref.id,
+                message: `bridge ${field} ${JSON.stringify(value)} must be a lower-case name of 2 to 32 letters, digits and -`,
+              });
+            }
+          }
+          if ((yield* bridges.values).some((b) => b.surface === bridge.surface)) {
+            return yield* new PluginSetupError({
+              plugin: ref.id,
+              message: `surface ${bridge.surface} is already registered by another plugin`,
+            });
+          }
+          yield* bridges.register(ref, bridge);
+          const { surface, provider } = bridge;
+          const handle: BridgeHandle = {
+            run: (input) =>
+              Stream.unwrap(
+                Effect.map(backend.runner, (runner) => runner.run({ ...input, surface, provider })),
+              ),
+            steer: (conversationId, input, onBehalfOf) =>
+              Effect.flatMap(backend.runner, (runner) =>
+                runner.steer({ surface, provider, conversationId, input, onBehalfOf }),
+              ),
+            notice: (conversationId, text) =>
+              Effect.flatMap(backend.runner, (runner) => runner.notice(conversationId, text)),
+          };
+          return handle;
+        });
+
+        const registerRoute = <R>(
+          ref: PluginRef,
+          method: HttpRouteMethod,
+          path: string,
+          handler: HttpRouteHandler<R>,
+        ): Effect.Effect<Registration, PluginSetupError, Scope.Scope | R> =>
+          Effect.gen(function* () {
+            if (!ROUTE_PATH.test(path)) {
+              return yield* new PluginSetupError({
+                plugin: ref.id,
+                message: `route path ${JSON.stringify(path)} must be segments of lower-case letters, digits, _ and -, without a leading slash`,
+              });
+            }
+            const taken = (yield* routes.values).some(
+              (route) => route.plugin === ref.id && route.method === method && route.path === path,
+            );
+            if (taken) {
+              return yield* new PluginSetupError({
+                plugin: ref.id,
+                message: `route ${method} ${path} is already registered`,
+              });
+            }
+            // Captured now so a request later runs with the plugin's own services.
+            const services = yield* Effect.context<R>();
+            return yield* routes.register(ref, {
+              plugin: ref.id,
+              method,
+              path,
+              handle: (request) => handler(request).pipe(Effect.provideContext(services)),
+            });
+          });
 
         const registerCommand = Effect.fn("PluginHost.registerCommand")(function* (
           ref: PluginRef,
@@ -262,6 +356,8 @@ export class PluginHost extends Context.Service<
           },
           agent: { transform: (apply) => transforms.register(ref, apply), rebuild },
           command: { register: (command) => registerCommand(ref, command) },
+          bridge: { register: (bridge) => registerBridge(ref, bridge) },
+          http: { route: (method, path, handler) => registerRoute(ref, method, path, handler) },
           event: {
             subscribe: <Tag extends RunEvent["_tag"]>(tag: Tag) =>
               bus.stream.pipe(
@@ -350,6 +446,8 @@ export class PluginHost extends Context.Service<
           const toolEntries = yield* tools.entries;
           const providerEntries = yield* providers.entries;
           const commandEntries = yield* commands.entries;
+          const bridgeEntries = yield* bridges.entries;
+          const routeEntries = yield* routes.entries;
           const owner = yield* Ref.get(owners);
           return states.map(
             (state) =>
@@ -365,6 +463,12 @@ export class PluginHost extends Context.Service<
                 commands: commandEntries
                   .filter((entry) => entry.plugin.id === state.id)
                   .map((entry) => entry.value.name),
+                bridges: bridgeEntries
+                  .filter((entry) => entry.plugin.id === state.id)
+                  .map((entry) => entry.value.surface),
+                routes: routeEntries
+                  .filter((entry) => entry.plugin.id === state.id)
+                  .map((entry) => `${entry.value.method} /plugins/${state.id}/${entry.value.path}`),
               }),
           );
         });
@@ -385,6 +489,8 @@ export class PluginHost extends Context.Service<
           Context.add(AgentRegistry, agentRegistry),
           Context.add(CommandRegistry, commandRegistryOver(commands.values)),
           Context.add(RunEventBus, bus),
+          Context.add(BridgeBackend, backend),
+          Context.add(PluginRoutes, PluginRoutes.of({ entries: routes.values })),
         );
       }),
     );

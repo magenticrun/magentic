@@ -153,6 +153,7 @@ layer(TestLayer)("Runner", (it) => {
       const usage = events[5];
       assert.isTrue(usage?._tag === "TokenUsage" && usage.inputTokens === 10);
       if (usage?._tag === "TokenUsage") {
+        assert.strictEqual(usage.model, "fake/fake");
         assert.strictEqual(usage.breakdown.toolCount, 1);
         assert.isAbove(usage.breakdown.system, 0);
         assert.isAbove(usage.breakdown.tools, 0);

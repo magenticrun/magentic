@@ -1,0 +1,21 @@
+{
+  "name": "@magentic/bridge-github",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The github bridge plugin: mentions on issues and pull requests become runs, and forge tools push and open pull requests as a GitHub App.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun --bun vitest run --root ../.. packages/bridge-github"
+  },
+  "dependencies": {
+    "@magentic/plugin": "workspace:*",
+    "@magentic/protocol": "workspace:*",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/platform-bun": "catalog:"
+  }
+}

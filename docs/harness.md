@@ -14,10 +14,10 @@ checkout, not yet exercised in this repo" it is marked **verify**.
 | Term         | Meaning                                                                                                           |
 | ------------ | ----------------------------------------------------------------------------------------------------------------- |
 | Principal    | Who is asking. Resolved once at the edge by identity. Carries id, groups, provider, and the surface it came from. |
-| Surface      | Where a request enters: `slack`, `cli`, `cursor`, `http`, `cron`. Surfaces are thin adapters.                     |
+| Surface      | Where a request enters: `cli`, `slack`, `cursor`, or a bridge plugin's own name (`github`). Thin adapters.        |
 | Agent        | A named definition: system prompt, model, tool names, skill names, memory scope, default policy hints.            |
 | Tool         | An `effect/unstable/ai` `Tool` with a handler layer plus magentic annotations: `capability` and `risk`.           |
-| Capability   | A coarse label policy reasons about (`fs:read`, `fs:write`, `shell`, `http:egress`, `github:write`).              |
+| Capability   | A coarse label policy reasons about (`fs:read`, `fs:write`, `shell`, `http:egress`, `mcp`, `forge:write`).        |
 | Skill        | A directory with `SKILL.md` (Agent Skills format) and optional scripts. Loaded on demand into the prompt.         |
 | Run          | One invocation: principal + surface + agent + input. Emits a stream of `RunEvent`s and ends in a `RunResult`.     |
 | Conversation | A chain of runs that share chat history. Keyed per surface context (Slack thread, CLI session, Cursor workspace). |
@@ -52,8 +52,8 @@ per-call hook is what makes "what they may use" real; admission alone is not eno
 
 Schemas are `Schema.Class` and live in protocol so surfaces and the CLI share them.
 
-- `Principal` (exists). Add `surface`, `sessionId`, and `onBehalfOf` (for cron and service
-  principals acting for a person).
+- `Principal` (exists, with `onBehalfOf` for bridge, cron, and service principals acting for
+  a person). Add `surface` and `sessionId`.
 - `AgentInfo` (exists, with `model`). Add `skills`, `capabilities`.
 - `AgentRequest` (exists). Add `conversationId`.
 - `RunId`, `ConversationId`, `ApprovalId`: branded strings.
@@ -312,6 +312,10 @@ auth login|list|logout` (exists, inline `@clack/prompts` like opencode's, not th
   prompts. Bearer token auth is applied by the surrounding router (the MCP layer does not do
   auth itself, per its docs).
 - **HTTP**: the raw API, used by CI and by the other surfaces.
+- **Bridges** (`plugins.md`, Bridges): a surface that is a plugin. The plugin identifies the
+  person behind a mention and asks the host to run; the gateway mints
+  `system:bridge/<surface>` on behalf of them, admits through policy, and records. The
+  GitHub bridge is the first; Slack and Discord fit the same contract.
 
 ## Configuration
 
