@@ -5,11 +5,17 @@ import { builtin, ConversationStore, PluginHost, Runner, Steering } from "@magen
 import { Identity } from "@magentic/identity";
 import { mcpPlugin, McpServers } from "@magentic/mcp";
 import { fakeProviderPlugin, type FakeScript } from "@magentic/model";
-import { AgentDefinition, define, ModelCatalog, Notices } from "@magentic/plugin";
+import {
+  AgentDefinition,
+  type BridgeHandle,
+  define,
+  ModelCatalog,
+  Notices,
+} from "@magentic/plugin";
 import { Policy } from "@magentic/policy";
 import { Api, RPC_PATH, RunNotFound } from "@magentic/protocol";
 import { BackgroundTasks, fileToolsPlugin, ToolOutputDir, WorkspaceRoot } from "@magentic/tools";
-import { DateTime, Effect, Exit, FileSystem, Layer, Ref, Stream } from "effect";
+import { DateTime, Effect, Exit, FileSystem, Layer, Option, Ref, Stream } from "effect";
 import {
   FetchHttpClient,
   HttpClient,
@@ -25,6 +31,7 @@ import {
   RpcServer,
   RpcTest,
 } from "effect/unstable/rpc";
+import { BridgesLayer } from "./Bridges.ts";
 import { ToolCallGuardLive } from "./Guard.ts";
 import { RpcHandlers } from "./Handlers.ts";
 import { assistant, builtinPlugins, checkBind } from "./Server.ts";
@@ -76,6 +83,31 @@ const triagePlugin = define({
     Effect.asVoid(ctx.agent.transform((draft) => Effect.sync(() => draft.set(triage)))),
 });
 
+/** The latest host's bridge handle: a bridge named `probe` that identifies whoever the test says. */
+const probe = Ref.makeUnsafe(Option.none<BridgeHandle>());
+const probePlugin = define({
+  id: "probe",
+  description: "A bridge for the tests.",
+  setup: (ctx) =>
+    Effect.flatMap(
+      ctx.bridge.register({
+        surface: "probe",
+        provider: "probe",
+        capabilities: {
+          reactions: false,
+          edit: false,
+          remove: false,
+          editNotifies: false,
+          status: false,
+          threads: true,
+          delivery: "push",
+        },
+      }),
+      (handle) => Ref.set(probe, Option.some(handle)),
+    ),
+});
+const probeHandle = Effect.map(Ref.get(probe), (found) => Option.getOrThrow(found));
+
 const WorkspaceLayer = Layer.unwrap(
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -120,6 +152,7 @@ const handlersWith = (policy: Layer.Layer<Policy>) => {
       builtin(fakeProviderPlugin(scripted)),
       builtin(triagePlugin),
       builtin(mcpPlugin, mcpServers),
+      builtin(probePlugin),
     ],
     paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
   }).pipe(
@@ -133,6 +166,7 @@ const handlersWith = (policy: Layer.Layer<Policy>) => {
   const ServicesLayer = Layer.mergeAll(
     CoreLayer,
     Wakeups.layer.pipe(Layer.provide(CoreLayer)),
+    BridgesLayer.pipe(Layer.provide(CoreLayer)),
   ).pipe(
     Layer.provideMerge(HostLayer),
     Layer.provideMerge(
@@ -155,11 +189,16 @@ const handlersWith = (policy: Layer.Layer<Policy>) => {
 
 const TestLayer = handlersWith(Policy.layerAllowAll);
 
-/** Reading needs an approver nobody can be yet; the rest is allowed. */
+/** Reading needs an approver nobody can be yet, and the probe bridge admits writers only; the rest is allowed. */
 const approvalPolicy = Layer.succeed(
   Policy,
   Policy.of({
-    evaluate: () => Effect.succeed({ _tag: "Allow" }),
+    evaluate: (request) =>
+      Effect.succeed(
+        request.surface === "probe" && !request.principal.groups.includes("probe:write")
+          ? { _tag: "Deny", reason: "write access needed" }
+          : { _tag: "Allow" },
+      ),
     evaluateToolCall: (call) =>
       Effect.succeed(
         call.tool === "read_file"
@@ -219,6 +258,7 @@ layer(TestLayer)("gateway api", (it) => {
           ["fake", "active", [], []],
           ["triage", "active", [], ["triage"]],
           ["mcp", "active", [], []],
+          ["probe", "active", [], []],
         ],
       );
     }),
@@ -256,6 +296,45 @@ layer(TestLayer)("gateway api", (it) => {
       assert.deepStrictEqual(
         recorded.map((e) => e.action),
         ["run.started"],
+      );
+    }),
+  );
+
+  it.effect("a bridge runs as a machine principal for a person, in a conversation of its own", () =>
+    Effect.gen(function* () {
+      const handle = yield* probeHandle;
+      const events = yield* Stream.runCollect(
+        handle.run({
+          agent: "triage",
+          conversationId: "probe-thread-7",
+          input: "hello from the thread",
+          onBehalfOf: { id: "u1", displayName: "Alice", groups: ["write"] },
+        }),
+      );
+      assert.deepStrictEqual(
+        events.map((e) => e._tag),
+        ["RunStarted", "TextDelta", "TokenUsage", "RunFinished"],
+      );
+      const started = yield* Ref.get(yield* AuditMemory);
+      const run = started.findLast((e) => e.action === "run.started");
+      assert.strictEqual(run?.principal.id, "system:bridge/probe");
+      assert.strictEqual(run?.principal.provider, "probe");
+      assert.deepStrictEqual(run?.principal.onBehalfOf, { id: "probe:u1", displayName: "Alice" });
+      assert.deepStrictEqual([...(run?.principal.groups ?? [])], ["probe:write"]);
+      assert.include(JSON.stringify(run?.detail), '"surface":"probe"');
+      // The thread's conversation is the bridge's; the person at the CLI does not see it.
+      const client = yield* makeClient;
+      const mine = yield* client.listConversations({});
+      assert.isFalse(mine.some((c) => c.id === "probe-thread-7"));
+      const hidden = yield* client.getConversation({ id: "probe-thread-7" }).pipe(Effect.flip);
+      assert.strictEqual(hidden._tag, "ConversationNotFound");
+      // Nothing is in flight now, so a later message starts a run rather than steering one.
+      assert.isFalse(
+        yield* handle.steer("probe-thread-7", "more", {
+          id: "u1",
+          displayName: "Alice",
+          groups: ["write"],
+        }),
       );
     }),
   );
@@ -521,6 +600,25 @@ layer(GuardedLayer)("gateway guard", (it) => {
       const denied = recorded[1];
       assert.include(JSON.stringify(denied?.detail), "read_file needs an approver");
       assert.include(JSON.stringify(denied?.detail), '"tool":"read_file"');
+    }),
+  );
+
+  it.effect("denies a bridge run policy does not admit and records who asked", () =>
+    Effect.gen(function* () {
+      const handle = yield* probeHandle;
+      const denied = yield* Stream.runCollect(
+        handle.run({
+          agent: "triage",
+          conversationId: "probe-thread-8",
+          input: "please",
+          onBehalfOf: { id: "u2", displayName: "Mallory", groups: ["read"] },
+        }),
+      ).pipe(Effect.flip);
+      assert.isTrue(denied._tag === "RunDenied" && denied.reason === "write access needed");
+      const recorded = yield* Ref.get(yield* AuditMemory);
+      const event = recorded.find((e) => e.action === "run.denied");
+      assert.strictEqual(event?.principal.onBehalfOf?.id, "probe:u2");
+      assert.include(JSON.stringify(event?.detail), "write access needed");
     }),
   );
 });

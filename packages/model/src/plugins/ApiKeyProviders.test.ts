@@ -86,6 +86,8 @@ const registered = Effect.fn("registered")(function* (plugin: ApiKeyPlugin) {
     agent: { transform: () => unused, rebuild: Effect.void },
     command: { register: () => unused },
     event: { subscribe: () => Stream.empty },
+    bridge: { register: () => unused },
+    http: { route: () => unused },
   };
   yield* plugin.setup(ctx);
   return Option.getOrThrow(yield* Ref.get(seen));

@@ -49,6 +49,8 @@ type TextLine = {
    */
   readonly kind: "user" | "assistant" | "error" | "note" | "summary";
   readonly text: string;
+  readonly model?: string;
+  readonly tokensPerSecond?: number;
 };
 
 type ToolResult = { readonly ok: boolean; readonly text: string; readonly raw: Schema.Json };
@@ -146,6 +148,9 @@ const isEnter = (name: string) => name === "return" || name === "kpenter" || nam
 /** `$0.0123` under a cent, `$1.23` otherwise. */
 const formatCost = (dollars: number): string =>
   dollars > 0 && dollars < 0.01 ? `$${dollars.toFixed(4)}` : `$${dollars.toFixed(2)}`;
+
+const formatTokensPerSecond = (rate: number): string =>
+  rate < 10 ? rate.toFixed(1) : `${Math.round(rate)}`;
 
 /** Lines the detail under a tool call shows at most, folded or open. */
 const DETAIL_FOLDED_LINES = 12;
@@ -276,6 +281,12 @@ const asThinking = (line: Line): ThinkingLine | undefined =>
   line.kind === "thinking" ? line : undefined;
 const asText = (line: Line): TextLine | undefined =>
   line.kind === "tool" || line.kind === "thinking" ? undefined : line;
+const responseInfo = (
+  line: TextLine,
+): { readonly model: string; readonly tokensPerSecond: number } | undefined =>
+  line.kind === "assistant" && line.model !== undefined && line.tokensPerSecond !== undefined
+    ? { model: line.model, tokensPerSecond: line.tokensPerSecond }
+    : undefined;
 
 /** `Thought for 12s`; a thought shorter than a second still took one. */
 const thoughtFor = (line: ThinkingLine): string => {
@@ -396,13 +407,38 @@ export const createChatTui = (options: {
   // Setting a field leaves the line as it is and redraws only what read it.
   const push = (line: Line) => setState("lines", state.lines.length, line);
 
+  let pendingAssistant: number | undefined;
+  let outputStartedTick: number | undefined;
+  let outputEndedTick: number | undefined;
+  const markOutput = () => {
+    outputStartedTick ??= state.ticks;
+    outputEndedTick = state.ticks;
+  };
+
   const appendAssistant = (text: string) => {
     const last = state.lines.at(-1);
     if (last !== undefined && last.kind === "assistant") {
       setState("lines", state.lines.length - 1, { text: last.text + text });
     } else {
+      pendingAssistant = state.lines.length;
       push({ kind: "assistant", text });
     }
+  };
+
+  const finishAssistant = (model: string | undefined, outputTokens: number) => {
+    const index = pendingAssistant;
+    if (
+      index !== undefined &&
+      model !== undefined &&
+      outputStartedTick !== undefined &&
+      outputEndedTick !== undefined
+    ) {
+      const seconds = (Math.max(1, outputEndedTick - outputStartedTick) * TICK_MS) / 1000;
+      setState("lines", index, { model, tokensPerSecond: outputTokens / seconds });
+    }
+    pendingAssistant = undefined;
+    outputStartedTick = undefined;
+    outputEndedTick = undefined;
   };
 
   /**
@@ -479,15 +515,21 @@ export const createChatTui = (options: {
       }
       switch (event._tag) {
         case "RunStarted":
+          pendingAssistant = undefined;
+          outputStartedTick = undefined;
+          outputEndedTick = undefined;
           setState("status", "Thinking…");
           return;
         case "TextDelta":
+          markOutput();
           appendAssistant(event.text);
           return;
         case "ReasoningDelta":
+          markOutput();
           appendThinking(event.text);
           return;
         case "ToolCall":
+          markOutput();
           setState("status", `Running ${event.name}…`);
           push({
             kind: "tool",
@@ -518,13 +560,19 @@ export const createChatTui = (options: {
             push({ kind: "note", text: notice });
           }
           return;
-        case "TokenUsage":
+        case "TokenUsage": {
+          const model = event.model ?? Option.getOrUndefined(state.model);
+          finishAssistant(model, event.outputTokens);
+          if (event.model !== undefined) {
+            setState("model", Option.some(event.model));
+          }
           setState("contextTokens", event.inputTokens + event.outputTokens);
           if (event.cost !== undefined) {
             const spent = event.cost;
             setState("cost", (before) => Option.some(Option.getOrElse(before, () => 0) + spent));
           }
           return;
+        }
         case "CompactionStarted":
           setState("status", "Compacting…");
           return;
@@ -1178,13 +1226,21 @@ export const createChatTui = (options: {
                           >
                             {text().kind === "summary" ? "◐" : "⏺"}
                           </text>
-                          <box flexGrow={1} flexShrink={1} marginLeft={1}>
+                          <box flexDirection="column" flexGrow={1} flexShrink={1} marginLeft={1}>
                             <markdown
                               content={text().text}
                               syntaxStyle={markdownStyle()}
                               fg={palette().text}
                               streaming={state.busy && line === state.lines.at(-1)}
                             />
+                            <Show when={responseInfo(text())}>
+                              {(info) => (
+                                <text fg={palette().muted} wrapMode="none" truncate>
+                                  {info().model} · {formatTokensPerSecond(info().tokensPerSecond)}{" "}
+                                  tokens/s
+                                </text>
+                              )}
+                            </Show>
                           </box>
                         </box>
                       </Match>

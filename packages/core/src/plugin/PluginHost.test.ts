@@ -2,6 +2,7 @@ import { BunServices } from "@effect/platform-bun";
 import { assert, layer } from "@effect/vitest";
 import {
   AgentDefinition,
+  type BridgeHandle,
   CapabilityAnnotation,
   define,
   type Plugin,
@@ -14,8 +15,9 @@ import {
 import { Principal } from "@magentic/protocol";
 import { Deferred, Effect, Layer, Logger, Option, Ref, Schema, Stream } from "effect";
 import { LanguageModel, Tool, Toolkit } from "effect/unstable/ai";
-import { FetchHttpClient } from "effect/unstable/http";
+import { FetchHttpClient, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import { AgentRegistry } from "../AgentRegistry.ts";
+import { BridgeBackend, PluginRoutes } from "./Bridges.ts";
 import { CommandRegistry } from "./CommandRegistry.ts";
 import { ModelRegistry } from "./ModelRegistry.ts";
 import { builtin, PluginHost } from "./PluginHost.ts";
@@ -105,6 +107,87 @@ const denyPlugin = define({
     ),
 });
 
+/** A bridge and a route, the handle kept so a test can run through it. */
+const bridgeHandle = Deferred.makeUnsafe<BridgeHandle>();
+const bridgePlugin = define({
+  id: "forge",
+  description: "a bridge with a webhook",
+  setup: (ctx) =>
+    Effect.gen(function* () {
+      const handle = yield* ctx.bridge.register({
+        surface: "forge",
+        provider: "forge",
+        capabilities: {
+          reactions: true,
+          edit: true,
+          remove: true,
+          editNotifies: true,
+          status: false,
+          threads: true,
+          delivery: "push",
+        },
+      });
+      yield* Deferred.succeed(bridgeHandle, handle);
+      yield* ctx.http.route("POST", "hook", (request) =>
+        Effect.map(request.text, (body) => HttpServerResponse.text(`got ${body}`)).pipe(
+          Effect.orElseSucceed(() => HttpServerResponse.empty({ status: 400 })),
+        ),
+      );
+    }),
+});
+
+/** Takes a surface name already taken, and a route path with a slash in front. */
+const badBridgePlugin = define({
+  id: "forge-again",
+  description: "claims a taken surface",
+  setup: (ctx) =>
+    Effect.asVoid(
+      ctx.bridge.register({
+        surface: "forge",
+        provider: "forge",
+        capabilities: {
+          reactions: false,
+          edit: false,
+          remove: false,
+          editNotifies: false,
+          status: false,
+          threads: false,
+          delivery: "poll",
+        },
+      }),
+    ),
+});
+
+const badRoutePlugin = define({
+  id: "bad-route",
+  description: "registers a route with a leading slash",
+  setup: (ctx) =>
+    Effect.asVoid(
+      ctx.http.route("GET", "/absolute", () => Effect.succeed(HttpServerResponse.empty())),
+    ),
+});
+
+const badSurfacePlugin = define({
+  id: "bad-surface",
+  description: "registers a surface name policy could not match",
+  setup: (ctx) =>
+    Effect.asVoid(
+      ctx.bridge.register({
+        surface: "Not A Name",
+        provider: "x",
+        capabilities: {
+          reactions: false,
+          edit: false,
+          remove: false,
+          editNotifies: false,
+          status: false,
+          threads: false,
+          delivery: "poll",
+        },
+      }),
+    ),
+});
+
 const alice = new Principal({ id: "alice", displayName: "Alice", groups: [], provider: "local" });
 const helper = new AgentDefinition({
   name: "helper",
@@ -147,6 +230,10 @@ layer(
     broken,
     agentsPlugin,
     denyPlugin,
+    bridgePlugin,
+    badBridgePlugin,
+    badRoutePlugin,
+    badSurfacePlugin,
   ]),
 )("PluginHost", (it) => {
   it.effect("reports every plugin with its status and contributions", () =>
@@ -161,10 +248,70 @@ layer(
           ["broken", "failed", "no thanks"],
           ["agents", "active", undefined],
           ["deny", "active", undefined],
+          ["forge", "active", undefined],
+          ["forge-again", "failed", "surface forge is already registered by another plugin"],
+          [
+            "bad-route",
+            "failed",
+            'route path "/absolute" must be segments of lower-case letters, digits, _ and -, without a leading slash',
+          ],
+          [
+            "bad-surface",
+            "failed",
+            'bridge surface "Not A Name" must be a lower-case name of 2 to 32 letters, digits and -',
+          ],
         ],
       );
       assert.deepStrictEqual([...plugins[0]!.tools], ["echo"]);
       assert.deepStrictEqual([...plugins[4]!.agents], ["helper"]);
+      assert.deepStrictEqual([...plugins[6]!.bridges], ["forge"]);
+      assert.deepStrictEqual([...plugins[6]!.routes], ["POST /plugins/forge/hook"]);
+    }),
+  );
+
+  it.effect("serves a plugin's route with the request and nothing from a failed plugin", () =>
+    Effect.gen(function* () {
+      const routes = yield* (yield* PluginRoutes).entries;
+      assert.deepStrictEqual(
+        routes.map((route) => [route.plugin, route.method, route.path]),
+        [["forge", "POST", "hook"]],
+      );
+      const request = HttpServerRequest.fromWeb(
+        new Request("http://gateway/plugins/forge/hook", { method: "POST", body: "ping" }),
+      );
+      const response = yield* routes[0]!.handle(request);
+      assert.strictEqual(response.status, 200);
+    }),
+  );
+
+  it.effect("a bridge runs through the back-end the gateway connects, under its own surface", () =>
+    Effect.gen(function* () {
+      const handle = yield* Deferred.await(bridgeHandle);
+      const asked = yield* Ref.make<ReadonlyArray<string>>([]);
+      yield* (yield* BridgeBackend).connect({
+        run: (request) =>
+          Stream.fromEffect(
+            Ref.update(asked, (all) => [
+              ...all,
+              `${request.surface}/${request.provider}:${request.onBehalfOf.id}`,
+            ]),
+          ).pipe(Stream.map(() => ({ _tag: "RunFinished" as const, reason: "stop" }))),
+        steer: () => Effect.succeed(false),
+        notice: () => Effect.void,
+      });
+      const events = yield* Stream.runCollect(
+        handle.run({
+          agent: "helper",
+          conversationId: "forge-1",
+          input: "hi",
+          onBehalfOf: { id: "42", displayName: "Alice", groups: ["write"] },
+        }),
+      );
+      assert.deepStrictEqual(events, [{ _tag: "RunFinished", reason: "stop" }]);
+      assert.deepStrictEqual(yield* Ref.get(asked), ["forge/forge:42"]);
+      assert.isFalse(
+        yield* handle.steer("forge-1", "more", { id: "42", displayName: "Alice", groups: [] }),
+      );
     }),
   );
 

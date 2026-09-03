@@ -9,6 +9,7 @@ export * from "./EventBus.ts";
 export * from "./GatewayConfig.ts";
 export * from "./Marks.ts";
 export * from "./Paths.ts";
+export * from "./plugin/Bridges.ts";
 export * from "./plugin/CommandRegistry.ts";
 export * from "./plugin/ModelRegistry.ts";
 export * from "./plugin/PluginHost.ts";

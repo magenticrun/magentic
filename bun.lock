@@ -7,6 +7,7 @@
       "devDependencies": {
         "@effect/tsgo": "^0.40.0",
         "@effect/vitest": "4.0.0-rc.112",
+        "@magentic/bridge-github": "workspace:*",
         "@magentic/plugin": "workspace:*",
         "@magentic/protocol": "workspace:*",
         "@oxlint/plugins": "1.81.0",
@@ -63,6 +64,18 @@
       "dependencies": {
         "@magentic/protocol": "workspace:*",
         "effect": "catalog:",
+      },
+    },
+    "packages/bridge-github": {
+      "name": "@magentic/bridge-github",
+      "version": "0.0.0",
+      "dependencies": {
+        "@magentic/plugin": "workspace:*",
+        "@magentic/protocol": "workspace:*",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@effect/platform-bun": "catalog:",
       },
     },
     "packages/core": {
@@ -294,6 +307,8 @@
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
 
     "@magentic/audit": ["@magentic/audit@workspace:packages/audit"],
+
+    "@magentic/bridge-github": ["@magentic/bridge-github@workspace:packages/bridge-github"],
 
     "@magentic/cli": ["@magentic/cli@workspace:apps/cli"],
 

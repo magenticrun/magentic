@@ -22,6 +22,10 @@ export class PluginInfo extends Schema.Class<PluginInfo>("magentic/protocol/Plug
   agents: Schema.Array(Schema.String),
   /** Slash commands, without the slash. */
   commands: Schema.Array(Schema.String),
+  /** Surfaces the plugin registered as a bridge. */
+  bridges: Schema.Array(Schema.String),
+  /** Routes it serves, as `METHOD /plugins/<id>/<path>`. */
+  routes: Schema.Array(Schema.String),
 }) {}
 
 /** One tool call about to run, as policy sees it. */

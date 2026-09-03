@@ -403,6 +403,7 @@ export class Runner extends Context.Service<
           limits: { context: 0, output: 0 } satisfies ModelLimits,
           cost: Option.none<ModelCost>(),
           thinking: Option.none<Context.Context<never>>(),
+          model: Option.none<string>(),
         };
         const resolved = yield* models.resolve(choice).pipe(Effect.option);
         if (Option.isNone(resolved)) {
@@ -418,6 +419,7 @@ export class Runner extends Context.Service<
           limits: { context: info?.context ?? 0, output: info?.output ?? 0 } satisfies ModelLimits,
           cost: Option.fromNullishOr(info?.cost),
           thinking,
+          model: Option.some(resolved.value.ref),
         };
       });
 
@@ -429,6 +431,7 @@ export class Runner extends Context.Service<
       const tokenUsage = (
         reported: Response.Usage,
         cost: Option.Option<ModelCost>,
+        model: Option.Option<string>,
         history: Prompt.Prompt,
         tools: Record<string, Tool.Any>,
       ): TokenUsage => {
@@ -442,7 +445,10 @@ export class Runner extends Context.Service<
           reasoningTokens: outputTokens.reasoning,
           breakdown: estimateContext(history, tools),
         };
-        return Option.isSome(cost) ? { ...counted, cost: costOf(cost.value, reported) } : counted;
+        const identified = Option.isSome(model) ? { ...counted, model: model.value } : counted;
+        return Option.isSome(cost)
+          ? { ...identified, cost: costOf(cost.value, reported) }
+          : identified;
       };
 
       /**
@@ -607,7 +613,12 @@ export class Runner extends Context.Service<
                 const loop = Effect.gen(function* () {
                   // Resolved per run so a provider signed in after boot is picked up.
                   const model = yield* models.languageModel(choice);
-                  const { limits, cost, thinking } = yield* infoOf(choice, options.reasoning);
+                  const {
+                    limits,
+                    cost,
+                    thinking,
+                    model: modelRef,
+                  } = yield* infoOf(choice, options.reasoning);
                   /** The call with the thinking configuration in its context, when there is one. */
                   const withThinking = <A, E, R>(
                     stream: Stream.Stream<A, E, R>,
@@ -625,6 +636,7 @@ export class Runner extends Context.Service<
                           const summarised = tokenUsage(
                             done.usage,
                             cost,
+                            modelRef,
                             yield* Ref.get(chat.history),
                             tools.tools,
                           );
@@ -719,6 +731,7 @@ export class Runner extends Context.Service<
                       const event = tokenUsage(
                         reported.value,
                         cost,
+                        modelRef,
                         yield* Ref.get(chat.history),
                         tools.tools,
                       );
@@ -884,9 +897,15 @@ export class Runner extends Context.Service<
         );
         // Everything goes into the summary: the person asked for a fresh start.
         const { event, usage } = yield* compactOpened(opened, model, 0);
-        const { cost } = yield* infoOf(choice, Option.none());
+        const { cost, model: modelRef } = yield* infoOf(choice, Option.none());
         // No tools are offered to the summariser, so none are in the estimate.
-        const summarised = tokenUsage(usage, cost, yield* Ref.get(opened.chat.history), {});
+        const summarised = tokenUsage(
+          usage,
+          cost,
+          modelRef,
+          yield* Ref.get(opened.chat.history),
+          {},
+        );
         const now = yield* DateTime.now;
         const info = new Conversation({
           ...existing.value,

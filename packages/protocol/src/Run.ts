@@ -108,6 +108,7 @@ export type ContextBreakdown = typeof ContextBreakdown.Type;
 export const TokenUsage = Schema.TaggedStruct("TokenUsage", {
   inputTokens: Schema.Finite,
   outputTokens: Schema.Finite,
+  model: Schema.optional(Schema.String),
   /** Input served from the provider's prompt cache; part of `inputTokens`. */
   cacheReadTokens: Schema.optional(Schema.Finite),
   /** Input written to the prompt cache this call; part of `inputTokens`. */

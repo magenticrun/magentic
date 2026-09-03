@@ -2,7 +2,7 @@ import { Clock, Effect, Fiber, FileSystem, Option, Path, Ref, Schema, Stream } f
 import { Tool, Toolkit } from "effect/unstable/ai";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { CapabilityAnnotation, ToolCallContext } from "@magentic/plugin";
-import { BackgroundTask } from "@magentic/protocol";
+import { BackgroundTask, type Principal } from "@magentic/protocol";
 import { BackgroundTasks, MAX_TASKS } from "./BackgroundTasks.ts";
 import { EMPTY, OUTPUT_LIMIT, push, render, ToolOutputDir, whole } from "./ToolOutput.ts";
 import { resolveWithin, WorkspaceRoot } from "./WorkspaceRoot.ts";
@@ -32,7 +32,12 @@ const FORCE_KILL_AFTER = "2 seconds";
 
 /**
  * What a child inherits on top of the gateway's environment. Nothing here may
- * wait on a terminal: no pagers, no colour codes, no credential prompts.
+ * wait on a terminal: no pagers, no colour codes, no credential prompts. And
+ * nothing here may act as the operator: the tokens `gh` and `git` read from
+ * the environment are blanked, so a model that runs `gh pr create` is not
+ * the person who started the gateway. A helper that answered `git
+ * credential fill` would put a token on the model's screen, so no askpass
+ * either; a bridge's tools push with their own token, in process.
  */
 const CHILD_ENV = {
   NO_COLOR: "1",
@@ -40,7 +45,23 @@ const CHILD_ENV = {
   PAGER: "cat",
   GIT_PAGER: "cat",
   GIT_TERMINAL_PROMPT: "0",
+  GH_TOKEN: "",
+  GITHUB_TOKEN: "",
+  GH_ENTERPRISE_TOKEN: "",
+  GITHUB_ENTERPRISE_TOKEN: "",
+  GIT_ASKPASS: "",
 };
+
+/**
+ * The environment for one call. A machine principal acting for a person, a
+ * bridge run, does not see the operator's `gh` login either: its config
+ * directory is pointed at one that holds no account. A person at the CLI
+ * keeps theirs, since their own shell has it already.
+ */
+const envFor = (principal: Principal, outputDir: string): Record<string, string> =>
+  principal.onBehalfOf === undefined
+    ? CHILD_ENV
+    : { ...CHILD_ENV, GH_CONFIG_DIR: `${outputDir}/gh-config-isolated` };
 
 /** A command that ran to its end, or was killed for running too long. */
 const Finished = Schema.Struct({
@@ -288,7 +309,7 @@ export const shellToolHandlers = Effect.gen(function* () {
       .start({
         command,
         cwd,
-        env: CHILD_ENV,
+        env: envFor(call.principal, outputDir),
         timeout: timeout === undefined || timeout <= 0 ? Option.none() : Option.some(timeout),
         owner: { principal: call.principal.id, conversationId: call.conversationId },
       })
@@ -316,13 +337,14 @@ export const shellToolHandlers = Effect.gen(function* () {
   ) {
     const limit = clampTimeout(timeout);
     const started = yield* Clock.currentTimeMillis;
+    const call = yield* ToolCallContext;
     return yield* Effect.gen(function* () {
       const handle = yield* spawner
         .spawn(
           ChildProcess.make(command, {
             shell: true,
             cwd,
-            env: CHILD_ENV,
+            env: envFor(call.principal, outputDir),
             extendEnv: true,
             stdin: "ignore",
             forceKillAfter: FORCE_KILL_AFTER,

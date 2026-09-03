@@ -69,6 +69,8 @@ export interface PluginContext {
   readonly agent: AgentDomain;
   readonly command: CommandDomain;
   readonly event: EventDomain;
+  readonly bridge: BridgeDomain;
+  readonly http: HttpDomain;
 }
 ```
 
@@ -297,6 +299,91 @@ Enough for observers (a metrics plugin, a "post the final answer to a channel" p
 Audit events are not exposed to plugins; audit is the gateway's record, not an extension
 point.
 
+### Bridges
+
+A bridge is a plugin that brings input in rather than tools out: a mention on a GitHub issue,
+a Slack thread, a Linear ticket. It is the first kind of plugin that starts runs, and it
+must not get a raw runner: the gateway is the only place identity, policy, and audit are
+wired, and a plugin that could pass any `Principal` would be a way around all three. So the
+plugin identifies the person and the host mints the principal.
+
+```ts
+export interface BridgeDomain {
+  /** One per plugin. The surface name is what `surface:<name>` policy rules match. */
+  register(bridge: {
+    readonly surface: string; // "github", "gitlab", "acme-linear"; unique across plugins
+    readonly provider: string; // identity provider name for the people it identifies
+    readonly capabilities: { reactions; edit; status; threads; delivery: "push" | "poll" };
+  }): Effect.Effect<BridgeHandle, PluginSetupError, Scope.Scope>;
+}
+export interface BridgeHandle {
+  run(input: {
+    agent: string;
+    conversationId: ConversationId; // the bridge's own key for the thread
+    input: string;
+    attachments?: ReadonlyArray<Attachment>;
+    onBehalfOf: { id: string; displayName: string; groups: ReadonlyArray<string> };
+    directory?: string;
+  }): Stream.Stream<RunEvent, AgentNotFound | RunDenied>;
+  /** A second message while a run is live; false when none is, so the bridge starts one. */
+  steer(conversationId, input, onBehalfOf): Effect.Effect<boolean, AgentNotFound | RunDenied>;
+  notice(conversationId, text): Effect.Effect<void>;
+}
+```
+
+What the host does with a `run`: the principal's subject is the machine principal
+`system:bridge/<surface>`, its `onBehalfOf` is the person as `<provider>:<id>`, its groups
+are the plugin's prefixed with the surface (`github:write`), and its `surface` is the
+registered name. `Policy.evaluate` admits or denies the run as it would one from the CLI,
+audit records `run.started` or `run.denied` with the surface and the person, and the
+runner runs. The conversation belongs to the subject, so every mention on one thread shares
+it while "the caller's own conversations" stays true for people. `steer` admits the second
+person the same way before offering their message to the run in flight.
+
+The host trusts a bridge's word on who spoke and what they may do, the same trust it
+extends to a tool handler: a plugin is operator-installed code. Surface and provider names
+are open (`/^[a-z][a-z0-9-]{1,31}$/`, unique across plugins) rather than a closed literal
+set, since a custom bridge has to be able to name itself and policy matches by string.
+
+Helpers every bridge wants live beside the domain in `@magentic/plugin`, and none of them
+mentions a pull request: the word-bounded mention test (`triggered`, so `@magentic-bot` and
+`me@magentic.run` do not fire), the hidden-markup sanitiser (`stripHiddenMarkup`: HTML
+comments, invisible characters, image alt text), the permission ladder (`permissionAtLeast`
+over `admin`, `write`, `read`, `none`), the context renderer that frames third-party text as
+quoted (`renderContext`), the throttled progress editor (`trackProgress`) that turns a
+run's events into edits of one message at most every ten seconds, and the answer delivery
+(`deliverAnswer`) that disposes of that message once the run has an answer. Where the answer
+goes is one decision on every bridge and a different sequence of calls on each, so the
+sequence lives in the helper and the bridge only says which `AnswerDelivery` it wants:
+`edit` replaces the progress message with the answer, `collapse` folds it into a record of
+the run and posts the answer as a new message, `delete` takes it back first, `keep` leaves
+it. `deliveryFor` reads the default off the bridge's own `capabilities`: a surface whose
+edits reach the people it already notified (`editNotifies`) replaces, and one that freezes a
+notification at creation — GitHub mails a comment once and never again — collapses, or the
+answer would be read only by whoever opens the thread. A failed run keeps its progress
+message expanded wherever the answer is a message of its own: the tools it lists are the
+only trace of how far the run got.
+
+### HTTP routes
+
+```ts
+export interface HttpDomain {
+  /** Mounted under `/plugins/<id>/`; the plugin verifies its own signature on the raw body. */
+  route(
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+    path: string, // relative, no leading slash: "webhook"
+    handler: (request: HttpServerRequest) => Effect.Effect<HttpServerResponse, never, R>,
+  ): Effect.Effect<Registration, PluginSetupError, Scope.Scope | R>;
+}
+```
+
+The gateway mounts one route, `/plugins/:plugin/*`, and dispatches to the host's route
+registry at request time, so a plugin that failed to set up serves nothing, the prefix keeps
+a plugin from claiming `/rpc` or another plugin's path, and the gateway stays the one
+listener. A handler has no error channel: it answers with a response for every outcome.
+Only a bridge that receives HTTP needs this; a poller is a loop in the plugin's scope and a
+socket is outbound.
+
 ## Host (`@magentic/core`)
 
 `PluginHost` loads plugins and owns every registry. Layering:
@@ -453,6 +540,85 @@ and stdio on top of an rc. Prompts, resources, sampling, elicitation, and OAuth 
 remote servers are not wired; a bearer token in `headers` covers the remote servers that need
 one today.
 
+## The GitHub bridge
+
+`@magentic/bridge-github` (`packages/bridge-github`) is the first bridge, and the plugin is
+also a tool provider: a team that only ever mentions the bot in Slack still installs it for
+the forge tools. It is configured in its `plugins.use` entry; the App's private key and the
+webhook secret come from the environment (`GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`).
+
+```yaml
+plugins:
+  use:
+    - - "@magentic/bridge-github"
+      - app: { id: 123456, slug: magentic-bot }
+        delivery: webhook # webhook | poll
+        agent: github # the agent a mention runs; created with a default prompt when no agents/github.yaml exists
+        trigger: { mention: true, command: /magentic, label: null, assignee: null }
+        allow: { minimum: write, logins: [] }
+        public: { admit: false }
+        branch: { prefix: magentic/ }
+        progress: { after: collapse } # edit | collapse | delete | keep
+```
+
+What it does, and where, so the research in `research/github-bridge.md` maps onto code:
+
+- **Identity** (`GitHubApi.ts`): a GitHub App. JWTs signed with the private key, installation
+  tokens minted per repository (`POST /app/installations/{id}/access_tokens` narrowed with
+  `repositories`) and cached until ten minutes before expiry, never written to disk. Every
+  call retries transient failures and backs off on secondary rate limits.
+- **Delivery** (`Webhook.ts`, `Polling.ts`): the webhook at `/plugins/github/webhook` verifies
+  `X-Hub-Signature-256` on the raw body, drops deliveries it has seen (`state.json` under
+  the data directory), and answers 202 with the delivery on a queue. On start and hourly it
+  lists `GET /app/hook/deliveries` and asks for the failed ones again, since GitHub will not.
+  `delivery: poll` sweeps each repository's issue and review comments since a watermark
+  instead; it sees comments and nothing else.
+- **Trigger** (`Events.ts`): `issue_comment.created`, `pull_request_review_comment.created`,
+  `pull_request_review.submitted`, `issues.opened|assigned|labeled`, `pull_request.opened`;
+  the sender must be a `User`; the body must mention `@<slug>` or start with the command,
+  or the assignee or label must be the configured one. The conversation is
+  `github-<owner>-<repo>-<issue|pr>-<n>`, so every mention on a thread continues it.
+- **Admission** (`Bridge.ts`): the person's permission from
+  `GET /repos/{o}/{r}/collaborators/{login}/permission` (cached five minutes; `NONE`
+  association skips the call) and org membership become groups `github:<permission>`,
+  `github:org-member`, `github:allowed`. The plugin's own floor is `allow.minimum` or an
+  `allow.logins` entry; policy then decides as for any surface. Public repositories are
+  ignored unless `public.admit` is set. A mention while a run is live on the thread is
+  steered into it.
+- **Input**: the thread quoted section by section (`renderContext`): the issue or pull
+  request, the comments since the bot last ran, the diff hunk for a review comment, and the
+  mention last. What the person typed is never the system prompt.
+- **Reporting**: an eyes reaction on the comment; on a pull request a check run named
+  `magentic` on the head; one progress comment created at the first tool call and edited at
+  most every ten seconds. GitHub mails a comment when it is created and never again, so the
+  answer is a new comment (a reply on the diff when the mention was there) rather than an
+  edit of the progress one, which would leave every watcher's mail showing a half-finished
+  run; the progress comment folds into a `<details>` log of the tool calls, or is deleted
+  under `progress: { after: delete }`. Its opening line says the answer will follow, since
+  that line is what the mail freezes. The check run completes `success` after a push,
+  `neutral` otherwise, `failure` on a failed run, and a failure posts the message and the
+  run id, never the stack, leaving the progress comment expanded as the breadcrumb. When the
+  agent's last tool call was `forge_comment` on the same thread, the answer is not posted
+  again.
+- **Tools** (`Tools.ts`): `forge_read` (`forge:read`); `forge_comment`, `forge_review_comment`
+  (with a `suggestion` block), `forge_checkout`, `forge_push`, `forge_open_pr` (`forge:write`).
+  They take the repository as a parameter and mint their own token, so a run started from
+  the CLI can use them too. The workspace is the one repository's checkout: `forge_checkout`
+  fetches the pull request's branch or starts one under `branch.prefix` from the default
+  branch, and sets the bot's `user.name` and `user.email` so pushed commits show the bot;
+  `forge_push` refuses any branch but those and the pull request's own, runs `git push`
+  itself with the token in that one process's environment, never the model's; and
+  `forge_open_pr` opens a draft, `Closes #N` appended when asked. A pull request from a fork
+  is answered with comments and suggestions, never pushes. There is no tool to mark a pull
+  request ready, approve, or merge.
+- **The agent**: the configured name gets the bridge's prompt section and the forge tools
+  added when `agents/<name>.yaml` exists, and a default agent otherwise.
+
+Not built: the manifest install flow (`magentic github install`, waiting on a decision about
+the CLI surface; register the App by hand with Metadata read, Issues write, Pull requests
+write, Contents write, Checks write, and the events above), the PAT demo mode, a worktree
+per conversation, and containers.
+
 ## The built-ins, rewritten as plugins
 
 A tool's parameters must render as a JSON Schema of type `object`; the host refuses a
@@ -517,8 +683,15 @@ Done, with tests beside the code:
   instructions on the agents that see the tools, and `<server>_*` or `mcp:*` in an agent's
   `tools:`.
 
-Still open: `magentic plugin add|remove` and a reload endpoint, both waiting on a decision
-about the CLI surface.
+- Bridges: the `bridge` and `http` domains, `BridgeBackend` and `PluginRoutes` from the host,
+  the gateway's `BridgesLayer` that mints `system:bridge/<surface>` principals and admits
+  runs, the `/plugins/:plugin/*` route, open surface and provider names, `onBehalfOf` on
+  `Principal`, the `forge:read` and `forge:write` capabilities, and `@magentic/bridge-github`.
+  The shell tool blanks `GH_TOKEN`, `GITHUB_TOKEN`, and `GIT_ASKPASS` for every run and
+  points `GH_CONFIG_DIR` away from the operator's login for runs on behalf of someone.
+
+Still open: `magentic plugin add|remove`, `magentic github install`, and a reload endpoint,
+all waiting on a decision about the CLI surface.
 
 **Resolving a plugin's imports.** A file plugin imports `effect` and `@magentic/plugin` from
 its own location. Bun's runtime resolve hook does not intercept bare package imports, so the

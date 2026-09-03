@@ -3,8 +3,9 @@
   "workspaces": {
     ".": {
       // The root links the plugin contract so an external plugin under the
-      // config directory resolves the gateway's copy; nothing here imports them.
-      "ignoreDependencies": ["@magentic/plugin", "@magentic/protocol"],
+      // config directory resolves the gateway's copy, and the shipped bridge
+      // so `plugins.use` finds it from there; nothing here imports them.
+      "ignoreDependencies": ["@magentic/bridge-github", "@magentic/plugin", "@magentic/protocol"],
     },
   },
   // Placeholders for phases 3 and 4; they hold no code yet.

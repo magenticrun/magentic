@@ -1,7 +1,9 @@
 import type { Schema } from "effect";
 import type { AgentDomain } from "./Agents.ts";
+import type { BridgeDomain } from "./Bridge.ts";
 import type { CommandDomain } from "./Commands.ts";
 import type { EventDomain } from "./Events.ts";
+import type { HttpDomain } from "./Http.ts";
 import type { ModelDomain } from "./Models.ts";
 import type { ToolDomain } from "./Tools.ts";
 
@@ -25,4 +27,6 @@ export interface PluginContext {
   readonly agent: AgentDomain;
   readonly command: CommandDomain;
   readonly event: EventDomain;
+  readonly bridge: BridgeDomain;
+  readonly http: HttpDomain;
 }
