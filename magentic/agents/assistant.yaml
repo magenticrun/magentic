@@ -2,4 +2,17 @@ name: assistant
 description: General assistant that can explore, change, and run things in the workspace, with every MCP server's tools.
 prompt:
   file: prompts/assistant.md
-tools: [read_file, write_file, edit_file, list_dir, glob, grep, shell, "mcp:*"]
+tools:
+  [
+    read_file,
+    write_file,
+    edit_file,
+    list_dir,
+    glob,
+    grep,
+    shell,
+    task_output,
+    task_stop,
+    task_list,
+    "mcp:*",
+  ]

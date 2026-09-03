@@ -50,11 +50,14 @@ export const TranscriptTool = Schema.TaggedStruct("Tool", {
 });
 /** Where a compaction happened: the summary the model continued from. */
 export const TranscriptSummary = Schema.TaggedStruct("Summary", { text: Schema.String });
+/** What the harness told the model between turns, a background command's end for one. */
+export const TranscriptNotice = Schema.TaggedStruct("Notice", { text: Schema.String });
 export const TranscriptEntry = Schema.Union([
   TranscriptUser,
   TranscriptAssistant,
   TranscriptTool,
   TranscriptSummary,
+  TranscriptNotice,
 ]);
 export type TranscriptEntry = typeof TranscriptEntry.Type;
 

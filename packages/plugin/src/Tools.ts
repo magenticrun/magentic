@@ -33,6 +33,8 @@ export class ToolCallContext extends Context.Service<
   ToolCallContext,
   {
     readonly runId: string;
+    /** The conversation the run belongs to; where a notice for the model goes. */
+    readonly conversationId: string;
     readonly callId: string;
     readonly agent: string;
     readonly principal: Principal;

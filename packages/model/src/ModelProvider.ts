@@ -5,9 +5,9 @@ export const DEFAULT_ZAI_MODEL = "glm-5.3-flash";
 export const DEFAULT_ZEN_MODEL = "claude-sonnet-5";
 
 /**
- * Z.AI's Anthropic Messages endpoint. Their OpenAI-compatible endpoint only
- * serves chat completions, and Effect's OpenAI client speaks the Responses
- * API, so GLM goes through the Anthropic client instead.
+ * Z.AI's Anthropic Messages endpoint. Their other endpoint is chat
+ * completions, which the compat client speaks too; GLM stays on Messages,
+ * where it is the route Z.AI's own coding plans document.
  */
 export const ZAI_ANTHROPIC_URL = "https://api.z.ai/api/anthropic";
 

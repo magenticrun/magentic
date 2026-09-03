@@ -29,9 +29,10 @@ import { anthropicCompatibleClient } from "./AnthropicCompat.ts";
  * How to reach one model: the wire protocol Effect has a client for, and the
  * base URL when it is not the protocol owner's. `compatible` marks endpoints
  * that imitate Anthropic and may leave out fields Anthropic always sends.
+ * `openai-compat` is chat completions, which everyone but OpenAI speaks.
  */
 export interface ModelRoute {
-  readonly protocol: "anthropic" | "openai-responses";
+  readonly protocol: "anthropic" | "openai-responses" | "openai-compat";
   readonly url?: string;
   readonly compatible?: boolean;
 }
@@ -77,6 +78,16 @@ const layerFor = (
     case "openai-responses":
       return Layer.unwrap(
         Effect.map(Clients.openai, ({ OpenAiClient, OpenAiLanguageModel }) =>
+          OpenAiLanguageModel.layer({ model }).pipe(
+            Layer.provide(
+              OpenAiClient.layer({ apiKey, apiUrl: route.url }).pipe(Layer.provide(withHttp)),
+            ),
+          ),
+        ),
+      );
+    case "openai-compat":
+      return Layer.unwrap(
+        Effect.map(Clients.openaiCompat, ({ OpenAiClient, OpenAiLanguageModel }) =>
           OpenAiLanguageModel.layer({ model }).pipe(
             Layer.provide(
               OpenAiClient.layer({ apiKey, apiUrl: route.url }).pipe(Layer.provide(withHttp)),
@@ -232,8 +243,8 @@ export const zaiPlugin = apiKeyPlugin({
 /**
  * OpenCode Zen fronts many vendors behind one key. The catalog says which
  * protocol each model speaks; Claude goes through Anthropic Messages and GPT
- * through OpenAI Responses. Gemini and the open-weight models need clients
- * Effect does not ship yet, so they are not listed.
+ * through OpenAI Responses. Everything else — Gemini, the open-weight models —
+ * goes through chat completions, which Zen serves at the same base URL.
  */
 export const opencodeZenPlugin = apiKeyPlugin({
   provider: "opencode-zen",
@@ -249,7 +260,10 @@ export const opencodeZenPlugin = apiKeyPlugin({
       case "@ai-sdk/openai":
         return Option.some({ protocol: "openai-responses", url: ZEN_OPENAI_URL });
       default:
-        return Option.none();
+        // The catalog lists image and embedding models too; agents need tool calls.
+        return model.tool_call === false
+          ? Option.none()
+          : Option.some({ protocol: "openai-compat", url: ZEN_OPENAI_URL });
     }
   },
 });

@@ -122,6 +122,8 @@ export const print = Effect.fn("Cli.print")(function* (options: PrintOptions) {
         return Effect.void;
       case "Compacted":
         return note(`(compacted ${event.messagesBefore} messages into a summary)`);
+      case "Notified":
+        return Effect.forEach(event.notices, (text) => note(`(${text})`), { discard: true });
       case "Retrying":
         return note(
           `(${event.message}; retrying in ${Math.ceil(event.delayMs / 1000)}s, ${event.attempt} of ${event.limit})`,

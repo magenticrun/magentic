@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@magentic/plugin": "workspace:*",
+    "@magentic/protocol": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {

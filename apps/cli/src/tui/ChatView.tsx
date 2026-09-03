@@ -98,6 +98,8 @@ type State = {
   cost: Option.Option<number>;
   /** What the agent is doing right now; only shown while busy. */
   status: string;
+  /** Background tasks of this conversation still running, as the gateway last said. */
+  tasks: number;
   lines: Array<Line>;
   busy: boolean;
   /** Whether tool results show in full under each call, as ctrl+o toggles. */
@@ -344,6 +346,8 @@ export interface ChatTui {
   setStatus(status: string): void;
   /** Whether a run is in flight. Messages sent while it is are steered into it, or wait for it to end. */
   setBusy(busy: boolean): void;
+  /** How many background tasks of the conversation are still running. */
+  setTasks(running: number): void;
 }
 
 export const createChatTui = (options: {
@@ -380,6 +384,7 @@ export const createChatTui = (options: {
     reasoning: Option.none(),
     cost: Option.none(),
     status: "",
+    tasks: 0,
     lines: [],
     busy: false,
     expanded: false,
@@ -507,6 +512,12 @@ export const createChatTui = (options: {
             push({ kind: "user", text: input });
           }
           return;
+        case "Notified":
+          // What the harness told the model, a background task's end for one.
+          for (const notice of event.notices) {
+            push({ kind: "note", text: notice });
+          }
+          return;
         case "TokenUsage":
           setState("contextTokens", event.inputTokens + event.outputTokens);
           if (event.cost !== undefined) {
@@ -534,6 +545,11 @@ export const createChatTui = (options: {
         }
         case "RunFinished":
           setState("status", "");
+          if (event.reason === "interrupted") {
+            // A run the gateway started and the person stopped; their own runs end without an event.
+            finishThinking();
+            push({ kind: "error", text: "Interrupted" });
+          }
           if (event.reason === "step-limit") {
             push({
               kind: "note",
@@ -557,6 +573,8 @@ export const createChatTui = (options: {
         return { kind: "assistant", text: entry.text };
       case "Summary":
         return { kind: "summary", text: entry.text };
+      case "Notice":
+        return { kind: "note", text: entry.text };
       case "Tool": {
         const call: ToolLine = {
           kind: "tool",
@@ -1329,6 +1347,13 @@ export const createChatTui = (options: {
                 </text>
               )}
             </Show>
+            <Show when={state.tasks > 0}>
+              <text fg={palette().muted} wrapMode="none" flexShrink={0}>
+                {" · "}
+                <strong style={{ fg: palette().accent }}>{state.tasks}</strong>
+                {state.tasks === 1 ? " task running" : " tasks running"}
+              </text>
+            </Show>
           </box>
           {/* The left half is free for later; the hint keeps to the right. */}
           <box flexDirection="row" justifyContent="flex-end">
@@ -1364,8 +1389,9 @@ export const createChatTui = (options: {
     pick,
     dismiss,
     restore: (entries, contextTokens, cost) =>
-      setState({ lines: entries.map(toLine), contextTokens, cost, status: "" }),
-    reset: () => setState({ lines: [], contextTokens: 0, cost: Option.none(), status: "" }),
+      setState({ lines: entries.map(toLine), contextTokens, cost, status: "", tasks: 0 }),
+    reset: () =>
+      setState({ lines: [], contextTokens: 0, cost: Option.none(), status: "", tasks: 0 }),
     interrupted: () => {
       // No event follows a stop, so a thought in progress is folded here.
       finishThinking();
@@ -1378,5 +1404,6 @@ export const createChatTui = (options: {
         flushQueue();
       }
     },
+    setTasks: (running) => setState("tasks", running),
   };
 };

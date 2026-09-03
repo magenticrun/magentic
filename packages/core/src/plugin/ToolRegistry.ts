@@ -66,6 +66,7 @@ export interface ToolInfo {
 
 export interface RunIdentity {
   readonly runId: string;
+  readonly conversationId: string;
   readonly principal: Principal;
 }
 
@@ -136,6 +137,7 @@ export const toolRegistryOver = (inputs: ToolRegistryInputs): ToolRegistry["Serv
         const callId = toolCallId ?? crypto.randomUUID();
         const call: ToolCallContext["Service"] = {
           runId: run.runId,
+          conversationId: run.conversationId,
           callId,
           agent: agent.name,
           principal: run.principal,

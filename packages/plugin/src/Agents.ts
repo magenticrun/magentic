@@ -17,9 +17,9 @@ export class AgentDefinition extends Schema.Class<AgentDefinition>(
    */
   model: Schema.optional(Schema.String),
   /**
-   * Model calls one run may make before it stops with `RunFinished` reason
-   * `step-limit`; a run continues from there with the next input. The runner's
-   * default applies when absent.
+   * Model calls one run may make before it spends its last one saying where
+   * the work stands and stops with `RunFinished` reason `step-limit`; a run
+   * continues from there with the next input. Absent, the run is unbounded.
    */
   maxSteps: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
 }) {}

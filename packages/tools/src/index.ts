@@ -1,3 +1,4 @@
+export * from "./BackgroundTasks.ts";
 export * from "./FileTools.ts";
 export * from "./FileToolsPlugin.ts";
 export * from "./ShellTool.ts";

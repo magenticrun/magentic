@@ -8,3 +8,4 @@ export * from "./Principal.ts";
 export * from "./Run.ts";
 export * from "./Conversation.ts";
 export * from "./ConversationId.ts";
+export * from "./Task.ts";

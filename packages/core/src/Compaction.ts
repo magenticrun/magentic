@@ -1,5 +1,6 @@
-import { Effect, Predicate, Schema } from "effect";
+import { Effect, Schema } from "effect";
 import { LanguageModel, Prompt, type Response } from "effect/unstable/ai";
+import { isSummary, summaryMessage, summaryOf } from "./Marks.ts";
 
 /**
  * Room to leave below the window for the next reply, after opencode; a model
@@ -133,37 +134,6 @@ const serialise = (message: Prompt.Message): string => {
         .join("\n");
   }
 };
-
-// The summary lives in the history as a user message marked in its options,
-// under our own key, which the providers' clients leave alone. It is one text
-// part with the framing in front: `Chat.exportJson` keeps only the first text
-// part of a user message.
-const MARK = "magentic";
-const FRAMING =
-  "The conversation so far was compacted into the summary below to free context. Continue from it as if you had been there; do not mention the compaction.\n\n";
-
-/** A user message that carries a summary of what came before it. */
-export const isSummary = (message: Prompt.Message): boolean => {
-  if (message.role !== "user") {
-    return false;
-  }
-  const mark = message.options[MARK];
-  return Predicate.hasProperty(mark, "summary") && mark.summary === true;
-};
-
-/** The summary a summary message carries, without the framing. */
-export const summaryOf = (message: Prompt.UserMessage): string => {
-  const text = message.content
-    .flatMap((part) => (part.type === "text" ? [part.text] : []))
-    .join("");
-  return text.startsWith(FRAMING) ? text.slice(FRAMING.length) : text;
-};
-
-const summaryMessage = (summary: string): Prompt.UserMessage =>
-  Prompt.makeMessage("user", {
-    content: [Prompt.makePart("text", { text: `${FRAMING}${summary}` })],
-    options: { [MARK]: { summary: true } },
-  });
 
 /**
  * The recent turns, each from a user message to the next, that fit in `keep`

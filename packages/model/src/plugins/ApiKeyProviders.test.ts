@@ -162,15 +162,15 @@ layer(TestLayer)("zaiPlugin", (it) => {
 });
 
 layer(TestLayer)("opencodeZenPlugin", (it) => {
-  it.effect("lists what Zen serves over Anthropic Messages or OpenAI Responses", () =>
+  it.effect("lists every Zen model an agent can call, whatever its protocol", () =>
     Effect.gen(function* () {
       const http = yield* fakeHttp([]);
       const provider = yield* registered(opencodeZenPlugin).pipe(Effect.provide(http.layer));
       const ids = (yield* provider.models).map((m) => m.id);
       assert.include(ids, DEFAULT_ZEN_MODEL);
       assert.include(ids, "gpt-5.5");
-      // Gemini needs Google's protocol; Kimi is chat-completions only. Neither has a client.
-      assert.isFalse(ids.some((id) => id.startsWith("gemini-") || id.startsWith("kimi-")));
+      // Kimi speaks chat completions, which the compat client takes.
+      assert.isTrue(ids.some((id) => id.startsWith("kimi-")));
     }),
   );
 

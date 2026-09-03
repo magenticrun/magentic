@@ -30,7 +30,7 @@ const Echo = Tool.make("echo", {
 
 const Unclassified = Tool.make("mystery", {
   description: "Declares no capability",
-  parameters: Schema.Struct({}),
+  parameters: Schema.Struct({ note: Schema.optionalKey(Schema.String) }),
   success: Schema.String,
 });
 
@@ -129,7 +129,11 @@ const host = (plugins: ReadonlyArray<Plugin>, disabled: ReadonlyArray<string> = 
 const callEcho = (text: string) =>
   Effect.gen(function* () {
     const registry = yield* ToolRegistry;
-    const kit = yield* registry.forAgent(helper, { runId: "run-1", principal: alice });
+    const kit = yield* registry.forAgent(helper, {
+      runId: "run-1",
+      conversationId: "conv",
+      principal: alice,
+    });
     const stream = yield* kit.handle("echo", { text }, "call-1");
     const results = yield* Stream.runCollect(stream);
     return results[0];
@@ -227,7 +231,7 @@ layer(
       const registry = yield* ToolRegistry;
       const kit = yield* registry.forAgent(
         new AgentDefinition({ name: "x", description: "", prompt: "", tools: ["hidden"] }),
-        { runId: "run-2", principal: alice },
+        { runId: "run-2", conversationId: "conv", principal: alice },
       );
       assert.deepStrictEqual(Object.keys(kit.tools), []);
     }),
@@ -238,7 +242,7 @@ layer(
       const registry = yield* ToolRegistry;
       const kit = yield* registry.forAgent(
         new AgentDefinition({ name: "x", description: "", prompt: "", tools: ["ec*"] }),
-        { runId: "run-3", principal: alice },
+        { runId: "run-3", conversationId: "conv", principal: alice },
       );
       assert.deepStrictEqual(Object.keys(kit.tools), ["echo"]);
     }),
@@ -249,12 +253,12 @@ layer(
       const registry = yield* ToolRegistry;
       const readers = yield* registry.forAgent(
         new AgentDefinition({ name: "x", description: "", prompt: "", tools: ["fs:read:*"] }),
-        { runId: "run-4", principal: alice },
+        { runId: "run-4", conversationId: "conv", principal: alice },
       );
       assert.deepStrictEqual(Object.keys(readers.tools), ["echo"]);
       const shells = yield* registry.forAgent(
         new AgentDefinition({ name: "x", description: "", prompt: "", tools: ["shell:*"] }),
-        { runId: "run-5", principal: alice },
+        { runId: "run-5", conversationId: "conv", principal: alice },
       );
       assert.deepStrictEqual(Object.keys(shells.tools), []);
     }),
@@ -355,7 +359,7 @@ layer(host([scoped(handle)]))("PluginHost registrations", (it) => {
 
 const Other = Tool.make("other", {
   description: "Registers fine on its own",
-  parameters: Schema.Struct({}),
+  parameters: Schema.Struct({ note: Schema.optionalKey(Schema.String) }),
   success: Schema.String,
 }).annotate(CapabilityAnnotation, "fs:read");
 
