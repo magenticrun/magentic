@@ -108,6 +108,17 @@ export const print = Effect.fn("Cli.print")(function* (options: PrintOptions) {
   const atLineStart = yield* Ref.make(true);
   const runFailed = yield* Ref.make(false);
 
+  // A stderr note can land mid-line when stdout and stderr share a terminal
+  // and the reply's last TextDelta had no trailing newline. Break the reply
+  // line on stdout first so the note starts on its own line.
+  const note = Effect.fn("Cli.print.note")(function* (message: string) {
+    if (!(yield* Ref.get(atLineStart))) {
+      yield* terminal.display("\n").pipe(Effect.orDie);
+      yield* Ref.set(atLineStart, true);
+    }
+    yield* Console.error(message);
+  });
+
   const printText = (event: RunEvent) => {
     switch (event._tag) {
       case "RunStarted":
@@ -117,9 +128,9 @@ export const print = Effect.fn("Cli.print")(function* (options: PrintOptions) {
       case "Steered":
         return Effect.void;
       case "Compacted":
-        return Console.error(`(compacted ${event.messagesBefore} messages into a summary)`);
+        return note(`(compacted ${event.messagesBefore} messages into a summary)`);
       case "Retrying":
-        return Console.error(
+        return note(
           `(${event.message}; retrying in ${Math.ceil(event.delayMs / 1000)}s, ${event.attempt} of ${event.limit})`,
         );
       case "TextDelta":
@@ -130,26 +141,23 @@ export const print = Effect.fn("Cli.print")(function* (options: PrintOptions) {
           Effect.andThen(terminal.display(event.text).pipe(Effect.orDie)),
         );
       case "ToolCall":
-        return Console.error(`→ ${event.name}${callRef(event.id)} ${summarise(event.params)}`);
+        return note(`→ ${event.name}${callRef(event.id)} ${summarise(event.params)}`);
       case "ToolResult":
-        return Console.error(
+        return note(
           `← ${event.name}${callRef(event.id)} ${event.isFailure ? "failed" : "ok"} ${summarise(event.result)}`,
         );
       case "RunFinished":
         return Effect.gen(function* () {
           if (!(yield* Ref.get(atLineStart))) {
             yield* terminal.display("\n").pipe(Effect.orDie);
+            yield* Ref.set(atLineStart, true);
           }
           if (event.reason === "step-limit") {
-            yield* Console.error(
-              "(stopped at the agent's step limit; send another message to continue)",
-            );
+            yield* note("(stopped at the agent's step limit; send another message to continue)");
           }
         });
       case "RunFailed":
-        return Ref.set(runFailed, true).pipe(
-          Effect.andThen(Console.error(`run failed: ${event.message}`)),
-        );
+        return Ref.set(runFailed, true).pipe(Effect.andThen(note(`run failed: ${event.message}`)));
     }
   };
 
