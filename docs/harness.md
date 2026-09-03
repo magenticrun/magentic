@@ -233,10 +233,16 @@ because `SqlClient` abstracts the dialect for what we need.
 
 ## Surfaces
 
-- **CLI** (`apps/cli`): `magentic [agent]` opens the full-screen chat (exists); `-c` picks up
-  the newest conversation and `-r <id>` a named one, transcript and model restored, and
-  `/resume` and `/new` do the same from inside the chat, as in opencode. `magentic run
-"<input>"` prints the events as plain lines (exists), `magentic agents` (exists), `magentic
+- **CLI** (`apps/cli`): the command line follows pi's, `magentic [flags] [--] [@files...]
+[message...]`. Bare `magentic` opens the full-screen chat (exists) and a message opens it
+  with the message sent; `-a` names the agent, `-c` picks up the newest conversation and
+  `-s <id>` a named one, transcript and model restored, and `/resume` and `/new` do the same
+  from inside the chat, as in opencode. `-p` is print mode (exists): the message from the
+  arguments, stdin, or both, `@path` for a file to send along (images as attachments, the
+  rest as text), the reply on stdout and tool activity on stderr, `--mode json` for every
+  `RunEvent` as one JSON line, `-m` and `--thinking` for the model, exit code 1 when the run
+  fails; without a TTY on stdin and stdout the same happens with no `-p`.
+  `magentic agents` (exists), `magentic
 auth login|list|logout` (exists, inline `@clack/prompts` like opencode's, not the TUI),
   `magentic approvals` (list and decide), `magentic tokens`, `magentic config check`,
   `magentic reload`. Talks only `@magentic/protocol` through `RpcClient`, with one

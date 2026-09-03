@@ -5,7 +5,6 @@ import {
   type LoginMethod,
   ModelCatalog,
   ModelInfo,
-  ModelProviderError,
   Screen,
 } from "@magentic/plugin";
 import { Effect, FileSystem, Layer, Option } from "effect";
@@ -43,6 +42,9 @@ export const openaiCodexPlugin = define<
     const fs = yield* FileSystem.FileSystem;
     const http = yield* HttpClient.HttpClient;
     const catalog = yield* ModelCatalog;
+    // One holder of the tokens for every model: refresh tokens rotate, and a
+    // second copy refreshing the same one gets the account signed out.
+    const auth = yield* CodexAuth.make;
 
     const chatgpt: LoginMethod = {
       id: "chatgpt",
@@ -56,7 +58,7 @@ export const openaiCodexPlugin = define<
               ui.show(Screen.DeviceCode({ url: prompt.verificationUrl, code: prompt.userCode })),
           });
           yield* ui.show(Screen.Busy({ message: "Saving the login…" }));
-          yield* store.save(tokens);
+          yield* auth.login(tokens);
           return yield* summary(tokens);
         },
         Effect.mapError(failed),
@@ -73,7 +75,7 @@ export const openaiCodexPlugin = define<
           const file = yield* codexCliAuthFile;
           yield* ui.show(Screen.Busy({ message: `Reading ${file}…` }));
           const tokens = yield* readCodexCliAuth(file);
-          yield* store.save(tokens);
+          yield* auth.login(tokens);
           const text = yield* summary(tokens);
           return `${text}, copied from ${file}. The two logins refresh independently from now on.`;
         },
@@ -114,16 +116,10 @@ export const openaiCodexPlugin = define<
           : reasoningContext("openai-responses", found, level);
       });
 
-    /** One Codex model with its own auth, errors in the provider's words. */
+    /** One Codex model on the shared auth. */
     const model = (modelId: string) =>
-      Layer.effectContext(
-        Layer.build(codexLayer({ model: modelId }).pipe(Layer.provide(CodexAuth.layer))).pipe(
-          Effect.mapError(
-            (error) => new ModelProviderError({ provider: id, message: describe(error) }),
-          ),
-          Effect.provideService(CodexAuthStore, store),
-          Effect.provideService(HttpClient.HttpClient, http),
-        ),
+      codexLayer({ model: modelId }).pipe(
+        Layer.provide([Layer.succeed(CodexAuth, auth), Layer.succeed(HttpClient.HttpClient, http)]),
       );
 
     yield* ctx.model.register({
@@ -132,7 +128,7 @@ export const openaiCodexPlugin = define<
       description: "Use a ChatGPT Plus, Pro, Team or Enterprise plan through Codex.",
       methods: [chatgpt, importCli],
       status,
-      logout: store.clear.pipe(Effect.mapError(failed)),
+      logout: auth.logout.pipe(Effect.mapError(failed)),
       models,
       defaultModel: DEFAULT_MODEL,
       model: (modelId) =>

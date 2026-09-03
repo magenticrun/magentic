@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect";
+import { Effect, Option, Schema } from "effect";
 import {
   HttpClient,
   HttpClientError,
@@ -14,9 +14,8 @@ import {
  * client was expecting. Streaming requests pass through untouched.
  */
 
-const RequestBody = Schema.fromJsonString(
-  Schema.Struct({ stream: Schema.optionalKey(Schema.Boolean) }),
-);
+/** Kept whole, so the rewrite carries every field the client sent. */
+const RequestBody = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown));
 
 /**
  * The events that matter. The subscription backend sends `response.completed`
@@ -36,16 +35,18 @@ const OutputItems = Schema.Array(Schema.Unknown);
 const bodyText = (request: HttpClientRequest.HttpClientRequest): string | undefined =>
   request.body._tag === "Uint8Array" ? new TextDecoder().decode(request.body.body) : undefined;
 
-const isNonStreamingResponsesCall = (request: HttpClientRequest.HttpClientRequest) => {
+/** The body of a non-streaming call to `/responses`; none for any other request. */
+const nonStreamingResponsesBody = (request: HttpClientRequest.HttpClientRequest) => {
+  const none = Option.none<typeof RequestBody.Type>();
   if (request.method !== "POST" || !request.url.endsWith("/responses")) {
-    return false;
+    return none;
   }
   const text = bodyText(request);
   if (text === undefined) {
-    return false;
+    return none;
   }
   return Schema.decodeOption(RequestBody)(text).pipe(
-    (parsed) => parsed._tag === "Some" && parsed.value.stream !== true,
+    Option.filter((body) => body["stream"] !== true),
   );
 };
 
@@ -111,11 +112,11 @@ export const withStreamOnlyBackend = (client: HttpClient.HttpClient): HttpClient
   const rewritten = new WeakSet<HttpClientRequest.HttpClientRequest>();
   return client.pipe(
     HttpClient.mapRequestEffect((request) => {
-      if (!isNonStreamingResponsesCall(request)) {
+      const body = nonStreamingResponsesBody(request);
+      if (Option.isNone(body)) {
         return Effect.succeed(request);
       }
-      const original = bodyText(request) ?? "{}";
-      const patched = original.replace(/^\{/, '{"stream":true,');
+      const patched = JSON.stringify({ ...body.value, stream: true });
       return HttpClientRequest.bodyText(request, patched, "application/json").pipe(
         HttpClientRequest.setHeader("accept", "text/event-stream"),
         (next) => {

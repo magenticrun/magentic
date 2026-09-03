@@ -1,5 +1,5 @@
 import { Effect, Predicate, Schema } from "effect";
-import { LanguageModel, Prompt } from "effect/unstable/ai";
+import { LanguageModel, Prompt, type Response } from "effect/unstable/ai";
 
 /**
  * Room to leave below the window for the next reply, after opencode; a model
@@ -31,6 +31,8 @@ export interface Compaction {
   readonly dropped: ReadonlyArray<Prompt.Message>;
   readonly messagesBefore: number;
   readonly messagesAfter: number;
+  /** What the summary call used, so it counts toward the conversation like any other. */
+  readonly usage: Response.Usage;
 }
 
 /**
@@ -301,6 +303,7 @@ export const compactContext = Effect.fn("Compaction.compactContext")(function* (
     dropped: [...(previousMessage === undefined ? [] : [previousMessage]), ...head],
     messagesBefore: messages.length,
     messagesAfter: compacted.content.length,
+    usage: response.usage,
   };
   return result;
 });

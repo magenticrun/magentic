@@ -83,6 +83,20 @@ export class ConversationStore extends Context.Service<
         const infoFile = (id: string) => path.join(dir, id, "conversation.json");
         const historyFile = (id: string) => path.join(dir, id, "history.json");
 
+        /**
+         * Written beside and renamed over, so a crash mid-write leaves the
+         * file as it was rather than cut short, which would read as no
+         * history at all.
+         */
+        const writeWhole = Effect.fn("ConversationStore.writeWhole")(function* (
+          file: string,
+          text: string,
+        ) {
+          const staging = `${file}.tmp`;
+          yield* fs.writeFileString(staging, text);
+          yield* fs.rename(staging, file);
+        });
+
         /** The wire schema already refuses these; the store refuses them again because it owns the disk. */
         const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
         const safe = (id: string) =>
@@ -127,8 +141,8 @@ export class ConversationStore extends Context.Service<
           function* (info: Conversation, json: string) {
             yield* safe(info.id);
             yield* fs.makeDirectory(path.join(dir, info.id), { recursive: true });
-            yield* fs.writeFileString(historyFile(info.id), json);
-            yield* fs.writeFileString(infoFile(info.id), yield* encodeInfo(info));
+            yield* writeWhole(historyFile(info.id), json);
+            yield* writeWhole(infoFile(info.id), yield* encodeInfo(info));
           },
           (effect, info) =>
             Effect.mapError(
@@ -141,7 +155,7 @@ export class ConversationStore extends Context.Service<
           function* (info: Conversation) {
             yield* safe(info.id);
             yield* fs.makeDirectory(path.join(dir, info.id), { recursive: true });
-            yield* fs.writeFileString(infoFile(info.id), yield* encodeInfo(info));
+            yield* writeWhole(infoFile(info.id), yield* encodeInfo(info));
           },
           (effect, info) =>
             Effect.mapError(

@@ -188,31 +188,33 @@ const serve = Effect.fn("mcpPlugin.serve")(function* (
   /**
    * Handles what the server sends until it closes. A burst of list-changed
    * notifications, which servers send when they add tools one by one,
-   * becomes one republish.
+   * becomes one republish. A loop, not a recursion: each batch would
+   * otherwise keep its frame for the life of the connection.
    */
   const follow: Effect.Effect<void, never, Scope.Scope> = Effect.gen(function* () {
-    const batch = yield* Queue.takeAll(connection.events);
-    const events = [...batch];
-    if (events.some((event) => event._tag === "ToolsChanged")) {
-      yield* Effect.sleep(REPUBLISH_DELAY);
-      events.push(...(yield* Queue.clear(connection.events)));
-    }
-    for (const event of events) {
-      if (event._tag === "Log") {
-        yield* logAt(event, server);
+    while (true) {
+      const batch = yield* Queue.takeAll(connection.events);
+      const events = [...batch];
+      if (events.some((event) => event._tag === "ToolsChanged")) {
+        yield* Effect.sleep(REPUBLISH_DELAY);
+        events.push(...(yield* Queue.clear(connection.events)));
+      }
+      for (const event of events) {
+        if (event._tag === "Log") {
+          yield* logAt(event, server);
+        }
+      }
+      if (events.some((event) => event._tag === "Closed")) {
+        yield* withdraw;
+        yield* ctx.agent.rebuild;
+        yield* Effect.logWarning(`mcp server ${server} closed the connection; its tools are gone`);
+        yield* report("closed", [], "the server closed the connection");
+        return;
+      }
+      if (events.some((event) => event._tag === "ToolsChanged")) {
+        yield* publish;
       }
     }
-    if (events.some((event) => event._tag === "Closed")) {
-      yield* withdraw;
-      yield* ctx.agent.rebuild;
-      yield* Effect.logWarning(`mcp server ${server} closed the connection; its tools are gone`);
-      yield* report("closed", [], "the server closed the connection");
-      return;
-    }
-    if (events.some((event) => event._tag === "ToolsChanged")) {
-      yield* publish;
-    }
-    return yield* follow;
   });
   yield* Effect.forkScoped(follow);
 });

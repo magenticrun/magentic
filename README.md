@@ -45,9 +45,14 @@ Follow the provider picker. Credentials are kept in your magentic data directory
 # Opens the terminal UI. If no local gateway is running, the CLI starts one for this session.
 bun apps/cli/src/main.ts
 
-# Or send one prompt and print streamed events in the terminal.
-bun apps/cli/src/main.ts run "Explain this repository"
+# Or open it with a message already sent.
+bun apps/cli/src/main.ts "Explain this repository"
+
+# Or print the reply and exit; for scripts, pipes and CI.
+bun apps/cli/src/main.ts -p "Explain this repository"
 ```
+
+The command line follows pi: `magentic [flags] [--] [@files...] [message...]`. `-p` (`--print`) is the non-interactive mode. The message comes from the arguments, from stdin, or both (the arguments first, then what was piped), so `git diff | magentic -p "Review this"` works, and so does `echo "prompt" | magentic` from a pipe or a service, where the chat cannot draw and prints instead. `@path` puts a file in the message: images go along as attachments, anything else as a block of text under its path. The reply goes to stdout and tool activity to stderr, so the reply alone reaches the next command. `--mode json` prints every run event as one JSON line instead, in the wire shape of `RunEvent`; the first, `RunStarted`, carries the conversation id, which `-s <id>` continues later, as `-c` continues the newest. `-a <agent>` picks the agent, `-m provider/model` the model and `--thinking <level>` its thinking level. The exit code is 1 when the run fails.
 
 The built-in `assistant` can inspect, edit, and run commands in the current workspace. While it works you can keep typing: a message sent then is steered into the run, listed above the composer until the model reads it before its next call, so you can redirect the agent without stopping it. A slash command sent during a run waits for it to end. `↑` on an empty composer takes back what the model has not read yet for editing; `Esc` stops the run and does the same.
 
@@ -73,7 +78,7 @@ Point the CLI at another gateway with `--gateway` (or `-g`):
 
 ```sh
 bun apps/cli/src/main.ts --gateway http://gateway.internal:4321 agents
-bun apps/cli/src/main.ts --gateway http://gateway.internal:4321 run "Summarize the latest changes"
+bun apps/cli/src/main.ts --gateway http://gateway.internal:4321 -p "Summarize the latest changes"
 ```
 
 Useful CLI commands:

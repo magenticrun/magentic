@@ -148,6 +148,16 @@ export const PickerView = (props: {
       props.onDone(Option.none());
       return;
     }
+    // A picker's own ctrl keys come first, or one on p or n could never be pressed.
+    const action =
+      key.ctrl && !key.meta ? props.picker.actions?.find((a) => a.key === key.name) : undefined;
+    if (action !== undefined) {
+      const item = items()[cursor()];
+      if (item !== undefined) {
+        props.onDone(Option.some({ id: item.id, action: Option.some(action.key) }));
+      }
+      return;
+    }
     if (key.name === "up" || (key.ctrl && key.name === "p")) {
       setCursor((n) => (count === 0 ? 0 : (n - 1 + count) % count));
       return;
@@ -174,13 +184,6 @@ export const PickerView = (props: {
     if (isEnter(key.name)) {
       props.onDone(Option.some({ id: item.id, action: Option.none() }));
       return;
-    }
-    if (!key.ctrl || key.meta) {
-      return;
-    }
-    const action = props.picker.actions?.find((a) => a.key === key.name);
-    if (action !== undefined) {
-      props.onDone(Option.some({ id: item.id, action: Option.some(action.key) }));
     }
   });
 

@@ -55,6 +55,8 @@ type ToolResult = { readonly ok: boolean; readonly text: string; readonly raw: S
 
 type ToolLine = {
   readonly kind: "tool";
+  /** The call's id, which its result carries too. */
+  readonly id: string;
   readonly name: string;
   readonly params: string;
   /** The arguments as the model gave them, for the detail under the call. */
@@ -127,7 +129,8 @@ const COMPOSER_KEYS: NonNullable<TextareaOptions["keyBindings"]> = [
 
 /** `842`, `3.2k`, `12k`, `1M`: two or three figures, whatever the size. */
 const formatTokens = (count: number): string => {
-  if (count >= 1_000_000) {
+  // What would round up to 1000k is 1M.
+  if (count >= 1_000_000 || Math.round(count / 1000) >= 1000) {
     return `${Number((count / 1_000_000).toFixed(1))}M`;
   }
   if (count >= 10_000) {
@@ -296,7 +299,12 @@ interface Queued {
   readonly draft: string;
   readonly folds: ReadonlyArray<Folded>;
   readonly text: string;
-  readonly status: "steering" | "held";
+  /**
+   * Sending: offered to the run, no answer yet. Steering: the run has it,
+   * until it says it took it. Held: the run would not take it; goes out
+   * when the run ends.
+   */
+  readonly status: "sending" | "steering" | "held";
 }
 
 /** A picker waiting for its answer. */
@@ -392,21 +400,19 @@ export const createChatTui = (options: {
     }
   };
 
-  /** Attach a result to the newest unfinished call of that tool. */
-  const finishTool = (name: string, result: ToolResult) => {
+  /**
+   * Attach a result to the call it answers, by id: calls made in parallel
+   * answer in any order, so the newest unfinished one is not necessarily it.
+   */
+  const finishTool = (id: string, name: string, result: ToolResult) => {
     for (let i = state.lines.length - 1; i >= 0; i--) {
       const line = state.lines[i];
-      if (
-        line !== undefined &&
-        line.kind === "tool" &&
-        line.name === name &&
-        line.result === undefined
-      ) {
+      if (line !== undefined && line.kind === "tool" && line.id === id) {
         setState("lines", i, { result });
         return;
       }
     }
-    push({ kind: "tool", name, params: "", raw: null, result });
+    push({ kind: "tool", id, name, params: "", raw: null, result });
   };
 
   /** Grow the thought in progress, or begin one. */
@@ -480,6 +486,7 @@ export const createChatTui = (options: {
           setState("status", `Running ${event.name}…`);
           push({
             kind: "tool",
+            id: event.id,
             name: event.name,
             params: summariseParams(event.params),
             raw: event.params,
@@ -487,7 +494,7 @@ export const createChatTui = (options: {
           return;
         case "ToolResult":
           setState("status", "Thinking…");
-          finishTool(event.name, {
+          finishTool(event.id, event.name, {
             ok: !event.isFailure,
             text: summarise(event.result),
             raw: event.result,
@@ -553,6 +560,7 @@ export const createChatTui = (options: {
       case "Tool": {
         const call: ToolLine = {
           kind: "tool",
+          id: entry.id,
           name: entry.name,
           params: summariseParams(entry.params),
           raw: entry.params,
@@ -759,6 +767,19 @@ export const createChatTui = (options: {
     const [queue, setQueue] = createSignal<ReadonlyArray<Queued>>([]);
     /** Every fold in play, queued ones first: placeholders are numbered across all of them. */
     const allFolds = () => [...queue().flatMap((q) => q.folds), ...folds];
+    /**
+     * Placeholder numbers only go up while any fold is in play, so a number
+     * is never given twice while the composer may still hold its first
+     * bearer; they start over once nothing is folded anywhere.
+     */
+    let numbered = { text: 0, file: 0 };
+    const nextNumber = (kind: Folded["kind"]) => {
+      if (allFolds().length === 0) {
+        numbered = { text: 0, file: 0 };
+      }
+      numbered = { ...numbered, [kind]: numbered[kind] + 1 };
+      return numbered[kind];
+    };
     /** Send now; or, during a run, steer it in, and hold it when the run would not take it. */
     const send = (draft: string, drafted: ReadonlyArray<Folded>) => {
       const text = unfold(draft, drafted);
@@ -771,18 +792,18 @@ export const createChatTui = (options: {
         setQueue((held) => [...held, { draft, folds: drafted, text, status: "held" }]);
         return;
       }
-      const item: Queued = { draft, folds: drafted, text, status: "steering" };
+      const item: Queued = { draft, folds: drafted, text, status: "sending" };
       setQueue((held) => [...held, item]);
       void options.onSteer(text, files).then((accepted) => {
-        if (!accepted) {
-          setQueue((held) => held.map((q) => (q === item ? { ...q, status: "held" } : q)));
-        }
+        setQueue((held) =>
+          held.map((q) => (q === item ? { ...q, status: accepted ? "steering" : "held" } : q)),
+        );
       });
     };
     steered = (inputs) => {
       for (const input of inputs) {
         setQueue((held) => {
-          const at = held.findIndex((q) => q.status === "steering" && q.text === input);
+          const at = held.findIndex((q) => q.status !== "held" && q.text === input);
           return at < 0 ? held : held.toSpliced(at, 1);
         });
       }
@@ -851,8 +872,9 @@ export const createChatTui = (options: {
       if (queue().length === 0) {
         return;
       }
-      const pending = queue().some((q) => q.status === "steering") ? await options.onRetract() : [];
-      restore(queue().filter((q) => q.status === "held" || pending.includes(q.text)));
+      const pending = queue().some((q) => q.status !== "held") ? await options.onRetract() : [];
+      // What the run has not answered for yet is not with it either.
+      restore(queue().filter((q) => q.status !== "steering" || pending.includes(q.text)));
     };
     /** Stop the run; what was queued and not yet taken comes back to be edited or sent again. */
     const interrupt = () => {
@@ -889,12 +911,10 @@ export const createChatTui = (options: {
         composer?.insertText(text);
         return;
       }
-      const index = allFolds().filter((f) => f.kind === "text").length + 1;
-      fold({ kind: "text", placeholder: textPlaceholder(index, text), text });
+      fold({ kind: "text", placeholder: textPlaceholder(nextNumber("text"), text), text });
     };
     const attach = (attachment: Attachment) => {
-      const index = allFolds().filter((f) => f.kind === "file").length + 1;
-      fold({ kind: "file", placeholder: imagePlaceholder(index), attachment });
+      fold({ kind: "file", placeholder: imagePlaceholder(nextNumber("file")), attachment });
     };
     /** Pasted text is an image when it is the path of one; a dropped file pastes its path. */
     const pasteTextOrPath = async (text: string) => {
@@ -1346,7 +1366,11 @@ export const createChatTui = (options: {
     restore: (entries, contextTokens, cost) =>
       setState({ lines: entries.map(toLine), contextTokens, cost, status: "" }),
     reset: () => setState({ lines: [], contextTokens: 0, cost: Option.none(), status: "" }),
-    interrupted: () => push({ kind: "error", text: "Interrupted" }),
+    interrupted: () => {
+      // No event follows a stop, so a thought in progress is folded here.
+      finishThinking();
+      push({ kind: "error", text: "Interrupted" });
+    },
     setStatus: (status) => setState("status", status),
     setBusy: (busy) => {
       setState("busy", busy);

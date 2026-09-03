@@ -282,7 +282,15 @@ layer(TightLayer)("Runner auto compaction", (it) => {
       );
       assert.deepStrictEqual(
         events.map((e) => e._tag),
-        ["RunStarted", "TextDelta", "TokenUsage", "CompactionStarted", "Compacted", "RunFinished"],
+        [
+          "RunStarted",
+          "TextDelta",
+          "TokenUsage",
+          "CompactionStarted",
+          "Compacted",
+          "TokenUsage",
+          "RunFinished",
+        ],
       );
       const compacted = events[4];
       // system, user, assistant fold into system and summary; the summary is the fake's readout.
@@ -730,7 +738,7 @@ layer(InterruptLayer)("Runner interruption", (it) => {
         assert.isTrue(
           call?._tag === "Tool" &&
             call.isFailure &&
-            JSON.stringify(call.result).includes("interrupted before this tool finished"),
+            JSON.stringify(call.result).includes("ended before this tool finished"),
         );
         const saved = yield* store.get(id);
         assert.strictEqual(Option.isSome(saved) ? saved.value.messages : 0, 4);
