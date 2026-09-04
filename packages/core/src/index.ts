@@ -1,5 +1,6 @@
 export * from "./Agent.ts";
 export * from "./AgentRegistry.ts";
+export * from "./Attachments.ts";
 export * from "./Compaction.ts";
 export * from "./Retry.ts";
 export * from "./ContextEstimate.ts";
