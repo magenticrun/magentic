@@ -4,6 +4,7 @@ import {
   ConversationStore,
   INTERRUPTED_REASON,
   Runner,
+  ScheduledTasks,
 } from "@magentic/core";
 import { Notices } from "@magentic/plugin";
 import type { FollowEvent, Principal, RunEvent } from "@magentic/protocol";
@@ -60,7 +61,8 @@ interface InFlight {
 
 interface Tagged {
   readonly conversationId: string;
-  readonly event: RunEvent;
+  /** A run's event, or where a schedule stands, which arrives with no run at all. */
+  readonly event: FollowEvent;
 }
 
 /**
@@ -90,6 +92,7 @@ export class Wakeups extends Context.Service<
       const scope = yield* Scope.Scope;
       const runner = yield* Runner;
       const notices = yield* Notices;
+      const schedules = yield* ScheduledTasks;
       const store = yield* ConversationStore;
       const audit = yield* Audit;
       const followed = yield* Ref.make(new Map<string, Followed>());
@@ -244,6 +247,30 @@ export class Wakeups extends Context.Service<
           }
         });
       yield* Effect.forkIn(Stream.runForEach(notices.posted, landed), scope);
+      // A schedule that came due is one more thing for the conversation to
+      // speak to, and reaches a run the same way a notice does: the row is
+      // already on disk, and the runner takes it inside its own lock.
+      yield* Effect.forkIn(Stream.runForEach(schedules.fired, landed), scope);
+      // Where a schedule stands goes straight to its followers; it is not a
+      // run event, and most of the time there is no run to carry it.
+      yield* Effect.forkIn(
+        Stream.runForEach(schedules.changed, (standing) =>
+          PubSub.publish(events, {
+            conversationId: standing.conversationId,
+            event: {
+              _tag: "ScheduleChanged",
+              taskId: standing.taskId,
+              conversationId: standing.conversationId,
+              kind: standing.kind,
+              label: standing.label,
+              detail: standing.detail,
+              nextFireAt: Option.getOrUndefined(standing.nextFireAt),
+              active: standing.active,
+            },
+          }),
+        ),
+        scope,
+      );
 
       /** The last follower left: a wake-up not yet speaking is dropped; one speaking finishes and is saved. */
       const leave = (conversationId: string) =>
@@ -298,6 +325,24 @@ export class Wakeups extends Context.Service<
               }),
               () => leave(conversationId),
             );
+            // Arming before waking: whatever the quiet owed is worked out and
+            // put in the inbox first, so the wake-up that follows finds it.
+            yield* schedules.arm(conversationId);
+            for (const standing of yield* schedules.standing(conversationId)) {
+              yield* PubSub.publish(events, {
+                conversationId,
+                event: {
+                  _tag: "ScheduleChanged",
+                  taskId: standing.taskId,
+                  conversationId,
+                  kind: standing.kind,
+                  label: standing.label,
+                  detail: standing.detail,
+                  nextFireAt: Option.getOrUndefined(standing.nextFireAt),
+                  active: standing.active,
+                },
+              });
+            }
             // Whatever landed while nobody followed is spoken to now.
             yield* wake(conversationId);
             const runs = Stream.fromSubscription(subscription).pipe(

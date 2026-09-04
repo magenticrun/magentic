@@ -1,7 +1,15 @@
 import { BunServices } from "@effect/platform-bun";
 import { assert, layer } from "@effect/vitest";
 import { Audit, AuditMemory } from "@magentic/audit";
-import { builtin, ConversationStore, PluginHost, Runner, Steering } from "@magentic/core";
+import {
+  builtin,
+  ConversationStore,
+  PluginHost,
+  Runner,
+  ScheduledTaskStore,
+  ScheduledTasks,
+  Steering,
+} from "@magentic/core";
 import { Identity } from "@magentic/identity";
 import { mcpPlugin, McpServers } from "@magentic/mcp";
 import { fakeProviderPlugin, type FakeScript } from "@magentic/model";
@@ -160,7 +168,13 @@ const handlersWith = (policy: Layer.Layer<Policy>) => {
     Layer.provideMerge(McpServers.layer),
   );
   const RunnerLayer = Runner.layer.pipe(
-    Layer.provideMerge(Layer.mergeAll(ConversationStore.layerMemory, Steering.layer)),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        ConversationStore.layerMemory,
+        Steering.layer,
+        ScheduledTasks.layer.pipe(Layer.provide(ScheduledTaskStore.layerMemory)),
+      ),
+    ),
   );
   const CoreLayer = Layer.mergeAll(RunnerLayer, AdmissionLayer);
   const ServicesLayer = Layer.mergeAll(

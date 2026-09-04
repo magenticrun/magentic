@@ -1,5 +1,11 @@
-import type { Conversation, McpServerInfo, TokenUsage } from "@magentic/protocol";
-import type { Effect, Option, Scope } from "effect";
+import type {
+  Conversation,
+  McpServerInfo,
+  ReadScheduleResult,
+  ScheduledTask,
+  TokenUsage,
+} from "@magentic/protocol";
+import type { DateTime, Effect, Option, Scope } from "effect";
 import { Schema } from "effect";
 import type { PluginSetupError, Registration } from "./Plugin.ts";
 
@@ -76,6 +82,38 @@ export class CommandError extends Schema.TaggedError<CommandError>()("CommandErr
   message: Schema.String,
 }) {}
 
+/** What a command asks for when it sets up a repeat. */
+export interface CreateSessionSchedule {
+  readonly prompt: string;
+  readonly intervalMillis: number;
+  /** When it stops on its own; the gateway's own ceiling applies otherwise. */
+  readonly until?: DateTime.Utc | undefined;
+}
+
+/**
+ * The repeats set up on this chat.
+ *
+ * Deliberately narrow. A command says what should repeat and how often; the
+ * gateway owns the timers, the principal, and the admission of every turn they
+ * start. Handing a command anything that could start a run itself would be the
+ * one way around identity, policy, and audit, which is the thing the plugin
+ * boundary exists to prevent.
+ */
+export interface SessionSchedules {
+  readonly list: Effect.Effect<ReadonlyArray<ScheduledTask>, CommandError>;
+  /**
+   * Read a cadence the surface's own parser would not have, by asking a
+   * model what the words meant. Nothing is scheduled by this; the command
+   * shows what came back and creates the loop only if it goes on to.
+   */
+  read(text: string): Effect.Effect<ReadScheduleResult, CommandError>;
+  create(input: CreateSessionSchedule): Effect.Effect<ScheduledTask, CommandError>;
+  /** False when nothing on this chat has that id. */
+  remove(id: string): Effect.Effect<boolean, CommandError>;
+  /** Stop every repeat on this chat; how many there were. */
+  readonly removeAll: Effect.Effect<number, CommandError>;
+}
+
 /** The chat a command runs in, and what it may change about it. */
 export interface ChatSession {
   readonly agent: string;
@@ -100,6 +138,8 @@ export interface ChatSession {
   rename(title: string): Effect.Effect<void, CommandError>;
   /** The MCP servers the gateway was configured with, connected or not, by name. */
   readonly mcpServers: Effect.Effect<ReadonlyArray<McpServerInfo>, CommandError>;
+  /** What repeats on this chat, and how to start and stop one. */
+  readonly schedules: SessionSchedules;
 }
 
 export interface CommandInput {

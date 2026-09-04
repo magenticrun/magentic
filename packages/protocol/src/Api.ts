@@ -20,6 +20,14 @@ import {
   RunRequest,
   SteerRequest,
 } from "./Run.ts";
+import {
+  MissedPolicy,
+  ReadScheduleResult,
+  ScheduledTask,
+  ScheduleInvalid,
+  ScheduleKind,
+  ScheduleNotFound,
+} from "./Schedule.ts";
 import { BackgroundTask } from "./Task.ts";
 
 // The API definition lives here, apart from the gateway, so surfaces derive
@@ -108,6 +116,55 @@ export const Api = RpcGroup.make(
   Rpc.make("listPlugins", { success: Schema.Array(PluginInfo) }),
   /** The MCP servers the gateway was configured with, whether or not they connected. */
   Rpc.make("listMcpServers", { success: Schema.Array(McpServerInfo) }),
+  /**
+   * Make a conversation exist before it has run. A schedule belongs to a
+   * conversation, and `/loop` can be the first thing typed, so the id cannot
+   * wait for the first run to invent one. Returns the conversation that is
+   * already there when the id is taken, so calling twice is harmless.
+   */
+  Rpc.make("openConversation", {
+    payload: { agent: Schema.NonEmptyString, directory: Schema.optional(Schema.String) },
+    success: Conversation,
+    error: AgentNotFound,
+  }),
+  /**
+   * Read a cadence a person said in words, when the surface's own parser
+   * would not have it. The model reads the intent; the gateway works out the
+   * times. Nothing is scheduled by this — the surface confirms first.
+   */
+  Rpc.make("readSchedule", {
+    payload: {
+      agent: Schema.NonEmptyString,
+      text: Schema.NonEmptyString,
+      /** The caller's IANA zone, so `3pm` means three in the afternoon where they are. */
+      zone: Schema.NonEmptyString,
+    },
+    success: ReadScheduleResult,
+    error: Schema.Union([AgentNotFound, ScheduleInvalid]),
+  }),
+  /** Repeat an input on the conversation until it is stopped or expires. */
+  Rpc.make("createSchedule", {
+    payload: {
+      conversationId: ConversationId,
+      kind: ScheduleKind,
+      prompt: Schema.NonEmptyString,
+      intervalMillis: Schema.Finite,
+      missed: Schema.optional(MissedPolicy),
+      /** When it stops on its own; the gateway's own ceiling applies when absent or later. */
+      expiresAt: Schema.optional(Schema.DateTimeUtcFromString),
+    },
+    success: ScheduledTask,
+    error: Schema.Union([ConversationNotFound, ScheduleInvalid]),
+  }),
+  Rpc.make("listSchedules", {
+    payload: { conversationId: ConversationId },
+    success: Schema.Array(ScheduledTask),
+    error: ConversationNotFound,
+  }),
+  Rpc.make("deleteSchedule", {
+    payload: { conversationId: ConversationId, id: Schema.NonEmptyString },
+    error: Schema.Union([ConversationNotFound, ScheduleNotFound]),
+  }),
 );
 export type Api = typeof Api;
 

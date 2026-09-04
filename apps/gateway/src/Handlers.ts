@@ -3,9 +3,14 @@ import {
   type AgentDefinition,
   AgentRegistry,
   ConversationStore,
+  describeInterval,
+  MAX_INTERVAL_MILLIS,
+  MIN_INTERVAL_MILLIS,
   ModelRegistry,
   PluginHost,
+  readSchedule,
   Runner,
+  ScheduledTasks,
   Steering,
   transcriptFromJson,
 } from "@magentic/core";
@@ -22,11 +27,17 @@ import {
   type FollowRequest,
   RunDenied,
   RunNotFound,
+  type MissedPolicy,
   type RunRequest,
+  ReadScheduleResult,
+  ScheduleInvalid,
+  type ScheduleKind,
+  ScheduleNotFound,
   type SteerRequest,
 } from "@magentic/protocol";
 import { BackgroundTasks } from "@magentic/tools";
 import { Config, DateTime, Effect, Option, Stream } from "effect";
+import { LanguageModel } from "effect/unstable/ai";
 import { Wakeups } from "./Wakeups.ts";
 
 /** Until sessions exist, the OS user is the caller. */
@@ -67,6 +78,7 @@ export const RpcHandlers = Api.toLayer(
     const steering = yield* Steering;
     const wakeups = yield* Wakeups;
     const tasks = yield* BackgroundTasks;
+    const schedules = yield* ScheduledTasks;
 
     /** What a surface may know, with the model the agent would run on today. */
     const toInfo = Effect.fn("Gateway.toInfo")(function* (agent: AgentDefinition) {
@@ -233,6 +245,125 @@ export const RpcHandlers = Api.toLayer(
         .pipe(Effect.mapError((error) => new CompactionFailed({ id, message: error.message })));
     });
 
+    /**
+     * A conversation the caller owns, before it has run. The runner invents an
+     * id at its first turn, which is too late for a schedule: `/loop` may be
+     * the first thing typed. Writing what the conversation is, with no
+     * history, is enough — the runner starts a fresh chat when it finds none.
+     */
+    const openConversation = Effect.fn("Gateway.conversations.open")(function* (
+      name: string,
+      directory: string | undefined,
+    ) {
+      const agent = yield* registry.get(name);
+      const principal = yield* caller;
+      const now = yield* DateTime.now;
+      const info = new Conversation({
+        id: crypto.randomUUID(),
+        agent: agent.name,
+        principal: principal.id,
+        title: "New conversation",
+        directory,
+        createdAt: now,
+        updatedAt: now,
+        messages: 0,
+      });
+      yield* store.update(info).pipe(Effect.orDie);
+      return info;
+    });
+
+    /**
+     * The model reads what the person meant; the times are worked out here.
+     * It runs on the agent's own model, as a compaction summary does, and it
+     * is a call of its own rather than part of any turn — so the agent's
+     * system prompt, which is the cache prefix of every turn, keeps no clock.
+     */
+    const readScheduleFor = Effect.fn("Gateway.schedules.read")(function* (
+      name: string,
+      text: string,
+      zone: string,
+    ) {
+      const agent = yield* registry.get(name);
+      const parsed = DateTime.zoneFromString(zone);
+      if (Option.isNone(parsed)) {
+        return yield* new ScheduleInvalid({ message: `${zone} is not a time zone` });
+      }
+      const model = yield* models
+        .languageModel(Option.fromNullishOr(agent.model))
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new ScheduleInvalid({ message: `no model to read that with: ${error.message}` }),
+          ),
+        );
+      const read = yield* readSchedule(text, parsed.value).pipe(
+        Effect.provideService(LanguageModel.LanguageModel, model),
+        Effect.mapError((error) => new ScheduleInvalid({ message: error.message })),
+      );
+      return new ReadScheduleResult({
+        intervalMillis: read.intervalMillis,
+        prompt: read.prompt,
+        until: Option.getOrUndefined(read.until),
+        interpretation: read.interpretation,
+      });
+    });
+
+    const createSchedule = Effect.fn("Gateway.schedules.create")(function* (payload: {
+      readonly conversationId: string;
+      readonly kind: ScheduleKind;
+      readonly prompt: string;
+      readonly intervalMillis: number;
+      readonly missed?: MissedPolicy | undefined;
+      readonly expiresAt?: DateTime.Utc | undefined;
+    }) {
+      const principal = yield* caller;
+      const info = yield* owned(store, principal.id, payload.conversationId);
+      if (
+        !Number.isFinite(payload.intervalMillis) ||
+        payload.intervalMillis < MIN_INTERVAL_MILLIS
+      ) {
+        return yield* new ScheduleInvalid({
+          message: `a loop runs at most once every ${describeInterval(MIN_INTERVAL_MILLIS)}`,
+        });
+      }
+      if (payload.intervalMillis > MAX_INTERVAL_MILLIS) {
+        return yield* new ScheduleInvalid({
+          message: `a loop lives at most ${describeInterval(MAX_INTERVAL_MILLIS)}`,
+        });
+      }
+      return yield* schedules
+        .create({
+          conversationId: payload.conversationId,
+          agent: info.agent,
+          kind: payload.kind,
+          prompt: payload.prompt,
+          intervalMillis: payload.intervalMillis,
+          missed: payload.missed ?? "once",
+          expiresAt: Option.fromNullishOr(payload.expiresAt),
+        })
+        .pipe(Effect.mapError((error) => new ScheduleInvalid({ message: error.message })));
+    });
+
+    const listSchedules = Effect.fn("Gateway.schedules.list")(function* (conversationId: string) {
+      const principal = yield* caller;
+      yield* owned(store, principal.id, conversationId);
+      return yield* schedules.list(conversationId);
+    });
+
+    const deleteSchedule = Effect.fn("Gateway.schedules.delete")(function* (
+      conversationId: string,
+      id: string,
+    ) {
+      const principal = yield* caller;
+      yield* owned(store, principal.id, conversationId);
+      const stopped = yield* schedules
+        .remove(conversationId, id)
+        .pipe(Effect.orElseSucceed(() => false));
+      if (!stopped) {
+        return yield* new ScheduleNotFound({ id });
+      }
+    });
+
     return Api.of({
       health: () => Effect.void,
       listAgents: () => registry.list.pipe(Effect.flatMap(Effect.forEach(toInfo))),
@@ -251,6 +382,11 @@ export const RpcHandlers = Api.toLayer(
       compact: ({ id }) => compact(id),
       listPlugins: () => host.plugins,
       listMcpServers: () => mcp.list,
+      openConversation: ({ agent, directory }) => openConversation(agent, directory),
+      readSchedule: ({ agent, text, zone }) => readScheduleFor(agent, text, zone),
+      createSchedule: (payload) => createSchedule(payload),
+      listSchedules: ({ conversationId }) => listSchedules(conversationId),
+      deleteSchedule: ({ conversationId, id }) => deleteSchedule(conversationId, id),
     });
   }),
 );

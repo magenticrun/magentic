@@ -9,7 +9,8 @@ import {
 import { parseModelRef, type Picked, type Picker } from "@magentic/plugin";
 import type { Attachment, RunEvent, TranscriptEntry } from "@magentic/protocol";
 import { type JSX, useKeyboard, usePaste, useRenderer } from "@opentui/solid";
-import { Option, Predicate, type Schema } from "effect";
+import { DateTime, Option, Predicate, type Schema } from "effect";
+import type { Message } from "../Attachments.ts";
 import {
   batch,
   createEffect,
@@ -43,14 +44,19 @@ import { PickerView } from "./Picker.tsx";
 import { type Palette, paletteFor } from "./Theme.ts";
 
 type TextLine = {
-  /**
-   * A note is what a command reports, in the transcript but not from the
-   * agent. A summary is what a compaction left for the model to continue from.
-   */
-  readonly kind: "user" | "assistant" | "error" | "note" | "summary";
+  /** A note is what a command reports, in the transcript but not from the agent. */
+  readonly kind: "user" | "assistant" | "error" | "note";
   readonly text: string;
   readonly model?: string;
   readonly tokensPerSecond?: number;
+};
+
+/** A compaction summary, folded behind its transcript marker until opened. */
+type SummaryLine = {
+  readonly kind: "summary";
+  readonly text: string;
+  readonly messagesBefore?: number;
+  readonly expanded: boolean;
 };
 
 type ToolResult = { readonly ok: boolean; readonly text: string; readonly raw: Schema.Json };
@@ -82,7 +88,23 @@ type ThinkingLine = {
   readonly expanded: boolean;
 };
 
-type Line = TextLine | ToolLine | ThinkingLine;
+type Line = TextLine | SummaryLine | ToolLine | ThinkingLine;
+
+/**
+ * Something that keeps starting runs on this conversation: a `/loop` today,
+ * and whatever else comes later. Described rather than named, so the footer
+ * and the escape key learn nothing about what kind it is.
+ */
+interface Driver {
+  readonly id: string;
+  readonly kind: string;
+  /** `Loop 10 minutes`. */
+  readonly label: string;
+  /** What it repeats, or why it ended. */
+  readonly detail: string;
+  /** When it next runs; none when it can no longer run. */
+  readonly nextAt: Option.Option<DateTime.Utc>;
+}
 
 /** Mutable on purpose: Solid's store setters address fields by name. */
 type State = {
@@ -102,6 +124,17 @@ type State = {
   status: string;
   /** Background tasks of this conversation still running, as the gateway last said. */
   tasks: number;
+  /**
+   * What repeats on this conversation, as the gateway last said.
+   *
+   * Kept apart from `busy`, which means a run is in flight and drives the
+   * spinner, the interrupt, and whether typing is queued or sent. A loop is
+   * armed for hours; treating that as busy would hold every line the person
+   * typed for as long as it ran.
+   */
+  driver: Option.Option<Driver>;
+  /** Seconds left until the driver's next run, counted down here from `nextAt`. */
+  countdown: number;
   lines: Array<Line>;
   busy: boolean;
   /** Whether tool results show in full under each call, as ctrl+o toggles. */
@@ -113,6 +146,12 @@ const FRAMES = ["·", "✢", "✳", "✶", "✻", "✽", "✶", "✳", "✢"];
 const TICK_MS = 100;
 /** How long a first ctrl+c waits for the second before it is forgotten. */
 const CONFIRM_MS = 2000;
+/**
+ * How long after one escape another means something different. Two presses in
+ * quick succession are one intent — stop the run — and the second must not
+ * fall through to stopping the loop the person meant to keep.
+ */
+const ESCAPE_APART_MS = 600;
 /** How long the footer notes a copy. */
 const FLASH_MS = 2000;
 /** Rows per wheel notch, constant, as opencode scrolls unless told otherwise. */
@@ -279,8 +318,10 @@ const summariseParams = (value: Schema.Json): string => {
 const asTool = (line: Line): ToolLine | undefined => (line.kind === "tool" ? line : undefined);
 const asThinking = (line: Line): ThinkingLine | undefined =>
   line.kind === "thinking" ? line : undefined;
+const asSummary = (line: Line | undefined): SummaryLine | undefined =>
+  line?.kind === "summary" ? line : undefined;
 const asText = (line: Line): TextLine | undefined =>
-  line.kind === "tool" || line.kind === "thinking" ? undefined : line;
+  line.kind === "tool" || line.kind === "thinking" || line.kind === "summary" ? undefined : line;
 const responseInfo = (
   line: TextLine,
 ): { readonly model: string; readonly tokensPerSecond: number } | undefined =>
@@ -294,11 +335,205 @@ const thoughtFor = (line: ThinkingLine): string => {
   return `Thought for ${Math.max(1, Math.round((ticks * TICK_MS) / 1000))}s`;
 };
 
+const summaryFor = (line: SummaryLine): string =>
+  line.messagesBefore === undefined
+    ? "Compacted conversation into a summary"
+    : `Compacted ${line.messagesBefore} messages into a summary`;
+
 /** What the slash-command popover lists. */
 export interface CommandInfo {
   readonly name: string;
   readonly description: string;
 }
+
+interface FileMention {
+  readonly start: number;
+  readonly end: number;
+  readonly query: string;
+}
+
+type ComposerSuggestion =
+  | { readonly kind: "command"; readonly command: CommandInfo }
+  | { readonly kind: "file"; readonly path: string };
+
+interface ComposerPopover {
+  readonly kind: "command" | "file";
+  readonly key: string;
+  readonly items: ReadonlyArray<ComposerSuggestion>;
+  readonly loading: boolean;
+}
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+const displayWidth = (text: string): number => {
+  let width = 0;
+  for (const part of graphemes.segment(text)) {
+    width += part.segment === "\n" ? 1 : Bun.stringWidth(part.segment);
+  }
+  return width;
+};
+
+const indexAtOffset = (text: string, offset: number): number => {
+  if (offset <= 0) {
+    return 0;
+  }
+  let width = 0;
+  for (const part of graphemes.segment(text)) {
+    const next = width + displayWidth(part.segment);
+    if (next > offset) {
+      return part.index;
+    }
+    width = next;
+  }
+  return text.length;
+};
+
+const mentionAt = (text: string, offset: number): FileMention | undefined => {
+  const beforeCursor = text.slice(0, indexAtOffset(text, offset));
+  const at = beforeCursor.lastIndexOf("@");
+  if (at < 0) {
+    return undefined;
+  }
+  const before = at === 0 ? undefined : beforeCursor[at - 1];
+  const query = beforeCursor.slice(at + 1);
+  if ((before !== undefined && !/\s/.test(before)) || /[\s@]/.test(query)) {
+    return undefined;
+  }
+  return { start: displayWidth(beforeCursor.slice(0, at)), end: offset, query };
+};
+
+interface IndexedFile {
+  readonly path: string;
+  readonly lower: string;
+  readonly name: string;
+  readonly nameStart: number;
+  readonly depth: number;
+}
+
+interface RankedFile {
+  readonly file: IndexedFile;
+  readonly score: number;
+}
+
+const indexFiles = (paths: ReadonlyArray<string>): ReadonlyArray<IndexedFile> =>
+  paths.map((path) => {
+    const lower = path.toLowerCase();
+    const nameStart = path.lastIndexOf("/") + 1;
+    return {
+      path,
+      lower,
+      name: lower.slice(nameStart),
+      nameStart,
+      depth: path.split("/").length,
+    };
+  });
+
+const isFileWordStart = (path: string, index: number): boolean =>
+  index === 0 ||
+  "/._- ".includes(path[index - 1] ?? "") ||
+  (/[a-z]/.test(path[index - 1] ?? "") && /[A-Z]/.test(path[index] ?? ""));
+
+const fuzzyFileScore = (
+  file: IndexedFile,
+  query: string,
+  searchStart: number,
+): number | undefined => {
+  let best: number | undefined;
+  let first = file.lower.indexOf(query[0] ?? "", searchStart);
+  while (first >= 0) {
+    let previous = first;
+    let score = isFileWordStart(file.path, first) ? 24 : 0;
+    let matched = true;
+    for (let queryAt = 1; queryAt < query.length; queryAt++) {
+      const at = file.lower.indexOf(query[queryAt] ?? "", previous + 1);
+      if (at < 0) {
+        matched = false;
+        break;
+      }
+      const gap = at - previous - 1;
+      score += gap === 0 ? 18 : isFileWordStart(file.path, at) ? 12 : -Math.min(gap, 12);
+      previous = at;
+    }
+    if (matched) {
+      const span = previous - first + 1;
+      score += query.length * 10 + Math.max(0, 30 - (span - query.length));
+      best = Math.max(best ?? -Infinity, score);
+    }
+    first = file.lower.indexOf(query[0] ?? "", first + 1);
+  }
+  return best;
+};
+
+const scoreFile = (file: IndexedFile, query: string): number | undefined => {
+  if (file.lower === query) {
+    return 20_000;
+  }
+  if (file.name === query) {
+    return 19_000;
+  }
+  if (file.name.startsWith(query)) {
+    return 18_000;
+  }
+  if (file.lower.startsWith(query)) {
+    return 17_000;
+  }
+  const nameContains = file.name.indexOf(query);
+  if (nameContains >= 0) {
+    return 16_000 - nameContains;
+  }
+  const pathContains = file.lower.indexOf(query);
+  if (pathContains >= 0) {
+    return 15_000 + (isFileWordStart(file.path, pathContains) ? 100 : 0) - pathContains;
+  }
+  const nameScore = fuzzyFileScore(file, query, file.nameStart);
+  if (nameScore !== undefined) {
+    return 12_000 + nameScore;
+  }
+  const pathScore = fuzzyFileScore(file, query, 0);
+  return pathScore === undefined ? undefined : 10_000 + pathScore;
+};
+
+const compareRankedFiles = (a: RankedFile, b: RankedFile): number => {
+  const byScore = b.score - a.score;
+  if (byScore !== 0) {
+    return byScore;
+  }
+  const byDepth = a.file.depth - b.file.depth;
+  return byDepth !== 0 ? byDepth : a.file.path.localeCompare(b.file.path);
+};
+
+const matchingFiles = (
+  files: ReadonlyArray<IndexedFile>,
+  rawQuery: string,
+): ReadonlyArray<ComposerSuggestion> => {
+  const query = rawQuery.replaceAll("\\", "/").replace(/^\.\//, "").toLowerCase();
+  if (query.length === 0) {
+    return files.slice(0, 10).map(({ path }) => ({ kind: "file", path }));
+  }
+
+  const best: Array<RankedFile> = [];
+  for (const file of files) {
+    const score = scoreFile(file, query);
+    if (score === undefined) {
+      continue;
+    }
+    const ranked = { file, score };
+    let at = 0;
+    for (const current of best) {
+      if (compareRankedFiles(current, ranked) > 0) {
+        break;
+      }
+      at++;
+    }
+    if (at < 10) {
+      best.splice(at, 0, ranked);
+      if (best.length > 10) {
+        best.pop();
+      }
+    }
+  }
+  return best.map(({ file }) => ({ kind: "file", path: file.path }));
+};
 
 /**
  * A message sent while a run was in flight. Steered into the run, it waits
@@ -359,6 +594,8 @@ export interface ChatTui {
   setBusy(busy: boolean): void;
   /** How many background tasks of the conversation are still running. */
   setTasks(running: number): void;
+  /** What repeats on this conversation; none clears the footer. */
+  setDriver(driver: Option.Option<Driver>): void;
 }
 
 export const createChatTui = (options: {
@@ -371,6 +608,8 @@ export const createChatTui = (options: {
   readonly contextWindow: number;
   /** Slash commands the composer completes. */
   readonly commands: ReadonlyArray<CommandInfo>;
+  readonly listFiles: () => Promise<ReadonlyArray<string>>;
+  readonly onPickFile: (path: string) => Promise<Option.Option<Message>>;
   /** The message with pasted text unfolded, and the images pasted into it. */
   readonly onSubmit: (text: string, attachments: ReadonlyArray<Attachment>) => void;
   /**
@@ -385,6 +624,8 @@ export const createChatTui = (options: {
   readonly onCycleReasoning: () => void;
   /** Esc, or ctrl+c, while a run is in flight. Anything queued is back in the composer. */
   readonly onInterrupt: () => void;
+  /** Esc with nothing running: stop what keeps starting runs on this conversation. */
+  readonly onStopDriver: (id: string) => void;
   readonly onExit: () => void;
 }): ChatTui => {
   const [state, setState] = createStore<State>({
@@ -396,6 +637,8 @@ export const createChatTui = (options: {
     cost: Option.none(),
     status: "",
     tasks: 0,
+    driver: Option.none(),
+    countdown: 0,
     lines: [],
     busy: false,
     expanded: false,
@@ -482,6 +725,13 @@ export const createChatTui = (options: {
   const toggleThinking = (index: number) => {
     const line = state.lines[index];
     if (line !== undefined && line.kind === "thinking") {
+      setState("lines", index, { expanded: !line.expanded });
+    }
+  };
+
+  const toggleSummary = (index: number) => {
+    const line = state.lines[index];
+    if (line !== undefined && line.kind === "summary") {
       setState("lines", index, { expanded: !line.expanded });
     }
   };
@@ -582,11 +832,12 @@ export const createChatTui = (options: {
           setState("status", "Compacting…");
           return;
         case "Compacted":
-          // Earlier lines stay on screen; the model continues from the summary.
-          push({ kind: "summary", text: event.summary });
+          // Earlier lines stay on screen; the model continues from the folded summary.
           push({
-            kind: "note",
-            text: `Compacted ${event.messagesBefore} messages into a summary`,
+            kind: "summary",
+            text: event.summary,
+            messagesBefore: event.messagesBefore,
+            expanded: false,
           });
           setState({ contextTokens: 0, status: state.busy ? "Thinking…" : "" });
           return;
@@ -625,8 +876,10 @@ export const createChatTui = (options: {
       case "Assistant":
         return { kind: "assistant", text: entry.text };
       case "Summary":
-        return { kind: "summary", text: entry.text };
+        return { kind: "summary", text: entry.text, expanded: false };
       case "Notice":
+        return { kind: "note", text: entry.text };
+      case "Scheduled":
         return { kind: "note", text: entry.text };
       case "Tool": {
         const call: ToolLine = {
@@ -647,6 +900,8 @@ export const createChatTui = (options: {
   };
 
   const view = () => {
+    // When escape was last pressed, so a double tap is read as one intent.
+    let lastEscape = 0;
     // A first ctrl+c arms quitting for a moment; only a second one quits.
     const [armed, setArmed] = createSignal(false);
     let disarm: ReturnType<typeof setTimeout> | undefined;
@@ -698,19 +953,23 @@ export const createChatTui = (options: {
       }
       const listed = popover();
       if (listed !== undefined && !key.ctrl && !key.meta) {
-        const count = listed.length;
-        const chosen = listed[selected()];
-        if (key.name === "up") {
+        const count = listed.items.length;
+        const chosen = listed.items[selected()];
+        if (key.name === "escape") {
+          setDismissed(listed.key);
+        } else if (count === 0) {
+          return;
+        } else if (key.name === "up") {
           setSelected((n) => (n - 1 + count) % count);
         } else if (key.name === "down") {
           setSelected((n) => (n + 1) % count);
-        } else if (key.name === "tab" && chosen !== undefined) {
-          complete(chosen);
-        } else if (isEnter(key.name) && chosen !== undefined) {
-          send(`/${chosen.name}`, []);
+        } else if ((key.name === "tab" || isEnter(key.name)) && chosen?.kind === "file") {
+          void completeFile(chosen.path, listed.key);
+        } else if (key.name === "tab" && chosen?.kind === "command") {
+          complete(chosen.command);
+        } else if (isEnter(key.name) && chosen?.kind === "command") {
+          send(`/${chosen.command.name}`, []);
           clear();
-        } else if (key.name === "escape") {
-          setDismissed(true);
         } else {
           return;
         }
@@ -719,8 +978,23 @@ export const createChatTui = (options: {
         return;
       }
       if (key.name === "escape") {
-        if (state.busy && dialog() === undefined) {
+        if (dialog() !== undefined) {
+          return;
+        }
+        // Escape takes the innermost live thing. A run in flight is
+        // interrupted and the loop stays armed; only with nothing running does
+        // escape stop the loop itself.
+        if (state.busy) {
+          lastEscape = Date.now();
           interrupt();
+          return;
+        }
+        const driver = Option.getOrUndefined(state.driver);
+        // A double tap meant to kill a stuck run is one intent, not two: the
+        // second press must not also stop the loop the person wanted kept.
+        if (driver !== undefined && Date.now() - lastEscape > ESCAPE_APART_MS) {
+          lastEscape = Date.now();
+          options.onStopDriver(driver.id);
         }
         return;
       }
@@ -790,10 +1064,11 @@ export const createChatTui = (options: {
       showFlash(copied ? "copied to clipboard" : "could not reach the clipboard");
     };
 
-    // Ticks since the run began; drives the spinner, the elapsed seconds, and
+    // Ticks since work began; drives the spinner, the elapsed seconds, and
     // how long each thought took.
+    const active = () => state.busy || state.status.length > 0;
     createEffect(() => {
-      if (!state.busy) {
+      if (!active()) {
         return;
       }
       setState("ticks", 0);
@@ -802,6 +1077,32 @@ export const createChatTui = (options: {
     });
     const frame = () => FRAMES[state.ticks % FRAMES.length];
     const elapsed = () => Math.floor((state.ticks * TICK_MS) / 1000);
+
+    // A loop between runs is waiting, not working, so it counts down rather
+    // than spinning: nothing is happening, and how long until it does is the
+    // thing worth showing. One second's tick is enough for a countdown.
+    createEffect(() => {
+      const driver = Option.getOrUndefined(state.driver);
+      const nextAt = driver === undefined ? undefined : Option.getOrUndefined(driver.nextAt);
+      if (nextAt === undefined) {
+        setState("countdown", 0);
+        return;
+      }
+      const left = () =>
+        Math.max(0, Math.round((DateTime.toEpochMillis(nextAt) - Date.now()) / 1000));
+      setState("countdown", left());
+      const timer = setInterval(() => setState("countdown", left()), 1000);
+      onCleanup(() => clearInterval(timer));
+    });
+
+    /** `9m 12s`, `45s`: what is left before the next run. */
+    const remaining = () => {
+      const seconds = state.countdown;
+      if (seconds >= 3600) {
+        return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+      }
+      return seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
+    };
 
     // The composer keeps its own text; the view reads it on send and sizes
     // the box to the text, counting wrapped rows.
@@ -831,6 +1132,7 @@ export const createChatTui = (options: {
       folds = [];
       setRows(1);
       setDraft("");
+      setCursor(0);
     };
     // Messages sent while a run is in flight wait here, listed over the
     // composer: steered ones until the run takes them, held ones until it
@@ -924,14 +1226,15 @@ export const createChatTui = (options: {
       composer.setText(text);
       const styleId = composerStyleFor(palette()).getStyleId(FOLD_STYLE);
       for (const entry of restored) {
-        const start = text.indexOf(entry.placeholder);
-        if (start >= 0) {
-          const range = { start, end: start + entry.placeholder.length, virtual: true };
+        const index = text.indexOf(entry.placeholder);
+        if (index >= 0) {
+          const start = displayWidth(text.slice(0, index));
+          const range = { start, end: start + displayWidth(entry.placeholder), virtual: true };
           composer.extmarks.create(styleId === null ? range : { ...range, styleId });
         }
       }
       folds = restored;
-      composer.cursorOffset = text.length;
+      composer.cursorOffset = displayWidth(text);
       onDraft();
     };
     /**
@@ -964,13 +1267,13 @@ export const createChatTui = (options: {
     };
 
     /** Put a placeholder at the cursor, styled and moved over as one unit. */
-    const fold = (entry: Folded) => {
+    const fold = (entry: Folded, suffix = " ") => {
       if (composer === undefined) {
         return;
       }
       const start = composer.cursorOffset;
-      composer.insertText(`${entry.placeholder} `);
-      const range = { start, end: start + entry.placeholder.length, virtual: true };
+      composer.insertText(entry.placeholder + suffix);
+      const range = { start, end: start + displayWidth(entry.placeholder), virtual: true };
       const styleId = composerStyleFor(palette()).getStyleId(FOLD_STYLE);
       composer.extmarks.create(styleId === null ? range : { ...range, styleId });
       folds = [...folds, entry];
@@ -1018,20 +1321,75 @@ export const createChatTui = (options: {
     // While the draft is one word starting with a slash, the commands it could
     // become are listed under the composer: tab completes, enter runs.
     const [draft, setDraft] = createSignal("");
-    const [dismissed, setDismissed] = createSignal(false);
+    const [cursor, setCursor] = createSignal(0);
+    const [dismissed, setDismissed] = createSignal<string | undefined>(undefined);
     const [selected, setSelected] = createSignal(0);
-    const suggestions = createMemo(() => {
+    const [files, setFiles] = createSignal<ReadonlyArray<IndexedFile> | undefined>(undefined);
+    const [loadingFiles, setLoadingFiles] = createSignal(false);
+    const commandSuggestions = createMemo(() => {
       const text = draft();
       if (!text.startsWith("/") || /\s/.test(text)) {
         return [];
       }
       const prefix = text.slice(1);
-      return options.commands.filter((command) => command.name.startsWith(prefix));
+      return options.commands
+        .filter((command) => command.name.startsWith(prefix))
+        .map((command): ComposerSuggestion => ({ kind: "command", command }));
     });
+    const fileMention = createMemo(() => mentionAt(draft(), cursor()));
+    let mentionWasOpen = false;
+    let fileScan = 0;
     createEffect(() => {
-      suggestions();
-      setDismissed(false);
-      setSelected(0);
+      const open = fileMention() !== undefined;
+      if (open && !mentionWasOpen) {
+        const scan = ++fileScan;
+        setLoadingFiles(true);
+        void options.listFiles().then(
+          (paths) => {
+            if (scan === fileScan) {
+              setFiles(indexFiles(paths));
+              setLoadingFiles(false);
+            }
+          },
+          () => {
+            if (scan === fileScan) {
+              setFiles(files() ?? []);
+              setLoadingFiles(false);
+            }
+          },
+        );
+      }
+      mentionWasOpen = open;
+    });
+    const fileSuggestions = createMemo(() =>
+      matchingFiles(files() ?? [], fileMention()?.query ?? ""),
+    );
+    const offered = createMemo<ComposerPopover | undefined>(() => {
+      const mention = fileMention();
+      if (mention !== undefined) {
+        return {
+          kind: "file",
+          key: `file:${mention.start}:${mention.end}:${mention.query}`,
+          items: fileSuggestions(),
+          loading: loadingFiles(),
+        };
+      }
+      const commands = commandSuggestions();
+      return commands.length === 0
+        ? undefined
+        : { kind: "command", key: `command:${draft()}`, items: commands, loading: false };
+    });
+    const popover = () => {
+      const next = dialog() === undefined ? offered() : undefined;
+      return next?.key === dismissed() ? undefined : next;
+    };
+    let shownKey: string | undefined;
+    createEffect(() => {
+      const key = offered()?.key;
+      if (key !== shownKey) {
+        shownKey = key;
+        setSelected(0);
+      }
     });
     /** The footer shows the provider and model joined with a `/`; a bare provider means its default model. */
     const modelParts = () =>
@@ -1054,13 +1412,10 @@ export const createChatTui = (options: {
       const share = (used / state.contextWindow) * 100;
       return `${share < 1 ? "<1" : Math.round(share)}% of ${formatTokens(state.contextWindow)} context`;
     };
-    const popover = () =>
-      dialog() === undefined && !dismissed() && suggestions().length > 0
-        ? suggestions()
-        : undefined;
     const onDraft = () => {
       fitRows();
       setDraft(composer?.plainText ?? "");
+      setCursor(composer?.cursorOffset ?? 0);
     };
     const complete = (command: CommandInfo) => {
       if (composer === undefined) {
@@ -1068,8 +1423,50 @@ export const createChatTui = (options: {
       }
       const text = `/${command.name} `;
       composer.setText(text);
-      composer.cursorOffset = text.length;
+      composer.cursorOffset = displayWidth(text);
       setDraft(text);
+      setCursor(composer.cursorOffset);
+    };
+    const completeFile = async (path: string, key: string) => {
+      if (composer === undefined) {
+        return;
+      }
+      const input = composer;
+      const mention = fileMention();
+      const snapshot = input.plainText;
+      if (mention === undefined || offered()?.key !== key) {
+        return;
+      }
+      setDismissed(key);
+      const picked = await options.onPickFile(path);
+      if (Option.isNone(picked)) {
+        showFlash(`could not read ${path}`);
+        return;
+      }
+      const current = mentionAt(input.plainText, input.cursorOffset);
+      if (
+        input.plainText !== snapshot ||
+        current === undefined ||
+        `file:${current.start}:${current.end}:${current.query}` !== key
+      ) {
+        return;
+      }
+      const after = snapshot.slice(indexAtOffset(snapshot, current.end));
+      const suffix = after.length === 0 || !/^\s/.test(after) ? " " : "";
+      input.cursorOffset = current.start;
+      const start = input.logicalCursor;
+      input.cursorOffset = current.end;
+      const end = input.logicalCursor;
+      input.deleteRange(start.row, start.col, end.row, end.col);
+      input.cursorOffset = current.start;
+      const marker = `@${path}`;
+      const attachment = picked.value.attachments[0];
+      const entry: Folded =
+        attachment === undefined
+          ? { kind: "text", placeholder: marker, text: picked.value.text }
+          : { kind: "file", placeholder: marker, attachment };
+      fold(entry, suffix);
+      onDraft();
     };
 
     const bullet = (colours: Palette, line: ToolLine) =>
@@ -1209,6 +1606,36 @@ export const createChatTui = (options: {
                     </box>
                   )}
                 </Match>
+                <Match when={asSummary(line)}>
+                  {(summary) => (
+                    <box flexDirection="column" marginBottom={1}>
+                      <box
+                        flexDirection="row"
+                        onMouseUp={() => {
+                          if (!selecting()) {
+                            toggleSummary(index());
+                          }
+                        }}
+                      >
+                        <text fg={palette().muted} flexShrink={0}>
+                          {"◐"}
+                        </text>
+                        <text fg={palette().muted} marginLeft={1} wrapMode="none">
+                          {summaryFor(summary())}
+                        </text>
+                      </box>
+                      <Show when={asSummary(state.lines[index()])?.expanded}>
+                        <box marginLeft={2}>
+                          <markdown
+                            content={summary().text}
+                            syntaxStyle={markdownStyle()}
+                            fg={palette().text}
+                          />
+                        </box>
+                      </Show>
+                    </box>
+                  )}
+                </Match>
                 <Match when={asText(line)}>
                   {(text) => (
                     <Switch>
@@ -1222,14 +1649,11 @@ export const createChatTui = (options: {
                           </box>
                         </box>
                       </Match>
-                      <Match when={text().kind === "assistant" || text().kind === "summary"}>
+                      <Match when={text().kind === "assistant"}>
                         <box flexDirection="row" marginBottom={1}>
                           {/* The markdown box grows; the bullet must not shrink to fit. */}
-                          <text
-                            fg={text().kind === "summary" ? palette().muted : palette().text}
-                            flexShrink={0}
-                          >
-                            {text().kind === "summary" ? "◐" : "⏺"}
+                          <text fg={palette().text} flexShrink={0}>
+                            {"⏺"}
                           </text>
                           <box flexDirection="column" flexGrow={1} flexShrink={1} marginLeft={1}>
                             <markdown
@@ -1273,11 +1697,13 @@ export const createChatTui = (options: {
             />
           )}
         </Show>
-        <Show when={state.busy}>
+        <Show when={active()}>
           <box flexDirection="row" flexShrink={0} paddingLeft={1}>
             <text fg={palette().accent}>{frame()} </text>
             <text fg={palette().text}>{state.status} </text>
-            <text fg={palette().muted}>(esc to interrupt · {elapsed()}s)</text>
+            <text fg={palette().muted}>
+              {state.busy ? `(esc to interrupt · ${elapsed()}s)` : `(${elapsed()}s)`}
+            </text>
           </box>
         </Show>
         <Show when={queue().length > 0}>
@@ -1309,28 +1735,51 @@ export const createChatTui = (options: {
                 paddingRight={1}
                 backgroundColor={palette().panel}
               >
-                <For each={listed()}>
-                  {(command, index) => (
-                    <box flexDirection="row">
-                      <text
-                        fg={index() === selected() ? palette().accent : palette().text}
-                        wrapMode="none"
-                        flexShrink={0}
-                      >
-                        {index() === selected() ? "❯ " : "  "}/{command.name}
-                      </text>
-                      <text
-                        fg={palette().muted}
-                        wrapMode="none"
-                        truncate
-                        flexShrink={1}
-                        marginLeft={2}
-                      >
-                        {command.description}
-                      </text>
-                    </box>
-                  )}
-                </For>
+                <Show
+                  when={listed().items.length > 0}
+                  fallback={
+                    <text fg={palette().muted} wrapMode="none" truncate>
+                      {listed().loading ? "  finding files…" : "  no matching files"}
+                    </text>
+                  }
+                >
+                  <For each={listed().items}>
+                    {(suggestion, index) => (
+                      <box flexDirection="row">
+                        <text
+                          fg={index() === selected() ? palette().accent : palette().text}
+                          wrapMode="none"
+                          truncate
+                          flexShrink={suggestion.kind === "file" ? 1 : 0}
+                        >
+                          {index() === selected() ? "❯ " : "  "}
+                          {suggestion.kind === "command"
+                            ? `/${suggestion.command.name}`
+                            : `@${suggestion.path}`}
+                        </text>
+                        <Show
+                          when={
+                            suggestion.kind === "command"
+                              ? suggestion.command.description
+                              : undefined
+                          }
+                        >
+                          {(description) => (
+                            <text
+                              fg={palette().muted}
+                              wrapMode="none"
+                              truncate
+                              flexShrink={1}
+                              marginLeft={2}
+                            >
+                              {description()}
+                            </text>
+                          )}
+                        </Show>
+                      </box>
+                    )}
+                  </For>
+                </Show>
               </box>
             </box>
           )}
@@ -1367,6 +1816,7 @@ export const createChatTui = (options: {
                 : "Message the agent"
             }
             onContentChange={onDraft}
+            onCursorChange={() => setCursor(composer?.cursorOffset ?? 0)}
             onSubmit={submit}
           />
         </box>
@@ -1414,6 +1864,15 @@ export const createChatTui = (options: {
                 <strong style={{ fg: palette().accent }}>{state.tasks}</strong>
                 {state.tasks === 1 ? " task running" : " tasks running"}
               </text>
+            </Show>
+            <Show when={Option.getOrUndefined(state.driver)}>
+              {(driver) => (
+                <text fg={palette().muted} wrapMode="none" flexShrink={0}>
+                  {" · "}
+                  <strong style={{ fg: palette().accent }}>{driver().label}</strong>
+                  {state.busy ? "" : ` · next in ${remaining()}`}
+                </text>
+              )}
             </Show>
           </box>
           {/* The left half is free for later; the hint keeps to the right. */}
@@ -1466,5 +1925,6 @@ export const createChatTui = (options: {
       }
     },
     setTasks: (running) => setState("tasks", running),
+    setDriver: (driver) => setState("driver", driver),
   };
 };
