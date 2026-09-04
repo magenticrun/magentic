@@ -1,4 +1,4 @@
-import { triggered } from "@magentic/plugin";
+import { stripHiddenMarkup, triggered } from "@magentic/plugin";
 import { Option, Schema } from "effect";
 
 /**
@@ -245,8 +245,14 @@ export const pullOf = (pull: PullRequest): Mention["pull"] =>
     baseRef: pull.base.ref,
   });
 
+/**
+ * The bot answers what a reader can see: the trigger is looked for in the
+ * text with the hidden markup already stripped, the same text the model is
+ * given. A mention buried in an HTML comment would otherwise start a run
+ * whose input no longer holds it.
+ */
 const addressed = (text: string, rules: TriggerRules): boolean =>
-  triggered(text, {
+  triggered(stripHiddenMarkup(text), {
     mention: Option.getOrUndefined(rules.mention),
     command: Option.getOrUndefined(rules.command),
   });

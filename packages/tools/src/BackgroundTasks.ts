@@ -353,7 +353,7 @@ export class BackgroundTasks extends Context.Service<
           const stderrFile = path.join(outputDir, `${id}.stderr.log`);
           // The files exist from the start, empty, so the paths the model gets are real.
           yield* Effect.gen(function* () {
-            yield* fs.makeDirectory(outputDir, { recursive: true });
+            yield* fs.makeDirectory(outputDir, { recursive: true, mode: 0o700 });
             yield* fs.writeFileString(stdoutFile, "", { flag: "w", mode: 0o600 });
             yield* fs.writeFileString(stderrFile, "", { flag: "w", mode: 0o600 });
           }).pipe(

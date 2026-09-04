@@ -11,4 +11,9 @@ export class AgentInfo extends Schema.Class<AgentInfo>("magentic/protocol/AgentI
 
 export class AgentNotFound extends Schema.TaggedError<AgentNotFound>()("AgentNotFound", {
   name: Schema.String,
-}) {}
+}) {
+  /** Without this a surface that prints `error.message` says nothing at all. */
+  override get message(): string {
+    return `no agent named "${this.name}"`;
+  }
+}

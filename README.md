@@ -15,10 +15,11 @@ Run it locally and it is a capable coding agent. Run it as a gateway and one con
 - Runs a gateway over Effect RPC, with a health endpoint at `GET /health`.
 - Starts a full-screen terminal chat or accepts one-shot prompts.
 - Connects to OpenAI/Codex, Anthropic, Z.AI, and OpenCode Zen model providers.
-- Lets agents use workspace-confined file tools and a shell tool, in the foreground or as background tasks they read, wait on, stop, list, and are told about when they end: at once, in a run the gateway starts, while the chat is open, or at the next message otherwise.
+- Lets agents use workspace-confined file tools, a shell tool, and a fetch tool that reads a public page as markdown. Shell commands run in the foreground or as background tasks they read, wait on, stop, list, and are told about when they end: at once, in a run the gateway starts, while the chat is open, or at the next message otherwise.
 - Stores conversations on disk and supports continuing or resuming them.
 - Loads additional agents from YAML, reloads them on `SIGHUP`, and can watch their directory.
-- Loads built-in, local-file, package, and MCP tool plugins.
+- Loads built-in, local-file, package, and MCP tool plugins, and gives a plugin an HTTP route of its own under `/plugins/<id>/`.
+- Answers mentions on GitHub through the bridge plugin: a mention of the App on an issue or a pull request runs an agent for the person who wrote it, and the answer comes back in the thread. Its forge tools read threads, comment, review, check out, commit, and push as the App, never with the operator's credentials.
 
 ## Quick start
 
@@ -87,7 +88,7 @@ Useful CLI commands:
 bun apps/cli/src/main.ts --help
 bun apps/cli/src/main.ts plugin list
 bun apps/cli/src/main.ts -c                 # continue the latest conversation
-bun apps/cli/src/main.ts -r <conversation>  # resume a conversation by id
+bun apps/cli/src/main.ts -s <conversation>  # continue a conversation by id
 ```
 
 ## Configure agents
@@ -159,6 +160,8 @@ Bun loads `.env` from the working directory. Do not commit credentials.
 | `MAGENTIC_MODELS_CACHE`    | `$HOME/.cache/magentic/models.json`  | Cached model catalog.                                                                                                                                                                                   |
 | `MAGENTIC_MODELS_OFFLINE`  | `false`                              | Use only the cached or bundled model catalog.                                                                                                                                                           |
 | `USER`                     | `local`                              | Subject assigned by local identity.                                                                                                                                                                     |
+| `GITHUB_APP_PRIVATE_KEY`   | unset                                | The GitHub App's private key, for the bridge plugin. `\n` in the value stands for a newline.                                                                                                            |
+| `GITHUB_WEBHOOK_SECRET`    | unset                                | What GitHub signs webhook deliveries with; unset means the bridge's route refuses every delivery.                                                                                                       |
 
 ## Security
 
@@ -169,6 +172,7 @@ The gateway is deliberately conservative while authentication is still under dev
 - With local identity enabled, callers on the reachable network are trusted as the local user.
 - The current policy allows actions and the audit sink is in memory. Do not treat this as a multi-tenant or production authorization boundary.
 - Built-in workspace tools are confined to `MAGENTIC_WORKSPACE`; the shell tool runs with the gateway process’s privileges inside that workspace. A background task runs until it ends, is stopped, or the gateway exits, and only the principal who started it can read or stop it.
+- A bridge needs its provider to reach the gateway, which loopback does not allow. Put a tunnel or a reverse proxy in front of `/plugins/<id>/` rather than binding the gateway itself wider: the plugin verifies the delivery's signature, but everything else on the port, `/rpc` included, is still trusted as the local user.
 
 For the intended identity and policy model, read [docs/identity.md](docs/identity.md). For a public deployment, keep the gateway behind a trusted network boundary until authenticated edge support lands.
 

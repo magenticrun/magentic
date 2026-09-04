@@ -25,7 +25,7 @@ import {
   ToolOutputDir,
   WorkspaceRoot,
 } from "@magentic/tools";
-import { Config, Effect, type FileSystem, Layer, type Path, Schema } from "effect";
+import { Config, Effect, FileSystem, Layer, Option, type Path, Schema } from "effect";
 import {
   FetchHttpClient,
   type HttpClient,
@@ -100,7 +100,25 @@ export const assistantPlugin = define({
 /** Directory the file tools may touch. Defaults to where the gateway was started. */
 const workspaceRoot = Config.string("MAGENTIC_WORKSPACE").pipe(Config.withDefault(process.cwd()));
 
-const WorkspaceLayer = Layer.unwrap(Effect.map(workspaceRoot, WorkspaceRoot.layer));
+/**
+ * The workspace, said out loud when it is not a directory. Every file and
+ * shell tool resolves against it, so a path that is not there turns each of
+ * them into `NotFound: FileSystem.realPath` at the moment the model calls
+ * one, with nothing to say that the workspace itself is the problem.
+ */
+const WorkspaceLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const root = yield* workspaceRoot;
+    const fs = yield* FileSystem.FileSystem;
+    const info = yield* fs.stat(root).pipe(Effect.option);
+    if (!Option.exists(info, (stat) => stat.type === "Directory")) {
+      yield* Effect.logWarning(
+        `MAGENTIC_WORKSPACE is ${root}, which is not a directory; the file and shell tools will fail until it is`,
+      );
+    }
+    return WorkspaceRoot.layer(root);
+  }),
+);
 
 /** Address the gateway listens on. Loopback until authentication exists; see docs/identity.md. */
 const listenHost = Config.string("MAGENTIC_HOST").pipe(Config.withDefault("127.0.0.1"));

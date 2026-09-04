@@ -427,8 +427,13 @@ export const createChatTui = (options: {
 
   const finishAssistant = (model: string | undefined, outputTokens: number) => {
     const index = pendingAssistant;
+    // Only the line this run was streaming: a run that failed mid-reply
+    // leaves the index behind, and /new or /resume can empty the transcript
+    // under it, so the speed would land on another run's line or on nothing.
+    const line = index === undefined ? undefined : state.lines[index];
     if (
       index !== undefined &&
+      line?.kind === "assistant" &&
       model !== undefined &&
       outputStartedTick !== undefined &&
       outputEndedTick !== undefined

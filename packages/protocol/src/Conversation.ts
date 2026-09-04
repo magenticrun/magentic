@@ -64,7 +64,12 @@ export type TranscriptEntry = typeof TranscriptEntry.Type;
 export class ConversationNotFound extends Schema.TaggedError<ConversationNotFound>()(
   "ConversationNotFound",
   { id: Schema.String },
-) {}
+) {
+  /** Without this a surface that prints `error.message` says nothing at all. */
+  override get message(): string {
+    return `no conversation ${this.id}`;
+  }
+}
 
 /** The conversation could not be compacted: nothing to fold yet, or the model gave no summary. */
 export class CompactionFailed extends Schema.TaggedError<CompactionFailed>()("CompactionFailed", {

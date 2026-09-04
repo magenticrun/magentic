@@ -58,8 +58,15 @@ export class BridgeState extends Context.Service<
     const save = writing.withPermit(
       Effect.gen(function* () {
         const current = yield* Ref.get(state);
-        yield* fs.makeDirectory(path.dirname(file), { recursive: true });
-        yield* fs.writeFileString(file, JSON.stringify(current, null, 2));
+        yield* fs.makeDirectory(path.dirname(file), { recursive: true, mode: 0o700 });
+        // Written beside and renamed over, as the conversation store does it:
+        // a write cut short by a restart would read as no state at all, and
+        // the bridge would forget which deliveries it has already answered.
+        const staging = `${file}.${crypto.randomUUID().slice(0, 8)}.tmp`;
+        yield* fs
+          .writeFileString(staging, JSON.stringify(current, null, 2), { mode: 0o600 })
+          .pipe(Effect.andThen(fs.rename(staging, file)))
+          .pipe(Effect.onError(() => fs.remove(staging).pipe(Effect.ignore)));
       }).pipe(
         Effect.catch((error) =>
           Effect.logWarning(`github bridge: cannot write ${file}: ${messageOf(error)}`),

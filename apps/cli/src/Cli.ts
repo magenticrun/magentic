@@ -125,12 +125,22 @@ const magentic = Command.make("magentic", {
   Command.withDescription("Chat with an agent in the terminal, or with --print, ask once and exit"),
 );
 
+/** The gateway for a subcommand, its failure said in a line rather than thrown as a trace. */
+const clientFor = Effect.fn("Cli.clientFor")(function* (baseUrl: string) {
+  const { client } = yield* ensureGateway(baseUrl).pipe(
+    Effect.catchTag("GatewayUnreachable", (error) =>
+      Console.error(error.message).pipe(Effect.andThen(new Reported({ message: error.message }))),
+    ),
+  );
+  return client;
+});
+
 const agents = Command.make(
   "agents",
   {},
   Effect.fn(function* () {
     const root = yield* magentic;
-    const { client } = yield* ensureGateway(root.gateway);
+    const client = yield* clientFor(root.gateway);
     const list = yield* client.listAgents();
     if (list.length === 0) {
       return yield* Console.log("no agents registered");
@@ -146,7 +156,7 @@ const pluginList = Command.make(
   {},
   Effect.fn(function* () {
     const root = yield* magentic;
-    const { client } = yield* ensureGateway(root.gateway);
+    const client = yield* clientFor(root.gateway);
     const plugins = yield* client.listPlugins();
     for (const plugin of plugins) {
       const contributed = [
