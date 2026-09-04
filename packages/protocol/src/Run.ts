@@ -168,6 +168,22 @@ export const RunEvent = Schema.Union([
 ]);
 export type RunEvent = typeof RunEvent.Type;
 
+/**
+ * Nothing has happened and the connection is alive. A follow says nothing
+ * between the runs the gateway starts on its own, which is most of the time,
+ * and a response carrying nothing is dropped: the client's fetch gives up on
+ * one after five minutes, a proxy in front of the gateway sooner. Surfaces
+ * read it and go back to waiting.
+ */
+export const Keepalive = Schema.TaggedStruct("Keepalive", {});
+
+/**
+ * What a follower sees: the events of the runs the gateway starts on its own,
+ * and the tick that keeps the connection carrying them open.
+ */
+export const FollowEvent = Schema.Union([RunEvent, Keepalive]);
+export type FollowEvent = typeof FollowEvent.Type;
+
 /** No run in flight has this id: it ended, or never was. */
 export class RunNotFound extends Schema.TaggedError<RunNotFound>()("RunNotFound", {
   runId: Schema.String,

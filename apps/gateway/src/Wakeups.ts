@@ -6,11 +6,12 @@ import {
   Runner,
 } from "@magentic/core";
 import { Notices } from "@magentic/plugin";
-import type { Principal, RunEvent } from "@magentic/protocol";
+import type { FollowEvent, Principal, RunEvent } from "@magentic/protocol";
 import {
   Context,
   DateTime,
   Deferred,
+  Duration,
   Effect,
   Fiber,
   Layer,
@@ -20,6 +21,15 @@ import {
   Scope,
   Stream,
 } from "effect";
+
+/**
+ * How often a follow says it is still there. The stream is silent between
+ * the runs the gateway starts on its own, and a response that carries
+ * nothing for five minutes is dropped by the client's fetch; a proxy in
+ * front of the gateway gives up on one sooner, sixty seconds being the
+ * common default. Well inside both, and cheap: one word every half minute.
+ */
+const KEEPALIVE = Duration.seconds(30);
 
 /** What a follower asked for: the runs go to whoever follows, on this agent, as this principal. */
 export interface FollowOptions {
@@ -68,7 +78,7 @@ export class Wakeups extends Context.Service<
   Wakeups,
   {
     /** Follow the conversation until the stream is dropped; what lands meanwhile is spoken to at once. */
-    follow(options: FollowOptions): Stream.Stream<RunEvent>;
+    follow(options: FollowOptions): Stream.Stream<FollowEvent>;
     /** Stop a run started here; false when there is none by that id, or it is not the principal's. */
     stop(runId: string, principal: string): Effect.Effect<boolean>;
   }
@@ -264,7 +274,7 @@ export class Wakeups extends Context.Service<
           }
         });
 
-      const follow = (options: FollowOptions): Stream.Stream<RunEvent> =>
+      const follow = (options: FollowOptions): Stream.Stream<FollowEvent> =>
         Stream.unwrap(
           Effect.gen(function* () {
             const { conversationId } = options;
@@ -290,9 +300,22 @@ export class Wakeups extends Context.Service<
             );
             // Whatever landed while nobody followed is spoken to now.
             yield* wake(conversationId);
-            return Stream.fromSubscription(subscription).pipe(
+            const runs = Stream.fromSubscription(subscription).pipe(
               Stream.filter((tagged) => tagged.conversationId === conversationId),
-              Stream.map((tagged) => tagged.event),
+              Stream.map((tagged): FollowEvent => tagged.event),
+            );
+            // Neither side ever ends on its own: the subscription lives until
+            // the follower stops reading, and the tick is what keeps the
+            // connection carrying it from being dropped for saying nothing.
+            return Stream.merge(
+              runs,
+              Stream.tick(KEEPALIVE).pipe(
+                // `tick` fires at once, and a connection just made needs no
+                // proof that it is alive; the first one it owes is an
+                // interval away.
+                Stream.drop(1),
+                Stream.map((): FollowEvent => ({ _tag: "Keepalive" })),
+              ),
             );
           }),
         );

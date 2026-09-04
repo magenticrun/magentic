@@ -73,18 +73,18 @@ SSE, and nothing here wants a URL or a status code. What is lost is curl and Ope
 `GET /health` stays a plain route for that. A non-TypeScript surface would get a generated
 client from the group, or a REST facade, if one ever appears.
 
-| RPC                                                  | What it does                                                                          |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `health`                                             | Nothing; proves the gateway answers.                                                  |
-| `listAgents`, `getAgent`                             | What a surface may know of an agent, with the model it would run on today.            |
-| `run` (stream)                                       | One input to an agent; `RunEvent`s until the run ends.                                |
-| `steer`, `unsteer`, `stopRun`                        | A message into a live run, what it has not read yet back, or an end to it.            |
-| `follow` (stream)                                    | The runs the gateway starts on its own in a conversation, for a surface that is open. |
-| `listTasks`                                          | The background commands a conversation left running.                                  |
-| `listConversations`, `getConversation`, `transcript` | The caller's own conversations; by agent or directory when asked.                     |
-| `rename`, `removeConversation`, `compact`            | Title, delete, or fold one into a summary.                                            |
-| `listPlugins`, `listMcpServers`                      | Every plugin the gateway loaded and what it contributed; the MCP servers it reached.  |
-| planned: approvals, sessions and tokens              | A caller that is not ours enters through a plugin's own HTTP route instead.           |
+| RPC                                                  | What it does                                                                                                                                                     |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `health`                                             | Nothing; proves the gateway answers.                                                                                                                             |
+| `listAgents`, `getAgent`                             | What a surface may know of an agent, with the model it would run on today.                                                                                       |
+| `run` (stream)                                       | One input to an agent; `RunEvent`s until the run ends.                                                                                                           |
+| `steer`, `unsteer`, `stopRun`                        | A message into a live run, what it has not read yet back, or an end to it.                                                                                       |
+| `follow` (stream)                                    | The runs the gateway starts on its own in a conversation, for a surface that is open; a `Keepalive` every thirty seconds holds the connection open between them. |
+| `listTasks`                                          | The background commands a conversation left running.                                                                                                             |
+| `listConversations`, `getConversation`, `transcript` | The caller's own conversations; by agent or directory when asked.                                                                                                |
+| `rename`, `removeConversation`, `compact`            | Title, delete, or fold one into a summary.                                                                                                                       |
+| `listPlugins`, `listMcpServers`                      | Every plugin the gateway loaded and what it contributed; the MCP servers it reached.                                                                             |
+| planned: approvals, sessions and tokens              | A caller that is not ours enters through a plugin's own HTTP route instead.                                                                                      |
 
 Everything except `health` and the login RPCs will sit behind the `Authentication` middleware
 (`RpcMiddleware`, see identity.md). Until it exists the gateway listens on loopback
@@ -146,7 +146,11 @@ Each is a `Context.Service` with static layers. Ids are `magentic/core/<Name>`.
   behind a run waits for it, and one that finds the notices already taken ends without an
   event. At most one wake-up is queued or in flight per conversation; a notice that lands
   while one is speaking wakes it once more when it ends. A follower stops a run the gateway
-  started with `stopRun`; its own end when it stops reading them. Notices reach the model
+  started with `stopRun`; its own end when it stops reading them. The stream says nothing
+  between those runs, which is most of the time, and a response carrying nothing is
+  dropped after five minutes by the client's fetch and sooner by a proxy, so `follow`
+  carries a `Keepalive` every thirty seconds; a surface reads it and goes back to
+  waiting, and opens the follow again if the connection drops anyway. Notices reach the model
   as a user message marked in its options, like a compaction summary, so transcripts show
   them as `Notice` entries and not as the person's words. This is the Claude Code shape
   (start, read, stop, list, and a wake-up on exit) rather than Codex's, where the model

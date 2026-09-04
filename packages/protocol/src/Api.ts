@@ -12,6 +12,7 @@ import { McpServerInfo } from "./Mcp.ts";
 import { PluginInfo } from "./Plugin.ts";
 import {
   Compacted,
+  FollowEvent,
   FollowRequest,
   RunDenied,
   RunEvent,
@@ -59,7 +60,7 @@ export const Api = RpcGroup.make(
    */
   Rpc.make("follow", {
     payload: FollowRequest.fields,
-    success: RunEvent,
+    success: FollowEvent,
     error: Schema.Union([AgentNotFound, RunDenied, ConversationNotFound]),
     stream: true,
   }),

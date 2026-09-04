@@ -5,13 +5,14 @@ import {
   type CommandUi,
   type SessionUsage,
 } from "@magentic/plugin";
-import type { Attachment, Conversation, RunEvent } from "@magentic/protocol";
+import type { Attachment, Conversation, FollowEvent, RunEvent } from "@magentic/protocol";
 import { render } from "@opentui/solid";
 import {
   type Cause,
   Config,
   DateTime,
   Deferred,
+  Duration,
   Effect,
   Fiber,
   FileSystem,
@@ -20,6 +21,7 @@ import {
   Predicate,
   Queue,
   Ref,
+  Schedule,
   Schema,
   Scope,
   Stream,
@@ -46,6 +48,28 @@ const parseCommand = (input: string): { readonly name: string; readonly args: st
     ? { name: body, args: "" }
     : { name: body.slice(0, at), args: body.slice(at).trim() };
 };
+
+/**
+ * What the gateway means, as against what the connection did. A refusal
+ * stands until something changes; a dropped connection is the follow's
+ * normal end, since the stream says nothing between the gateway's own runs
+ * and one held open on nothing is closed after five minutes.
+ */
+const REFUSALS: ReadonlySet<string> = new Set([
+  "AgentNotFound",
+  "RunDenied",
+  "ConversationNotFound",
+]);
+
+/**
+ * When to open the follow again after it dropped. A connection closed for
+ * saying nothing comes straight back, so the first wait is a second; a
+ * gateway that is really gone is not worth a request a second, so the wait
+ * doubles up to half a minute and stays there until it answers.
+ */
+const REFOLLOW = Schedule.exponential(Duration.seconds(1)).pipe(
+  Schedule.modifyDelay((meta) => Effect.succeed(Duration.min(meta.output, Duration.seconds(30)))),
+);
 
 /**
  * What the person last chose, kept under the data directory for the next
@@ -396,8 +420,12 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     });
 
   /** An event of a run the gateway started: in flight like the person's own, steered and stopped the same way. */
-  const onFollowed = (event: RunEvent) =>
+  const onFollowed = (event: FollowEvent) =>
     Effect.gen(function* () {
+      // The tick that holds the connection open; there is nothing to draw.
+      if (event._tag === "Keepalive") {
+        return;
+      }
       if (event._tag === "RunStarted") {
         const run: InFlight = {
           stop: yield* Deferred.make<void>(),
@@ -446,8 +474,25 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     const fiber = yield* Effect.forkIn(
       client.follow({ conversationId, agent: agent.name, reasoning: level }).pipe(
         Stream.runForEach(onFollowed),
+        // Opening it again costs one request and loses nothing; staying
+        // dropped loses every run the gateway would have started for the
+        // rest of the session, and says so only in the line below.
+        Effect.retry({
+          while: (error) => !REFUSALS.has(error._tag),
+          schedule: REFOLLOW,
+        }),
+        // Only a refusal reaches here: a drop is retried above, and the
+        // interruption `stopFollowing` uses to put another follow in this
+        // one's place does not run a catch at all.
         Effect.catchCause((cause) =>
-          Effect.sync(() => tui.error(`Not following the conversation: ${describeCause(cause)}`)),
+          Effect.sync(() => {
+            tui.error(`Not following the conversation: ${describeCause(cause)}`);
+            // Nothing follows this conversation now, so let the next run
+            // open one rather than leave the id on a fiber that has ended.
+            if (following?.id === conversationId) {
+              following = undefined;
+            }
+          }),
         ),
       ),
       scope,
