@@ -1670,8 +1670,12 @@ export const createChatTui = (options: {
                       <Show when={thought().endedTick === undefined || thought().expanded}>
                         <box marginLeft={2}>
                           <markdown
-                            content={thought().text}
+                            // The style comes before the content on purpose: the
+                            // reconciler assigns props in this order, and content
+                            // arriving first builds the blocks against no style at
+                            // all — list items keep that hole and fail to highlight.
                             syntaxStyle={subtleStyleFor(palette())}
+                            content={thought().text}
                             fg={palette().muted}
                             streaming={thought().endedTick === undefined}
                             internalBlockMode="top-level"
@@ -1740,8 +1744,8 @@ export const createChatTui = (options: {
                       <Show when={asSummary(state.lines[index()])?.expanded}>
                         <box marginLeft={2}>
                           <markdown
-                            content={summary().text}
                             syntaxStyle={markdownStyle()}
+                            content={summary().text}
                             fg={palette().text}
                           />
                         </box>
@@ -1770,8 +1774,8 @@ export const createChatTui = (options: {
                           </text>
                           <box flexDirection="column" flexGrow={1} flexShrink={1} marginLeft={1}>
                             <markdown
-                              content={text().text}
                               syntaxStyle={markdownStyle()}
+                              content={text().text}
                               fg={palette().text}
                               streaming={state.busy && line === state.lines.at(-1)}
                               internalBlockMode="top-level"
