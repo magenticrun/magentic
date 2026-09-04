@@ -28,14 +28,14 @@
   "type": "module",
   "scripts": {
     "prepare": "effect-tsgo patch --typescript",
-    "dev": "bun run --filter @magentic/gateway dev",
+    "dev": "bun run --no-orphans --filter @magentic/gateway dev",
     "test": "bun --bun vitest run",
     "test:watch": "bun --bun vitest",
     "typecheck": "tsc --noEmit && tsc --noEmit -p apps/cli/tsconfig.json && tsc --noEmit -p tsconfig.tools.json",
     "lint": "oxlint && oxfmt --check",
     "knip": "knip",
     "format": "oxlint --fix; oxfmt",
-    "check": "bun run typecheck && bun run lint && bun run knip && bun run test"
+    "check": "bun run --parallel --no-exit-on-error typecheck lint knip test"
   },
   "devDependencies": {
     "@effect/tsgo": "^0.40.0",

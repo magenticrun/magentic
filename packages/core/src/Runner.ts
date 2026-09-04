@@ -41,6 +41,7 @@ import {
   type ModelLimits,
   partition,
 } from "./Compaction.ts";
+import { fitAttachments } from "./Attachments.ts";
 import { estimateContext } from "./ContextEstimate.ts";
 import { ConversationStore } from "./ConversationStore.ts";
 import { describeCause } from "./Errors.ts";
@@ -281,10 +282,9 @@ const costOf = (price: ModelCost, usage: Response.Usage): number => {
 };
 
 /** Steered inputs as one user message: the texts joined by line breaks, every file along. */
-const steeredPrompt = (steers: ReadonlyArray<Steer>): Prompt.RawInput =>
-  promptOf(
-    steers.map((s) => s.input).join("\n"),
-    steers.flatMap((s) => s.attachments),
+const steeredPrompt = (steers: ReadonlyArray<Steer>): Effect.Effect<Prompt.RawInput> =>
+  Effect.map(fitAttachments(steers.flatMap((s) => s.attachments)), (files) =>
+    promptOf(steers.map((s) => s.input).join("\n"), files),
   );
 
 /** The notices, when there are any, as a message of their own before the input. */
@@ -597,7 +597,7 @@ export class Runner extends Context.Service<
                 const opening = withNotices(
                   waiting,
                   turn.kind === "input"
-                    ? promptOf(turn.input, turn.attachments)
+                    ? promptOf(turn.input, yield* fitAttachments(turn.attachments))
                     : Option.match(due, {
                         onNone: (): Prompt.RawInput => [],
                         onSome: (row) => Prompt.fromMessages([scheduledMessage(row.prompt)]),
@@ -791,7 +791,7 @@ export class Runner extends Context.Service<
                     }
                     if (steered.length > 0) {
                       yield* emit({ _tag: "Steered", inputs: steered.map((s) => s.input) });
-                      prompt = withNotices(noticed, steeredPrompt(steered));
+                      prompt = withNotices(noticed, yield* steeredPrompt(steered));
                     } else if (noticed.length > 0) {
                       prompt = withNotices(noticed, []);
                     } else if (calledTools) {

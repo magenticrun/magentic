@@ -192,6 +192,14 @@ const formatCost = (dollars: number): string =>
 const formatTokensPerSecond = (rate: number): string =>
   rate < 10 ? rate.toFixed(1) : `${Math.round(rate)}`;
 
+/** `45s`, `1m 2s`, `2h 3m`: a duration in seconds, rounded down. */
+const formatDuration = (seconds: number): string => {
+  if (seconds >= 3600) {
+    return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  }
+  return seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
+};
+
 /** Lines the detail under a tool call shows at most, folded or open. */
 const DETAIL_FOLDED_LINES = 12;
 const DETAIL_OPEN_LINES = 80;
@@ -330,10 +338,10 @@ const responseInfo = (
     ? { model: line.model, tokensPerSecond: line.tokensPerSecond }
     : undefined;
 
-/** `Thought for 12s`; a thought shorter than a second still took one. */
+/** `Thought for 12s`, `Thought for 1m 2s`; a thought shorter than a second still took one. */
 const thoughtFor = (line: ThinkingLine): string => {
   const ticks = (line.endedTick ?? line.startedTick) - line.startedTick;
-  return `Thought for ${Math.max(1, Math.round((ticks * TICK_MS) / 1000))}s`;
+  return `Thought for ${formatDuration(Math.max(1, Math.round((ticks * TICK_MS) / 1000)))}`;
 };
 
 const summaryFor = (line: SummaryLine): string =>
@@ -1116,13 +1124,7 @@ export const createChatTui = (options: {
     });
 
     /** `9m 12s`, `45s`: what is left before the next run. */
-    const remaining = () => {
-      const seconds = state.countdown;
-      if (seconds >= 3600) {
-        return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-      }
-      return seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
-    };
+    const remaining = () => formatDuration(state.countdown);
 
     // The composer keeps its own text; the view reads it on send and sizes
     // the box to the text, counting wrapped rows.
@@ -1668,10 +1670,15 @@ export const createChatTui = (options: {
                       <Show when={thought().endedTick === undefined || thought().expanded}>
                         <box marginLeft={2}>
                           <markdown
-                            content={thought().text}
+                            // The style comes before the content on purpose: the
+                            // reconciler assigns props in this order, and content
+                            // arriving first builds the blocks against no style at
+                            // all — list items keep that hole and fail to highlight.
                             syntaxStyle={subtleStyleFor(palette())}
+                            content={thought().text}
                             fg={palette().muted}
                             streaming={thought().endedTick === undefined}
+                            internalBlockMode="top-level"
                           />
                         </box>
                       </Show>
@@ -1737,8 +1744,8 @@ export const createChatTui = (options: {
                       <Show when={asSummary(state.lines[index()])?.expanded}>
                         <box marginLeft={2}>
                           <markdown
-                            content={summary().text}
                             syntaxStyle={markdownStyle()}
+                            content={summary().text}
                             fg={palette().text}
                           />
                         </box>
@@ -1767,10 +1774,11 @@ export const createChatTui = (options: {
                           </text>
                           <box flexDirection="column" flexGrow={1} flexShrink={1} marginLeft={1}>
                             <markdown
-                              content={text().text}
                               syntaxStyle={markdownStyle()}
+                              content={text().text}
                               fg={palette().text}
                               streaming={state.busy && line === state.lines.at(-1)}
+                              internalBlockMode="top-level"
                             />
                             <Show when={responseInfo(text())}>
                               {(info) => (
@@ -1812,7 +1820,9 @@ export const createChatTui = (options: {
             <text fg={palette().accent}>{frame()} </text>
             <text fg={palette().text}>{state.status} </text>
             <text fg={palette().muted}>
-              {state.busy ? `(esc to interrupt · ${elapsed()}s)` : `(${elapsed()}s)`}
+              {state.busy
+                ? `(esc to interrupt · ${formatDuration(elapsed())})`
+                : `(${formatDuration(elapsed())})`}
             </text>
           </box>
         </Show>
@@ -1902,7 +1912,9 @@ export const createChatTui = (options: {
           flexShrink={0}
           paddingLeft={1}
         >
-          <text fg={palette().text}>{"❯ "}</text>
+          <text fg={palette().text} marginLeft={-2}>
+            {"❯ "}
+          </text>
           <textarea
             ref={(node: TextareaRenderable) => {
               composer = node;

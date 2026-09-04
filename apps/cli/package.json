@@ -9,6 +9,7 @@
   "type": "module",
   "scripts": {
     "start": "bun src/main.ts",
+    "smoke": "bun scripts/tui-smoke.ts",
     "test": "bun --bun vitest run --root ../.. apps/cli"
   },
   "dependencies": {
