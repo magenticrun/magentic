@@ -30,6 +30,7 @@ import {
 import { composeMessage, type Message } from "./Attachments.ts";
 import { ago } from "./commands/Conversations.ts";
 import { ensureGateway } from "./Gateway.ts";
+import { appendHistory, loadHistory } from "./History.ts";
 import { pickUp, type PickUpOptions } from "./Resume.ts";
 import { createChatTui } from "./tui/ChatView.tsx";
 import { listWorkspaceFiles } from "./tui/Files.ts";
@@ -217,6 +218,10 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
       ? `~${cwd.slice(home.length)}`
       : cwd;
 
+  // What was sent from this directory before, so the composer's arrows walk
+  // back past the start of this session.
+  const history = yield* loadHistory(cwd);
+
   const tui = createChatTui({
     directory,
     version: VERSION,
@@ -224,6 +229,14 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     // Filled in below: the catalog is first read for it, and the screen need not wait.
     contextWindow: 0,
     commands: (yield* commands.list).map(({ name, description }) => ({ name, description })),
+    history,
+    // A message the history could not keep is only a message the next
+    // session's arrows will not find; the ones this session sent are still
+    // in the view's own list, so there is nothing here worth a line in the
+    // transcript.
+    onRemember: (entry) => {
+      void runPromise(appendHistory(cwd, entry).pipe(Effect.ignore));
+    },
     listFiles: () => listWorkspaceFiles(cwd),
     onPickFile: (path) => runPromise(composeMessage([`@${path}`]).pipe(Effect.option)),
     onSubmit: (text, attachments) => {

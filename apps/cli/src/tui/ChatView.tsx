@@ -11,6 +11,7 @@ import type { Attachment, RunEvent, TranscriptEntry } from "@magentic/protocol";
 import { type JSX, useKeyboard, usePaste, useRenderer } from "@opentui/solid";
 import { DateTime, Option, Predicate, type Schema } from "effect";
 import type { Message } from "../Attachments.ts";
+import type { HistoryEntry } from "../History.ts";
 import {
   batch,
   createEffect,
@@ -608,6 +609,10 @@ export const createChatTui = (options: {
   readonly contextWindow: number;
   /** Slash commands the composer completes. */
   readonly commands: ReadonlyArray<CommandInfo>;
+  /** What was sent here before, oldest first, for the up arrow to walk back through. */
+  readonly history: ReadonlyArray<HistoryEntry>;
+  /** Keep a message the person sent, so a later session's arrows find it too. */
+  readonly onRemember: (entry: HistoryEntry) => void;
   readonly listFiles: () => Promise<ReadonlyArray<string>>;
   readonly onPickFile: (path: string) => Promise<Option.Option<Message>>;
   /** The message with pasted text unfolded, and the images pasted into it. */
@@ -1011,6 +1016,21 @@ export const createChatTui = (options: {
         void unqueue();
         return;
       }
+      // With the queue empty, the arrows walk what was sent here before: up
+      // from the composer's first row, down from its last, so a draft of
+      // several lines still moves the cursor between them.
+      if (
+        (key.name === "up" || key.name === "down") &&
+        !key.ctrl &&
+        !key.meta &&
+        !key.shift &&
+        dialog() === undefined &&
+        atEdgeRow(key.name === "up" ? "first" : "last") &&
+        browse(key.name === "up" ? 1 : -1)
+      ) {
+        key.preventDefault();
+        return;
+      }
       if (key.ctrl && key.name === "v" && dialog() === undefined) {
         // The terminal pastes text itself; ctrl+v is for what it cannot paste, an image.
         key.preventDefault();
@@ -1133,6 +1153,7 @@ export const createChatTui = (options: {
       setRows(1);
       setDraft("");
       setCursor(0);
+      stopBrowsing();
     };
     // Messages sent while a run is in flight wait here, listed over the
     // composer: steered ones until the run takes them, held ones until it
@@ -1157,6 +1178,7 @@ export const createChatTui = (options: {
     const send = (draft: string, drafted: ReadonlyArray<Folded>) => {
       const text = unfold(draft, drafted);
       const files = attached(draft, drafted);
+      remember(draft, drafted);
       if (!state.busy) {
         options.onSubmit(text, files);
         return;
@@ -1212,6 +1234,39 @@ export const createChatTui = (options: {
       sendBatch();
     };
     flushQueue = flush;
+    /**
+     * The numbers placeholders coming back to the composer already carry, so
+     * the next paste is numbered past them rather than over one of them.
+     */
+    const takeNumbers = (entries: ReadonlyArray<Folded>) => {
+      for (const entry of entries) {
+        const carried = /#(\d+)/.exec(entry.placeholder)?.[1];
+        if (carried !== undefined) {
+          numbered = { ...numbered, [entry.kind]: Math.max(numbered[entry.kind], Number(carried)) };
+        }
+      }
+    };
+    /** Put this text in the composer, its placeholders styled again, cursor at the end. */
+    const setComposer = (text: string, entries: ReadonlyArray<Folded>) => {
+      if (composer === undefined) {
+        return;
+      }
+      takeNumbers(entries);
+      composer.extmarks.clear();
+      composer.setText(text);
+      const styleId = composerStyleFor(palette()).getStyleId(FOLD_STYLE);
+      for (const entry of entries) {
+        const index = text.indexOf(entry.placeholder);
+        if (index >= 0) {
+          const start = displayWidth(text.slice(0, index));
+          const range = { start, end: start + displayWidth(entry.placeholder), virtual: true };
+          composer.extmarks.create(styleId === null ? range : { ...range, styleId });
+        }
+      }
+      folds = [...entries];
+      composer.cursorOffset = displayWidth(text);
+      onDraft();
+    };
     /** Some of the queue back in the composer, ahead of whatever is being typed, placeholders restored. */
     const restore = (held: ReadonlyArray<Queued>) => {
       if (composer === undefined || held.length === 0) {
@@ -1221,21 +1276,76 @@ export const createChatTui = (options: {
       const current = composer.plainText;
       const drafts = held.map((q) => q.draft);
       const text = (current.length === 0 ? drafts : [...drafts, current]).join("\n");
-      const restored = [...held.flatMap((q) => q.folds), ...folds];
-      composer.extmarks.clear();
-      composer.setText(text);
-      const styleId = composerStyleFor(palette()).getStyleId(FOLD_STYLE);
-      for (const entry of restored) {
-        const index = text.indexOf(entry.placeholder);
-        if (index >= 0) {
-          const start = displayWidth(text.slice(0, index));
-          const range = { start, end: start + displayWidth(entry.placeholder), virtual: true };
-          composer.extmarks.create(styleId === null ? range : { ...range, styleId });
-        }
+      setComposer(text, [...held.flatMap((q) => q.folds), ...folds]);
+      // What is in the composer is no longer what the arrows put there.
+      stopBrowsing();
+    };
+
+    // What has been sent from this composer, oldest first: what this
+    // directory held when the chat opened, and every message sent since.
+    let history: ReadonlyArray<HistoryEntry> = options.history;
+    // How far back the arrows have walked. Zero is the draft being typed,
+    // one the message sent last; `setAside` is the draft the walk left
+    // behind, to be given back at the near end of it.
+    let steppedBack = 0;
+    let setAside: HistoryEntry | undefined;
+    const stopBrowsing = () => {
+      steppedBack = 0;
+      setAside = undefined;
+    };
+    /** Keep what was just sent, unless it says the same as the message before it. */
+    const remember = (draft: string, drafted: ReadonlyArray<Folded>) => {
+      if (draft.length === 0 || history.at(-1)?.draft === draft) {
+        return;
       }
-      folds = restored;
-      composer.cursorOffset = displayWidth(text);
-      onDraft();
+      // Only the placeholders still standing: what was pasted and then
+      // deleted is no part of the message, and nothing should bring it back.
+      const entry: HistoryEntry = {
+        draft,
+        folds: drafted.filter((fold) => draft.includes(fold.placeholder)),
+      };
+      history = [...history, entry];
+      options.onRemember(entry);
+    };
+    /**
+     * One step along the history, as Claude Code's arrows walk it: back
+     * towards older messages, forward towards newer, and one step past the
+     * newest is the draft that was being typed when the walk began. False
+     * when there is nothing that way, so the key stays the composer's.
+     */
+    const browse = (steps: 1 | -1): boolean => {
+      const next = steppedBack + steps;
+      if (next < 0 || next > history.length) {
+        return false;
+      }
+      const entry = next === 0 ? setAside : history[history.length - next];
+      if (entry === undefined) {
+        return false;
+      }
+      if (steppedBack === 0) {
+        setAside = { draft: composer?.plainText ?? "", folds };
+      }
+      setComposer(entry.draft, entry.folds);
+      steppedBack = next;
+      if (next === 0) {
+        setAside = undefined;
+      }
+      return true;
+    };
+    /**
+     * Whether the cursor is on the composer's first or last row, counting the
+     * rows a long line wraps onto: a draft of several lines moves the cursor
+     * between them, and only the row past the end reaches the history.
+     */
+    const atEdgeRow = (edge: "first" | "last"): boolean => {
+      if (composer === undefined) {
+        return false;
+      }
+      const editor = composer.editorView;
+      const row = editor.getViewport().offsetY + composer.visualCursor.visualRow;
+      return edge === "first"
+        ? row === 0
+        : row >= Math.max(1, editor.getTotalVirtualLineCount()) - 1;
     };
     /**
      * The queue back in the composer: what is held, and what was steered
