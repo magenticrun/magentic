@@ -3,6 +3,7 @@ import {
   CommandError,
   type ChatSession,
   type CommandUi,
+  type CreateSessionSchedule,
   type SessionUsage,
 } from "@magentic/plugin";
 import type { Attachment, Conversation, FollowEvent, RunEvent } from "@magentic/protocol";
@@ -26,12 +27,13 @@ import {
   Scope,
   Stream,
 } from "effect";
-import type { Message } from "./Attachments.ts";
+import { composeMessage, type Message } from "./Attachments.ts";
 import { ago } from "./commands/Conversations.ts";
 import { ensureGateway } from "./Gateway.ts";
 import { pickUp, type PickUpOptions } from "./Resume.ts";
 import { createChatTui } from "./tui/ChatView.tsx";
-import { acquireRenderer } from "./tui/Tui.ts";
+import { listWorkspaceFiles } from "./tui/Files.ts";
+import { acquireScreen } from "./tui/Tui.ts";
 import { VERSION } from "./Version.ts";
 
 export interface ChatOptions extends PickUpOptions {
@@ -145,7 +147,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   // The terminal reports light or dark within a few milliseconds, or never;
   // drawing before the answer would flash the wrong palette. The gateway and
   // the agent are found while the answer is awaited, not after.
-  const renderer = yield* acquireRenderer;
+  const { renderer, close: closeScreen } = yield* acquireScreen;
   const themed = yield* Effect.forkChild(Effect.promise(() => renderer.waitForThemeMode(300)));
   const { client } = yield* ensureGateway(options.baseUrl);
   const { agent, starting } = yield* pickUp(client, options);
@@ -222,6 +224,8 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     // Filled in below: the catalog is first read for it, and the screen need not wait.
     contextWindow: 0,
     commands: (yield* commands.list).map(({ name, description }) => ({ name, description })),
+    listFiles: () => listWorkspaceFiles(cwd),
+    onPickFile: (path) => runPromise(composeMessage([`@${path}`]).pipe(Effect.option)),
     onSubmit: (text, attachments) => {
       Queue.offerUnsafe(inputs, { text, attachments });
     },
@@ -270,6 +274,9 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
       );
     },
     // Now, not in turn behind the run: the queue waits for the run to end.
+    onStopDriver: (id) => {
+      void runPromise(session.schedules.remove(id).pipe(Effect.option));
+    },
     onCycleReasoning: () => {
       void runPromise(cycleReasoning);
     },
@@ -426,6 +433,23 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
       if (event._tag === "Keepalive") {
         return;
       }
+      // Where a schedule stands. It arrives with no run behind it, which is
+      // most of a loop's life, so it goes to the footer rather than the
+      // transcript and never touches `busy`.
+      if (event._tag === "ScheduleChanged") {
+        tui.setDriver(
+          event.active
+            ? Option.some({
+                id: event.taskId,
+                kind: event.kind,
+                label: event.label,
+                detail: event.detail,
+                nextAt: Option.fromNullishOr(event.nextFireAt),
+              })
+            : Option.none(),
+        );
+        return;
+      }
       if (event._tag === "RunStarted") {
         const run: InFlight = {
           stop: yield* Deferred.make<void>(),
@@ -465,6 +489,27 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     const current = following;
     following = undefined;
     return current === undefined ? Effect.void : Fiber.interrupt(current.fiber);
+  });
+
+  /**
+   * The id of the conversation this chat is on, opening one at the gateway if
+   * it has not run yet. A schedule has to belong to a conversation, and
+   * `/loop` can be the first thing typed; the gateway owns the id and the
+   * principal, so the client asks rather than inventing one. Following it at
+   * once is what makes a loop able to run at all — the gateway starts no turn
+   * on a conversation nobody watches.
+   */
+  const ensureConversation = Effect.gen(function* () {
+    const current = yield* Ref.get(conversation);
+    if (Option.isSome(current)) {
+      return current.value;
+    }
+    const opened = yield* client
+      .openConversation({ agent: agent.name, directory: process.cwd() })
+      .pipe(Effect.catchCause((cause) => gatewayFailed("loop")(cause)));
+    yield* Ref.set(conversation, Option.some(opened.id));
+    yield* follow(opened.id);
+    return opened.id;
   });
 
   /** Follow the conversation at the gateway, in place of whatever was followed before. */
@@ -606,12 +651,15 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
           message: "Nothing to compact yet; this conversation has not started.",
         });
       }
-      const done = yield* client
-        .compact({ id: id.value })
-        .pipe(Effect.catchCause((cause) => gatewayFailed("compact")(cause)));
-      // The totals stand; only the latest call's picture of the context is
-      // stale until the next call, which the gateway counted this one into.
-      tui.apply(done);
+      tui.setStatus("Compacting…");
+      yield* Effect.gen(function* () {
+        const done = yield* client
+          .compact({ id: id.value })
+          .pipe(Effect.catchCause((cause) => gatewayFailed("compact")(cause)));
+        // The totals stand; only the latest call's picture of the context is
+        // stale until the next call, which the gateway counted this one into.
+        tui.apply(done);
+      }).pipe(Effect.ensuring(Effect.sync(() => tui.setStatus(""))));
     }),
     rename: Effect.fn("Cli.chat.rename")(function* (title: string) {
       const id = yield* Ref.get(conversation);
@@ -629,6 +677,67 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     mcpServers: client
       .listMcpServers()
       .pipe(Effect.catchCause((cause) => gatewayFailed("mcp")(cause))),
+    schedules: {
+      list: Effect.gen(function* () {
+        const id = yield* Ref.get(conversation);
+        if (Option.isNone(id)) {
+          return [];
+        }
+        return yield* client
+          .listSchedules({ conversationId: id.value })
+          .pipe(Effect.catchCause((cause) => gatewayFailed("loop")(cause)));
+      }),
+      read: Effect.fn("Cli.chat.schedules.read")(function* (text: string) {
+        // The person's own zone, so `3pm` means three in the afternoon here.
+        const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        return yield* client
+          .readSchedule({ agent: agent.name, text, zone })
+          .pipe(Effect.catchCause((cause) => gatewayFailed("loop")(cause)));
+      }),
+      create: Effect.fn("Cli.chat.schedules.create")(function* (input: CreateSessionSchedule) {
+        // A loop belongs to a conversation, and `/loop` may be the first thing
+        // typed, so one is opened here rather than waiting for a first run to
+        // invent an id.
+        const id = yield* ensureConversation;
+        return yield* client
+          .createSchedule({
+            conversationId: id,
+            kind: "prompt",
+            prompt: input.prompt,
+            intervalMillis: input.intervalMillis,
+            expiresAt: input.until,
+          })
+          .pipe(Effect.catchCause((cause) => gatewayFailed("loop")(cause)));
+      }),
+      remove: Effect.fn("Cli.chat.schedules.remove")(function* (id: string) {
+        const current = yield* Ref.get(conversation);
+        if (Option.isNone(current)) {
+          return false;
+        }
+        return yield* client.deleteSchedule({ conversationId: current.value, id }).pipe(
+          Effect.as(true),
+          Effect.catchTag("ScheduleNotFound", () => Effect.succeed(false)),
+          Effect.catchCause((cause) => gatewayFailed("loop")(cause)),
+        );
+      }),
+      removeAll: Effect.gen(function* () {
+        const current = yield* Ref.get(conversation);
+        if (Option.isNone(current)) {
+          return 0;
+        }
+        const tasks = yield* client
+          .listSchedules({ conversationId: current.value })
+          .pipe(Effect.catchCause((cause) => gatewayFailed("loop")(cause)));
+        let stopped = 0;
+        for (const task of tasks.filter((candidate) => candidate.phase !== "ended")) {
+          yield* client
+            .deleteSchedule({ conversationId: current.value, id: task.id })
+            .pipe(Effect.ignore);
+          stopped += 1;
+        }
+        return stopped;
+      }),
+    },
   };
 
   const runCommand = Effect.fn("Cli.chat.runCommand")(function* (input: string) {
@@ -678,5 +787,9 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     }
   });
 
-  yield* Effect.race(loop, Deferred.await(exit));
+  // The screen goes back before the scope closes: everything else the chat
+  // holds — the gateway embedded in this process among it — is torn down
+  // after this line, and a person watching a frozen full-screen chat that no
+  // longer reads the keyboard cannot tell that from a hang.
+  yield* Effect.race(loop, Deferred.await(exit)).pipe(Effect.ensuring(closeScreen));
 }, Effect.scoped);

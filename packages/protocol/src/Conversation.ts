@@ -52,12 +52,15 @@ export const TranscriptTool = Schema.TaggedStruct("Tool", {
 export const TranscriptSummary = Schema.TaggedStruct("Summary", { text: Schema.String });
 /** What the harness told the model between turns, a background command's end for one. */
 export const TranscriptNotice = Schema.TaggedStruct("Notice", { text: Schema.String });
+/** A repeating instruction that came due, shown apart from what the person typed. */
+export const TranscriptScheduled = Schema.TaggedStruct("Scheduled", { text: Schema.String });
 export const TranscriptEntry = Schema.Union([
   TranscriptUser,
   TranscriptAssistant,
   TranscriptTool,
   TranscriptSummary,
   TranscriptNotice,
+  TranscriptScheduled,
 ]);
 export type TranscriptEntry = typeof TranscriptEntry.Type;
 

@@ -9,6 +9,8 @@ import {
   PluginHost,
   PluginRoutes,
   Runner,
+  ScheduledTaskStore,
+  ScheduledTasks,
   Steering,
 } from "@magentic/core";
 import { Identity } from "@magentic/identity";
@@ -201,12 +203,24 @@ export const ConversationStoreLayer = Layer.unwrap(
 );
 
 /**
+ * Schedules live beside the conversations they belong to, so removing a
+ * conversation's directory takes its loops with it.
+ */
+const ScheduledTasksLayer = ScheduledTasks.layer.pipe(
+  Layer.provide(
+    Layer.unwrap(
+      Effect.map(dataDir, (data) => ScheduledTaskStore.layerFile(`${data}/conversations`)),
+    ),
+  ),
+);
+
+/**
  * Conversations behind the runner, and beside it for listing, as is the
  * steering the handlers offer to; tools, models, events, and the notices
  * come from the host's side.
  */
 export const RunnerLayer = Runner.layer.pipe(
-  Layer.provideMerge(Layer.mergeAll(ConversationStoreLayer, Steering.layer)),
+  Layer.provideMerge(Layer.mergeAll(ConversationStoreLayer, Steering.layer, ScheduledTasksLayer)),
 );
 
 const AdmissionLayer = Layer.mergeAll(Identity.layerLocal, Policy.layerAllowAll, Audit.layerMemory);

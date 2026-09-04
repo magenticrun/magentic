@@ -178,10 +178,33 @@ export type RunEvent = typeof RunEvent.Type;
 export const Keepalive = Schema.TaggedStruct("Keepalive", {});
 
 /**
- * What a follower sees: the events of the runs the gateway starts on its own,
- * and the tick that keeps the connection carrying them open.
+ * Where a conversation's schedule stands, for a surface to show and to offer
+ * to stop. Not a `RunEvent`: it is sent when there is no run, which is most of
+ * a schedule's life, and every `RunEvent` is emitted from inside a run.
+ *
+ * `label` and `detail` are the words the surface shows, written here so a
+ * later kind of repeat renders through the same footer without the surface
+ * learning what it is.
  */
-export const FollowEvent = Schema.Union([RunEvent, Keepalive]);
+export const ScheduleChanged = Schema.TaggedStruct("ScheduleChanged", {
+  taskId: Schema.String,
+  conversationId: Schema.String,
+  /** `loop`, and later the other kinds; what a surface groups by, not what it prints. */
+  kind: Schema.String,
+  label: Schema.String,
+  detail: Schema.String,
+  /** Absent once it can no longer fire, which is how a surface knows to clear the footer. */
+  nextFireAt: Schema.optional(Schema.DateTimeUtcFromString),
+  active: Schema.Boolean,
+});
+export type ScheduleChanged = typeof ScheduleChanged.Type;
+
+/**
+ * What a follower sees: the events of the runs the gateway starts on its own,
+ * the standing of its schedules, and the tick that keeps the connection
+ * carrying them open.
+ */
+export const FollowEvent = Schema.Union([RunEvent, Keepalive, ScheduleChanged]);
 export type FollowEvent = typeof FollowEvent.Type;
 
 /** No run in flight has this id: it ended, or never was. */

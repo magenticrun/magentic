@@ -35,6 +35,8 @@ import { ConversationStore } from "./ConversationStore.ts";
 import { builtin, PluginHost } from "./plugin/PluginHost.ts";
 import { ToolCallGuard } from "./plugin/ToolRegistry.ts";
 import { Runner } from "./Runner.ts";
+import { ScheduledTaskStore } from "./ScheduledTaskStore.ts";
+import { ScheduledTasks } from "./ScheduledTasks.ts";
 import { Steering } from "./Steering.ts";
 import { transcriptFromJson } from "./Transcript.ts";
 
@@ -98,7 +100,15 @@ const StoreLayer = Layer.unwrap(
 );
 
 const TestLayer = Runner.layer.pipe(
-  Layer.provideMerge(Layer.mergeAll(HostLayer, StoreLayer, Steering.layer, Notices.layer)),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      HostLayer,
+      StoreLayer,
+      Steering.layer,
+      Notices.layer,
+      ScheduledTasks.layer.pipe(Layer.provide(ScheduledTaskStore.layerMemory)),
+    ),
+  ),
   Layer.provideMerge(
     Layer.mergeAll(BunServices.layer, FetchHttpClient.layer, ModelCatalog.layerSnapshot),
   ),
@@ -274,6 +284,7 @@ const TightLayer = Runner.layer.pipe(
       ConversationStore.layerMemory,
       Steering.layer,
       Notices.layer,
+      ScheduledTasks.layer.pipe(Layer.provide(ScheduledTaskStore.layerMemory)),
     ),
   ),
   Layer.provideMerge(
@@ -388,6 +399,7 @@ const FlakyLayer = Runner.layer.pipe(
       ConversationStore.layerMemory,
       Steering.layer,
       Notices.layer,
+      ScheduledTasks.layer.pipe(Layer.provide(ScheduledTaskStore.layerMemory)),
     ),
   ),
   Layer.provideMerge(
@@ -484,6 +496,7 @@ const LoopingLayer = Runner.layer.pipe(
       ConversationStore.layerMemory,
       Steering.layer,
       Notices.layer,
+      ScheduledTasks.layer.pipe(Layer.provide(ScheduledTaskStore.layerMemory)),
     ),
   ),
   Layer.provideMerge(
@@ -588,6 +601,7 @@ const SteeringLayer = Runner.layer.pipe(
       ConversationStore.layerMemory,
       Steering.layer,
       Notices.layer,
+      ScheduledTasks.layer.pipe(Layer.provide(ScheduledTaskStore.layerMemory)),
     ),
   ),
   Layer.provideMerge(
@@ -725,6 +739,7 @@ const InterruptLayer = Runner.layer.pipe(
       ConversationStore.layerMemory,
       Steering.layer,
       Notices.layer,
+      ScheduledTasks.layer.pipe(Layer.provide(ScheduledTaskStore.layerMemory)),
     ),
   ),
   Layer.provideMerge(
@@ -958,7 +973,12 @@ const backgroundLayer = (driver: FakeScript) =>
       ),
     ),
     // The one board the shell plugin posts to and the runner reads from.
-    Layer.provideMerge(Notices.layer),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        Notices.layer,
+        ScheduledTasks.layer.pipe(Layer.provide(ScheduledTaskStore.layerMemory)),
+      ),
+    ),
     Layer.provideMerge(
       Layer.mergeAll(BunServices.layer, FetchHttpClient.layer, ModelCatalog.layerSnapshot),
     ),

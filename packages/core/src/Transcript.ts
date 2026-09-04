@@ -1,7 +1,7 @@
 import type { TranscriptEntry } from "@magentic/protocol";
 import { Effect, Ref, type Schema } from "effect";
 import { Chat, type Prompt } from "effect/unstable/ai";
-import { isNotice, isSummary, noticeOf, summaryOf } from "./Marks.ts";
+import { isNotice, isScheduled, isSummary, noticeOf, scheduledOf, summaryOf } from "./Marks.ts";
 
 /** Tool parts carry `unknown`; on the wire they were JSON, so that is what they still are. */
 // SAFETY: tool parameters and results in a history were decoded from, and encode to, JSON.
@@ -32,6 +32,10 @@ export const transcriptOf = (history: Prompt.Prompt): ReadonlyArray<TranscriptEn
         }
         if (isNotice(message)) {
           entries.push({ _tag: "Notice", text: noticeOf(message) });
+          break;
+        }
+        if (isScheduled(message)) {
+          entries.push({ _tag: "Scheduled", text: scheduledOf(message) });
           break;
         }
         const text = message.content.flatMap((part) => (part.type === "text" ? [part.text] : []));

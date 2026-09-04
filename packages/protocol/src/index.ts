@@ -6,6 +6,7 @@ export * from "./Mcp.ts";
 export * from "./Plugin.ts";
 export * from "./Principal.ts";
 export * from "./Run.ts";
+export * from "./Schedule.ts";
 export * from "./Conversation.ts";
 export * from "./ConversationId.ts";
 export * from "./Task.ts";

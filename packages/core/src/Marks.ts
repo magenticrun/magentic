@@ -10,7 +10,7 @@ import { Prompt } from "effect/unstable/ai";
  */
 const MARK = "magentic";
 
-const marked = (message: Prompt.Message, flag: "summary" | "notice"): boolean => {
+const marked = (message: Prompt.Message, flag: "summary" | "notice" | "scheduled"): boolean => {
   if (message.role !== "user") {
     return false;
   }
@@ -54,4 +54,25 @@ export const noticeMessage = (notices: ReadonlyArray<string>): Prompt.UserMessag
   Prompt.makeMessage("user", {
     content: [Prompt.makePart("text", { text: `${NOTICE_FRAMING}${notices.join("\n\n")}` })],
     options: { [MARK]: { notice: true } },
+  });
+
+/**
+ * Deliberately not the notice framing, which says "while you worked": a
+ * scheduled input arrives between turns, when nothing was being worked on, and
+ * telling the model otherwise would misdescribe every tick.
+ */
+const SCHEDULED_FRAMING =
+  "This is a repeating instruction the person set up earlier, due now. Nobody is necessarily watching; do the work and say what it came to.\n\n";
+
+/** A user message that a schedule put there, rather than the person, at its due time. */
+export const isScheduled = (message: Prompt.Message): boolean => marked(message, "scheduled");
+
+/** The instruction a scheduled message carries, without the framing. */
+export const scheduledOf = (message: Prompt.UserMessage): string =>
+  unframe(textOf(message), SCHEDULED_FRAMING);
+
+export const scheduledMessage = (prompt: string): Prompt.UserMessage =>
+  Prompt.makeMessage("user", {
+    content: [Prompt.makePart("text", { text: `${SCHEDULED_FRAMING}${prompt}` })],
+    options: { [MARK]: { scheduled: true } },
   });

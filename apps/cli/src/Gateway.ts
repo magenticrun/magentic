@@ -42,6 +42,34 @@ const HEALTH_TIMEOUT = Duration.seconds(5);
 const START_TIMEOUT = Duration.seconds(30);
 
 /**
+ * How long the teardown of a gateway embedded in this process may take before
+ * the process stops waiting for it. Bun stops a server gracefully: it waits
+ * for every connection still open, and this one serves streams that stay open
+ * for as long as someone is listening — so another `magentic` attached to
+ * this one holds the exit, measured at twenty seconds for a chat merely
+ * following a conversation, and for the length of a run when it is running
+ * one. The chat has given the terminal back by then, so the wait is invisible
+ * and looks exactly like a hang.
+ */
+const SHUTDOWN_GRACE = Duration.seconds(3);
+
+/**
+ * Stop waiting for a teardown that is no longer making progress. Armed before
+ * the gateway's own finalisers, which run after this one, and unref'd so that
+ * a process finishing on its own is never held open by it. The code is
+ * whatever has been decided so far: none during a clean quit, and the one a
+ * failing command already set otherwise.
+ */
+const stopWaitingForShutdown = Effect.addFinalizer(() =>
+  Effect.sync(() => {
+    setTimeout(
+      () => process.exit(process.exitCode ?? 0),
+      Duration.toMillis(SHUTDOWN_GRACE),
+    ).unref();
+  }),
+);
+
+/**
  * Where an embedded gateway writes its log, appended to across sessions. The
  * terminal is the chat's, or the one-shot run's output, so plugin and MCP
  * server logs cannot go there; they stay readable here for when a server
@@ -123,6 +151,7 @@ export const ensureGateway = Effect.fn("Cli.ensureGateway")(function* (baseUrl: 
       ),
     );
   }
+  yield* stopWaitingForShutdown;
   yield* waitForHealth;
   return { client, embedded: true };
 });

@@ -6,6 +6,7 @@ import {
   type ConversationUsage,
   type Principal,
   type RunEvent,
+  type ScheduledInboxRow,
   type TokenUsage,
 } from "@magentic/protocol";
 import {
@@ -43,11 +44,12 @@ import {
 import { estimateContext } from "./ContextEstimate.ts";
 import { ConversationStore } from "./ConversationStore.ts";
 import { describeCause } from "./Errors.ts";
-import { noticeMessage } from "./Marks.ts";
+import { noticeMessage, scheduledMessage } from "./Marks.ts";
 import { RunEventBus } from "./EventBus.ts";
 import { rejectedToolCall, retryPolicy, toRetryEvent } from "./Retry.ts";
 import { ModelRegistry } from "./plugin/ModelRegistry.ts";
 import { ToolRegistry } from "./plugin/ToolRegistry.ts";
+import { ScheduledTasks } from "./ScheduledTasks.ts";
 import { type Steer, Steering } from "./Steering.ts";
 
 export interface RunOptions {
@@ -353,6 +355,7 @@ export class Runner extends Context.Service<
       const bus = yield* RunEventBus;
       const steering = yield* Steering;
       const notices = yield* Notices;
+      const schedules = yield* ScheduledTasks;
 
       /**
        * The conversation's chat, restored from the store when it has one. A
@@ -570,7 +573,16 @@ export class Runner extends Context.Service<
                 // the input; for a wake-up it is the input, and a run that got
                 // here first and took it leaves nothing to do.
                 const waiting = yield* notices.take(conversationId);
-                if (turn.kind === "wake" && waiting.length === 0) {
+                // A schedule that came due is taken here and nowhere else:
+                // inside the lock, before the first model call, so it becomes
+                // a turn of its own rather than more context for a turn
+                // already under way. Notices are taken again after every model
+                // response; a scheduled input never is.
+                const due =
+                  turn.kind === "wake"
+                    ? yield* schedules.takeQueued(conversationId)
+                    : Option.none<ScheduledInboxRow>();
+                if (turn.kind === "wake" && waiting.length === 0 && Option.isNone(due)) {
                   return;
                 }
                 const steers = Option.isSome(openedEarly)
@@ -584,7 +596,12 @@ export class Runner extends Context.Service<
                 }
                 const opening = withNotices(
                   waiting,
-                  turn.kind === "input" ? promptOf(turn.input, turn.attachments) : [],
+                  turn.kind === "input"
+                    ? promptOf(turn.input, turn.attachments)
+                    : Option.match(due, {
+                        onNone: (): Prompt.RawInput => [],
+                        onSome: (row) => Prompt.fromMessages([scheduledMessage(row.prompt)]),
+                      }),
                 );
 
                 const restored = yield* Effect.result(openChat(conversationId, options.agent));
@@ -828,11 +845,32 @@ export class Runner extends Context.Service<
                 // so the next input follows it rather than a history in which the
                 // stopped input was never sent. A run that fails mid-turn is saved
                 // the same way: a tool call left open would fail every call after.
+                // What this turn cost goes back to the schedule that asked for
+                // it, whether the turn finished, failed, or was stopped: a
+                // task left in `running` would never arm its next slot.
+                const settleSchedule = Option.match(due, {
+                  onNone: () => Effect.void,
+                  onSome: (row) =>
+                    Effect.gen(function* () {
+                      const spent = yield* Ref.get(usageSoFar);
+                      yield* schedules.settle(conversationId, row.taskId, {
+                        inputTokens: Option.match(spent, {
+                          onNone: () => 0,
+                          onSome: (usage) => usage.totalInputTokens,
+                        }),
+                        outputTokens: Option.match(spent, {
+                          onNone: () => 0,
+                          onSome: (usage) => usage.totalOutputTokens,
+                        }),
+                      });
+                    }),
+                });
                 const outcome = yield* Effect.exit(loop).pipe(
                   Effect.onInterrupt(() =>
                     Effect.gen(function* () {
                       yield* Ref.update(chat.history, settleUnfinished);
                       yield* save;
+                      yield* settleSchedule;
                       yield* emit({ _tag: "RunFinished", reason: INTERRUPTED_REASON });
                       yield* Queue.end(queue);
                     }),
@@ -840,6 +878,7 @@ export class Runner extends Context.Service<
                 );
                 yield* Ref.update(chat.history, settleUnfinished);
                 yield* save;
+                yield* settleSchedule;
                 if (outcome._tag === "Failure") {
                   yield* emit({ _tag: "RunFailed", message: describeCause(outcome.cause) });
                 } else {
