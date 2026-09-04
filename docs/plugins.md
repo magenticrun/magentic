@@ -414,9 +414,9 @@ Mechanics, all of which exist in Effect already:
   there is no privileged code.
 
 `Runner.layer(toolkit)` loses its generic and depends on `ToolRegistry` instead. Per-tool-call
-policy, still open from phase 1, lands in `ToolRegistry.forAgent`: the returned `handle` runs
-`Policy.evaluate` for the call, then the `execute.before` hooks, then the handler with
-`ToolCallContext`, then `execute.after`, then audit. Plugins add hooks inside that sequence;
+policy lands in `ToolRegistry.forAgent`: the returned `handle` runs `Policy.evaluate` for the
+call, then the `execute.before` hooks, then the handler with `ToolCallContext`, then
+`execute.after`, then audit. Plugins add hooks inside that sequence;
 they cannot remove the policy or audit steps around it because those are wired by the gateway,
 not registered through the context.
 
@@ -561,7 +561,7 @@ plugins:
         progress: { after: collapse } # edit | collapse | delete | keep
 ```
 
-What it does, and where, so the research in `research/github-bridge.md` maps onto code:
+What it does, and where:
 
 - **Identity** (`GitHubApi.ts`): a GitHub App. JWTs signed with the private key, installation
   tokens minted per repository (`POST /app/installations/{id}/access_tokens` narrowed with
@@ -686,7 +686,8 @@ Done, with tests beside the code:
 - Bridges: the `bridge` and `http` domains, `BridgeBackend` and `PluginRoutes` from the host,
   the gateway's `BridgesLayer` that mints `system:bridge/<surface>` principals and admits
   runs, the `/plugins/:plugin/*` route, open surface and provider names, `onBehalfOf` on
-  `Principal`, the `forge:read` and `forge:write` capabilities, and `@magentic/bridge-github`.
+  `Principal`, the `forge:read` and `forge:write` capabilities, `trackProgress` and
+  `deliverAnswer` with the capabilities that pick a delivery, and `@magentic/bridge-github`.
   The shell tool blanks `GH_TOKEN`, `GITHUB_TOKEN`, and `GIT_ASKPASS` for every run and
   points `GH_CONFIG_DIR` away from the operator's login for runs on behalf of someone.
 

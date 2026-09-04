@@ -5,7 +5,7 @@ import type {
   RunDenied,
   RunEvent,
 } from "@magentic/protocol";
-import { Duration, Effect, Fiber, Option, Ref, type Scope, Stream } from "effect";
+import { Duration, Effect, Fiber, Option, Ref, type Scope, Semaphore, Stream } from "effect";
 import type { PluginSetupError } from "./Plugin.ts";
 
 /**
@@ -185,6 +185,8 @@ export const renderContext = (
 
 /** One tool call the run made, as the progress message lists it. */
 export interface ProgressTool {
+  /** The run's own id for the call, so its result finds it again. */
+  readonly id: string;
   readonly name: string;
   /** Absent while the tool runs. */
   readonly ok?: boolean | undefined;
@@ -238,13 +240,25 @@ const applyEvent = (state: ProgressState, event: RunEvent): ProgressState => {
     case "ToolCall": {
       // Text before a tool call is narration; the answer is what comes after the last one.
       const earlier = state.text.trim() === "" ? state.earlier : [...state.earlier, state.text];
-      return { ...state, earlier, text: "", tools: [...state.tools, { name: event.name }] };
+      return {
+        ...state,
+        earlier,
+        text: "",
+        tools: [...state.tools, { id: event.id, name: event.name }],
+      };
     }
     case "ToolResult": {
-      const tools = state.tools.map((tool, index) =>
-        index === state.tools.length - 1 && tool.ok === undefined
-          ? { ...tool, ok: !event.isFailure }
-          : tool,
+      // A model that calls several tools at once has their results come back
+      // in whatever order they finish, so a result closes the call it names.
+      // A provider that sends no id closes the oldest call still running.
+      const index = state.tools.findIndex(
+        (tool) => tool.ok === undefined && (event.id === "" || tool.id === event.id),
+      );
+      if (index === -1) {
+        return state;
+      }
+      const tools = state.tools.map((tool, at) =>
+        at === index ? { ...tool, ok: !event.isFailure } : tool,
       );
       return { ...state, tools };
     }
@@ -272,21 +286,27 @@ export const trackProgress = <E, E2>(
     const state = yield* Ref.make(emptyProgress);
     const messageId = yield* Ref.make(Option.none<string>());
     const dirty = yield* Ref.make(false);
+    // The ticker and the stream both flush. Without a turn each, a tick
+    // landing while the first `create` is still in flight sees no message id
+    // yet and posts a second one.
+    const turn = yield* Semaphore.make(1);
 
     /** Post or edit with the current state, when something changed since the last time. */
-    const flush = Effect.gen(function* () {
-      if (!(yield* Ref.getAndSet(dirty, false))) {
-        return;
-      }
-      const current = yield* Ref.get(state);
-      const id = yield* Ref.get(messageId);
-      const text = options.render(current);
-      if (Option.isSome(id)) {
-        yield* options.sink.edit(id.value, text);
-      } else if (current.tools.length > 0) {
-        yield* Ref.set(messageId, Option.some(yield* options.sink.create(text)));
-      }
-    });
+    const flush = turn.withPermit(
+      Effect.gen(function* () {
+        if (!(yield* Ref.getAndSet(dirty, false))) {
+          return;
+        }
+        const current = yield* Ref.get(state);
+        const id = yield* Ref.get(messageId);
+        const text = options.render(current);
+        if (Option.isSome(id)) {
+          yield* options.sink.edit(id.value, text);
+        } else if (current.tools.length > 0) {
+          yield* Ref.set(messageId, Option.some(yield* options.sink.create(text)));
+        }
+      }),
+    );
 
     const ticker = yield* Effect.sleep(options.interval).pipe(
       Effect.andThen(flush),
@@ -370,7 +390,9 @@ export const deliverAnswer = <E>(options: AnswerOptions<E>): Effect.Effect<void,
   }
   const id = outcome.messageId.value;
   if (delivery === "edit") {
-    return sink.edit(id, answer);
+    // A run that answered on the thread itself would read its answer twice
+    // if the progress message became a copy of it; it folds away instead.
+    return spoken === true && !failed ? sink.edit(id, log(outcome.state)) : sink.edit(id, answer);
   }
   if (failed || delivery === "keep") {
     return post;

@@ -367,7 +367,7 @@ export const shellToolHandlers = Effect.gen(function* () {
           const save = (text: string, flag: "w" | "a") =>
             Effect.gen(function* () {
               if (flag === "w") {
-                yield* fs.makeDirectory(outputDir, { recursive: true });
+                yield* fs.makeDirectory(outputDir, { recursive: true, mode: 0o700 });
               }
               yield* fs.writeFileString(file, text, { flag, mode: 0o600 });
               yield* Ref.set(saved, true);

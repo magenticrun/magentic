@@ -73,15 +73,18 @@ SSE, and nothing here wants a URL or a status code. What is lost is curl and Ope
 `GET /health` stays a plain route for that. A non-TypeScript surface would get a generated
 client from the group, or a REST facade, if one ever appears.
 
-| RPC                                                       | What it does                                                                           |
-| --------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `health`                                                  | Nothing; proves the gateway answers.                                                   |
-| `listAgents`, `getAgent`                                  | What a surface may know of an agent, with the model it would run on today.             |
-| `run` (stream)                                            | One input to an agent; `RunEvent`s until the run ends.                                 |
-| `listConversations`, `getConversation`, `transcript`      | The caller's own conversations; by agent or directory when asked.                      |
-| `rename`, `removeConversation`, `compact`                 | Title, delete, or fold one into a summary.                                             |
-| `listPlugins`                                             | Every plugin the gateway loaded and what it contributed.                               |
-| planned: runs, approvals, sessions and tokens, slack, mcp | Slack events and MCP stay HTTP routes beside `/rpc`, since those callers are not ours. |
+| RPC                                                  | What it does                                                                          |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `health`                                             | Nothing; proves the gateway answers.                                                  |
+| `listAgents`, `getAgent`                             | What a surface may know of an agent, with the model it would run on today.            |
+| `run` (stream)                                       | One input to an agent; `RunEvent`s until the run ends.                                |
+| `steer`, `unsteer`, `stopRun`                        | A message into a live run, what it has not read yet back, or an end to it.            |
+| `follow` (stream)                                    | The runs the gateway starts on its own in a conversation, for a surface that is open. |
+| `listTasks`                                          | The background commands a conversation left running.                                  |
+| `listConversations`, `getConversation`, `transcript` | The caller's own conversations; by agent or directory when asked.                     |
+| `rename`, `removeConversation`, `compact`            | Title, delete, or fold one into a summary.                                            |
+| `listPlugins`, `listMcpServers`                      | Every plugin the gateway loaded and what it contributed; the MCP servers it reached.  |
+| planned: approvals, sessions and tokens              | A caller that is not ours enters through a plugin's own HTTP route instead.           |
 
 Everything except `health` and the login RPCs will sit behind the `Authentication` middleware
 (`RpcMiddleware`, see identity.md). Until it exists the gateway listens on loopback
@@ -304,13 +307,14 @@ auth login|list|logout` (exists, inline `@clack/prompts` like opencode's, not th
   (same plugin, over `ChatSession.rename` and the `rename` RPC) names the
   conversation, as in opencode; until then the title is the first input, and a bare
   `/rename` says what it is.
-- **Slack** (`packages/surface-slack`): Events API subscription for mentions and DMs;
-  interactivity endpoint for approval buttons. Signature verification is the auth. Thread id
-  becomes the conversation id. Replies are posted then edited as text streams in.
-- **Cursor** (`packages/surface-cursor`): an MCP server via `McpServer.layerHttp` mounted at
-  `/mcp`. Each agent is exposed as an MCP tool `ask_<agent>`; skills are exposed as MCP
-  prompts. Bearer token auth is applied by the surrounding router (the MCP layer does not do
-  auth itself, per its docs).
+- **Slack** (`packages/surface-slack`, a placeholder holding only its surface name): Events
+  API subscription for mentions and DMs; interactivity endpoint for approval buttons.
+  Signature verification is the auth. Thread id becomes the conversation id. Replies are
+  posted then edited as text streams in.
+- **Cursor** (`packages/surface-cursor`, the same placeholder): an MCP server via
+  `McpServer.layerHttp` mounted at `/mcp`. Each agent is exposed as an MCP tool
+  `ask_<agent>`; skills are exposed as MCP prompts. Bearer token auth is applied by the
+  surrounding router (the MCP layer does not do auth itself, per its docs).
 - **HTTP**: the raw API, used by CI and by the other surfaces.
 - **Bridges** (`plugins.md`, Bridges): a surface that is a plugin. The plugin identifies the
   person behind a mention and asks the host to run; the gateway mints
@@ -374,8 +378,9 @@ hash, so "which rules were in force when this call was approved" has an answer.
 ## Gateway wiring (`apps/gateway`)
 
 `Server.ts` composes: `Config` from environment → `ConfigDirectory` → store → identity →
-policy → audit → model provider → core services → handlers → Slack + MCP routes →
-`HttpRouter.serve`. Nothing outside the gateway imports identity, policy, or audit layers.
+policy → audit → model provider → core services → handlers → `POST /rpc`, `GET /health`, and
+the plugins' own routes under `/plugins/<id>/` → `HttpRouter.serve`. Nothing outside the
+gateway imports identity, policy, or audit layers.
 
 ## Phases
 
@@ -392,12 +397,14 @@ policy → audit → model provider → core services → handlers → Slack + M
    `PluginHost`, `magentic.yaml` disables plugins and tools or adds external ones, and every
    tool call passes through `Policy.evaluateToolCall` and audit. Agents load from
    `agents/*.yaml` through `configAgentsPlugin`, with `model:` per agent and reload on SIGHUP
-   or `reload: watch`. Still open: `policy.yaml`, `shell`, `config check`, the reload
-   endpoint.
+   or `reload: watch`. Still open: `policy.yaml`, `config check`, the reload endpoint.
 2. **Persistence and reload.** `@magentic/store`, ConversationStore, Memory, audit sink,
    SkillRegistry, `magentic reload` plus `SIGHUP` plus the watcher.
-3. **Slack + approvals.** Slack surface, Slack identity provider, ApprovalService with the
-   durable workflow engine, approval buttons in Slack and `magentic approvals` in the CLI.
+3. **Surfaces + approvals.** A surface beyond the terminal, its identity provider, and
+   ApprovalService with the durable workflow engine, approval buttons on the surface and
+   `magentic approvals` in the CLI. The surface half arrived as a plugin domain rather than
+   as Slack in the gateway: `bridge` and `http` in `plugins.md`, with `@magentic/bridge-github`
+   the first one. Approvals are still open.
 4. **Cursor + tokens + OIDC.** MCP route, personal access tokens, Okta login for the CLI.
 5. **Cron.** In-process first, then `ClusterCron` once the durable engine from phase 3 is in.
 

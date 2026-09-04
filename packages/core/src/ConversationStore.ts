@@ -86,15 +86,22 @@ export class ConversationStore extends Context.Service<
         /**
          * Written beside and renamed over, so a crash mid-write leaves the
          * file as it was rather than cut short, which would read as no
-         * history at all.
+         * history at all. The file is the person's alone, as the credential
+         * stores' are: a history holds every word of a conversation and
+         * everything the tools read on the way.
          */
         const writeWhole = Effect.fn("ConversationStore.writeWhole")(function* (
           file: string,
           text: string,
         ) {
-          const staging = `${file}.tmp`;
-          yield* fs.writeFileString(staging, text);
-          yield* fs.rename(staging, file);
+          // A name of its own per write: a rename racing a run's own save on
+          // one shared staging file would read the other's bytes, and the
+          // second rename would fail on a file the first had already moved.
+          const staging = `${file}.${crypto.randomUUID().slice(0, 8)}.tmp`;
+          yield* fs
+            .writeFileString(staging, text, { mode: 0o600 })
+            .pipe(Effect.andThen(fs.rename(staging, file)))
+            .pipe(Effect.onError(() => fs.remove(staging).pipe(Effect.ignore)));
         });
 
         /** The wire schema already refuses these; the store refuses them again because it owns the disk. */
@@ -140,7 +147,7 @@ export class ConversationStore extends Context.Service<
         const save = Effect.fn("ConversationStore.save")(
           function* (info: Conversation, json: string) {
             yield* safe(info.id);
-            yield* fs.makeDirectory(path.join(dir, info.id), { recursive: true });
+            yield* fs.makeDirectory(path.join(dir, info.id), { recursive: true, mode: 0o700 });
             yield* writeWhole(historyFile(info.id), json);
             yield* writeWhole(infoFile(info.id), yield* encodeInfo(info));
           },
@@ -154,7 +161,7 @@ export class ConversationStore extends Context.Service<
         const update = Effect.fn("ConversationStore.update")(
           function* (info: Conversation) {
             yield* safe(info.id);
-            yield* fs.makeDirectory(path.join(dir, info.id), { recursive: true });
+            yield* fs.makeDirectory(path.join(dir, info.id), { recursive: true, mode: 0o700 });
             yield* writeWhole(infoFile(info.id), yield* encodeInfo(info));
           },
           (effect, info) =>

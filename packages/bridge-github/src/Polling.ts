@@ -27,9 +27,11 @@ const InstallationRepositories = Schema.Struct({
 });
 
 const numberFrom = (url: string): Option.Option<number> => {
+  // `Number("")` is 0, so a url with nothing after the last slash would ask
+  // GitHub for issue 0; only a real number is one.
   const last = url.split("/").at(-1);
-  const number = last === undefined ? Number.NaN : Number(last);
-  return Number.isInteger(number) ? Option.some(number) : Option.none();
+  const number = last === undefined || last === "" ? Number.NaN : Number(last);
+  return Number.isInteger(number) && number > 0 ? Option.some(number) : Option.none();
 };
 
 /**

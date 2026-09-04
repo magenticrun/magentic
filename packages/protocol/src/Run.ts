@@ -171,9 +171,19 @@ export type RunEvent = typeof RunEvent.Type;
 /** No run in flight has this id: it ended, or never was. */
 export class RunNotFound extends Schema.TaggedError<RunNotFound>()("RunNotFound", {
   runId: Schema.String,
-}) {}
+}) {
+  /** Without this a surface that prints `error.message` says nothing at all. */
+  override get message(): string {
+    return `no run ${this.runId}; it may have ended already`;
+  }
+}
 
 export class RunDenied extends Schema.TaggedError<RunDenied>()("RunDenied", {
   agent: Schema.String,
   reason: Schema.String,
-}) {}
+}) {
+  /** Without this a surface that prints `error.message` says nothing at all. */
+  override get message(): string {
+    return `running ${this.agent} was not admitted: ${this.reason}`;
+  }
+}

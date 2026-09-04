@@ -7,7 +7,7 @@ import {
   toolMatches,
 } from "@magentic/plugin";
 import { McpServerInfo, type McpServerStatus } from "@magentic/protocol";
-import { Duration, Effect, Option, type Path, Queue, Ref, Schema, type Scope } from "effect";
+import { Duration, Effect, Fiber, Option, type Path, Queue, Ref, Schema, type Scope } from "effect";
 import { McpServerConfig } from "./McpConfig.ts";
 import { connect, type ConnectionEvent, type McpConnection } from "./McpConnection.ts";
 import { McpServers } from "./McpServers.ts";
@@ -17,6 +17,15 @@ const Servers = Schema.Record(Schema.String, Schema.Json);
 
 /** How long to wait for further list-changed notifications before listing tools again. */
 const REPUBLISH_DELAY = Duration.millis(250);
+
+/**
+ * How long startup waits for the servers to connect. One slower than this
+ * keeps connecting and publishes its tools when it arrives, the way a server
+ * that adds tools later does; a server that accepts and never answers would
+ * otherwise cost every start of the gateway its whole connect timeout, thirty
+ * seconds by default, before anything is served.
+ */
+const STARTUP_BUDGET = Duration.seconds(10);
 
 type ServerToolkit = Effect.Success<ReturnType<typeof toolkitFor>>;
 
@@ -240,9 +249,17 @@ export const mcpPlugin = define<Path.Path | McpServers>({
           }),
       ),
     );
-    yield* Effect.forEach(Object.entries(servers), ([server, raw]) => serve(ctx, server, raw), {
-      concurrency: "unbounded",
-      discard: true,
-    });
+    const starting = yield* Effect.forEach(Object.entries(servers), ([server, raw]) =>
+      Effect.forkScoped(
+        serve(ctx, server, raw).pipe(
+          // One server is one server: a failure here is reported and skipped,
+          // rather than taking the plugin and every other server with it.
+          Effect.catchCause((cause) => Effect.logError(`mcp server ${server} failed`, cause)),
+        ),
+      ),
+    );
+    yield* Effect.forEach(starting, Fiber.join, { concurrency: "unbounded", discard: true }).pipe(
+      Effect.timeoutOption(STARTUP_BUDGET),
+    );
   }),
 });

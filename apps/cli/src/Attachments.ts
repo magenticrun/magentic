@@ -13,6 +13,19 @@ export const IMAGE_EXTENSIONS: ReadonlyMap<string, string> = new Map([
   [".webp", "image/webp"],
 ]);
 
+/**
+ * A fence longer than the longest run of backticks in the file, so a file
+ * that holds a code block of its own cannot close the block it is quoted in
+ * and leave its tail reading as the person's own words.
+ */
+const fenceFor = (text: string): string => {
+  let longest = 0;
+  for (const run of text.matchAll(/`+/g)) {
+    longest = Math.max(longest, run[0].length);
+  }
+  return "`".repeat(Math.max(3, longest + 1));
+};
+
 /** An `@path` argument names a file that cannot be read. */
 class FileUnreadable extends Schema.TaggedError<FileUnreadable>()("FileUnreadable", {
   path: Schema.String,
@@ -50,7 +63,9 @@ export const composeMessage = Effect.fn("Cli.composeMessage")(function* (
       .pipe(Effect.mapError((error) => new FileUnreadable({ path: file, message: error.message })));
     const mediaType = IMAGE_EXTENSIONS.get(path.extname(file).toLowerCase());
     if (mediaType === undefined) {
-      blocks.push(`${file}:\n\`\`\`\n${new TextDecoder().decode(bytes)}\n\`\`\``);
+      const content = new TextDecoder().decode(bytes);
+      const fence = fenceFor(content);
+      blocks.push(`${file}:\n${fence}\n${content}\n${fence}`);
     } else {
       attachments.push(toAttachment(mediaType, bytes, path.basename(file)));
     }

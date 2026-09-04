@@ -358,17 +358,14 @@ export const httpFetchHandlers = Effect.gen(function* () {
   const blocked = (url: string, message: string) =>
     new HttpFetchError({ reason: "Blocked", url, message });
 
-  /** Parse the model's URL and refuse what is not fetchable before touching the network. */
-  const parseUrl = Effect.fn("HttpFetch.parseUrl")(function* (raw: string) {
-    const parsed = yield* Effect.try({
-      try: () => new URL(raw),
-      catch: () =>
-        new HttpFetchError({
-          reason: "InvalidUrl",
-          url: raw,
-          message: `${raw} is not a URL the tool fetches; give an absolute https URL`,
-        }),
-    });
+  /**
+   * What the tool refuses whatever hop it is on: a scheme it does not speak,
+   * and credentials. A redirect is checked the same way the first URL was,
+   * or a `Location: file:///etc/passwd` would be fetched as readily as a
+   * page, and a redirect to `http://` would put the rest on the wire in the
+   * clear.
+   */
+  const vetUrl = Effect.fn("HttpFetch.vetUrl")(function* (parsed: URL, raw: string) {
     if (parsed.protocol === "http:") {
       // Old links say http; the site has long since moved. Fetching it as
       // https keeps the transport one that cannot be read on the way.
@@ -391,6 +388,20 @@ export const httpFetchHandlers = Effect.gen(function* () {
     return parsed;
   });
 
+  /** Parse the model's URL and refuse what is not fetchable before touching the network. */
+  const parseUrl = Effect.fn("HttpFetch.parseUrl")(function* (raw: string) {
+    const parsed = yield* Effect.try({
+      try: () => new URL(raw),
+      catch: () =>
+        new HttpFetchError({
+          reason: "InvalidUrl",
+          url: raw,
+          message: `${raw} is not a URL the tool fetches; give an absolute https URL`,
+        }),
+    });
+    return yield* vetUrl(parsed, raw);
+  });
+
   /** Resolve the host and refuse it when any address is not the public internet. */
   const checkUrl = Effect.fn("HttpFetch.checkUrl")(function* (parsed: URL, raw: string) {
     const addresses = yield* Effect.tryPromise({
@@ -402,6 +413,14 @@ export const httpFetchHandlers = Effect.gen(function* () {
           message: `${parsed.hostname} does not resolve: ${messageOf(error)}`,
         }),
     });
+    // A host that resolves to nothing has no address to judge, and `find`
+    // over an empty list judges nothing: refuse it rather than let it past.
+    if (addresses.length === 0) {
+      return yield* blocked(
+        raw,
+        `${parsed.hostname} resolves to no address; only the public internet is fetched`,
+      );
+    }
     const bad = addresses.find((entry) => isBlockedAddress(entry.address));
     if (bad !== undefined) {
       return yield* blocked(
@@ -523,7 +542,7 @@ export const httpFetchHandlers = Effect.gen(function* () {
     // keeps long output: the model reads the part it wants from there.
     const file = path.join(outputDir, `http-fetch-${crypto.randomUUID()}.txt`);
     const savedAs = yield* Effect.gen(function* () {
-      yield* fs.makeDirectory(outputDir, { recursive: true });
+      yield* fs.makeDirectory(outputDir, { recursive: true, mode: 0o700 });
       yield* fs.writeFileString(file, text, { mode: 0o600 });
       return file;
     }).pipe(
@@ -585,7 +604,7 @@ export const httpFetchHandlers = Effect.gen(function* () {
             message: `fetching ${current.href} redirected to ${JSON.stringify(location)}, which is not a URL`,
           }),
       });
-      current = yield* checkUrl(next, raw);
+      current = yield* checkUrl(yield* vetUrl(next, raw), raw);
     }
   });
 

@@ -1,5 +1,5 @@
 import { describeCause } from "@magentic/core";
-import { RunEvent } from "@magentic/protocol";
+import { type BackgroundTask, RunEvent } from "@magentic/protocol";
 import { Cause, Console, Effect, Option, Ref, Schema, Stream, Terminal } from "effect";
 import type { Message } from "./Attachments.ts";
 import { ensureGateway } from "./Gateway.ts";
@@ -84,9 +84,9 @@ export const print = Effect.fn("Cli.print")(function* (options: PrintOptions) {
   }
 
   const started = yield* Effect.gen(function* () {
-    const { client } = yield* ensureGateway(options.baseUrl);
+    const { client, embedded } = yield* ensureGateway(options.baseUrl);
     const { agent, starting } = yield* pickUp(client, options);
-    return { client, agent, starting };
+    return { client, embedded, agent, starting };
   }).pipe(Effect.exit);
   if (started._tag === "Failure") {
     if (Cause.hasInterruptsOnly(started.cause)) {
@@ -94,12 +94,13 @@ export const print = Effect.fn("Cli.print")(function* (options: PrintOptions) {
     }
     return yield* failed(describeCause(started.cause));
   }
-  const { client, agent, starting } = started.value;
+  const { client, embedded, agent, starting } = started.value;
 
   // Text mode ends the reply with a newline when the model did not, so the
   // prompt (or the next line of a log) starts on its own line.
   const atLineStart = yield* Ref.make(true);
   const runFailed = yield* Ref.make(false);
+  const conversationId = yield* Ref.make(Option.none<string>());
 
   // A stderr note can land mid-line when stdout and stderr share a terminal
   // and the reply's last TextDelta had no trailing newline. Break the reply
@@ -171,12 +172,36 @@ export const print = Effect.fn("Cli.print")(function* (options: PrintOptions) {
     reasoning: Option.getOrUndefined(options.thinking),
     directory: process.cwd(),
   });
-  const streamed = yield* Stream.runForEach(events, json ? printJson : printText).pipe(Effect.exit);
+  const streamed = yield* Stream.runForEach(events, (event: RunEvent) =>
+    (event._tag === "RunStarted"
+      ? Ref.set(conversationId, Option.some(event.conversationId))
+      : Effect.void
+    ).pipe(Effect.andThen(json ? printJson(event) : printText(event))),
+  ).pipe(Effect.exit);
   if (streamed._tag === "Failure") {
     if (Cause.hasInterruptsOnly(streamed.cause)) {
       return yield* Effect.failCause(streamed.cause);
     }
     return yield* failed(describeCause(streamed.cause));
+  }
+  // A one-shot run owns the gateway it started, so a background task it left
+  // running dies with this process and the notice the shell tool promised
+  // cannot come. Say which, rather than let them go quietly.
+  if (embedded) {
+    const id = yield* Ref.get(conversationId);
+    const running = yield* Option.match(id, {
+      onNone: () => Effect.succeed<ReadonlyArray<BackgroundTask>>([]),
+      onSome: (value) =>
+        client.listTasks({ conversationId: value }).pipe(Effect.orElseSucceed(() => [])),
+    });
+    const left = running.filter((task) => task.running);
+    if (left.length > 0) {
+      const listed = left.map((task) => `${task.taskId} ${task.command.slice(0, 60)}`).join("; ");
+      yield* note(
+        `(${left.length} background task${left.length === 1 ? "" : "s"} still running; ` +
+          `they stop with this process, which is the gateway here: ${listed})`,
+      );
+    }
   }
   if (yield* Ref.get(runFailed)) {
     return yield* new Reported({ message: "run failed" });
