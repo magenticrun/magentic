@@ -1,0 +1,21 @@
+{
+  "name": "@magentic/web",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./client": "./src/client.tsx",
+    "./page": "./src/Page.ts",
+    "./style": "./src/style.css",
+    "./build": "./src/Build.ts"
+  },
+  "dependencies": {
+    "@babel/core": "catalog:",
+    "@magentic/protocol": "workspace:*",
+    "babel-preset-solid": "catalog:",
+    "effect": "catalog:",
+    "solid-js": "catalog:"
+  },
+  "devDependencies": {
+    "@types/babel__core": "catalog:"
+  }
+}

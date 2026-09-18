@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.base.json",
   "include": ["apps/*/src", "packages/*/src", "vitest.config.ts"],
-  "exclude": ["apps/cli"]
+  "exclude": ["apps/cli", "apps/relay", "apps/web"]
 }

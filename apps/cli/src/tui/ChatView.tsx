@@ -1,3 +1,4 @@
+import { registerQRCode } from "@opentui/qrcode/solid";
 import {
   decodePasteBytes,
   type ScrollAcceleration,
@@ -46,7 +47,7 @@ import { type Palette, paletteFor } from "./Theme.ts";
 
 type TextLine = {
   /** A note is what a command reports, in the transcript but not from the agent. */
-  readonly kind: "user" | "assistant" | "error" | "note";
+  readonly kind: "user" | "assistant" | "error" | "note" | "qr";
   readonly text: string;
   readonly model?: string;
   readonly tokensPerSecond?: number;
@@ -108,6 +109,8 @@ interface Driver {
 }
 
 /** Mutable on purpose: Solid's store setters address fields by name. */
+registerQRCode();
+
 type State = {
   /** The `provider/model` runs use, when known. */
   model: Option.Option<string>;
@@ -125,6 +128,7 @@ type State = {
   status: string;
   /** Background tasks of this conversation still running, as the gateway last said. */
   tasks: number;
+  remote: string;
   /**
    * What repeats on this conversation, as the gateway last said.
    *
@@ -577,6 +581,7 @@ export interface ChatTui {
   addUser(text: string): void;
   /** A line from a command. */
   note(text: string): void;
+  qr(text: string): void;
   error(text: string): void;
   /** The model later runs use, and how many tokens it can hold (0 when unknown). */
   setModel(ref: string, contextWindow: number): void;
@@ -603,6 +608,7 @@ export interface ChatTui {
   setBusy(busy: boolean): void;
   /** How many background tasks of the conversation are still running. */
   setTasks(running: number): void;
+  setRemote(status: string): void;
   /** What repeats on this conversation; none clears the footer. */
   setDriver(driver: Option.Option<Driver>): void;
 }
@@ -651,6 +657,7 @@ export const createChatTui = (options: {
     status: "",
     tasks: 0,
     driver: Option.none(),
+    remote: "",
     countdown: 0,
     lines: [],
     busy: false,
@@ -1756,6 +1763,18 @@ export const createChatTui = (options: {
                 <Match when={asText(line)}>
                   {(text) => (
                     <Switch>
+                      <Match when={text().kind === "qr"}>
+                        <box marginBottom={1} alignSelf="flex-start">
+                          <qr_code
+                            content={text().text}
+                            quietZone={4}
+                            scale={1}
+                            foregroundColor="#000000"
+                            backgroundColor="#ffffff"
+                            fallbackContent="Resize the terminal to show the QR code"
+                          />
+                        </box>
+                      </Match>
                       <Match when={text().kind === "user"}>
                         <box flexDirection="row" marginBottom={1}>
                           <text fg={palette().accent} flexShrink={0}>
@@ -1931,7 +1950,7 @@ export const createChatTui = (options: {
             textColor={palette().text}
             focusedTextColor={palette().text}
             cursorColor={palette().text}
-            placeholderColor={palette().placeholder}
+            placeholderColor={palette().muted}
             placeholder={
               state.busy
                 ? "Message the agent; it reads it before its next step"
@@ -1980,6 +1999,12 @@ export const createChatTui = (options: {
                 </text>
               )}
             </Show>
+            <Show when={state.remote.length > 0}>
+              <text fg={palette().muted} wrapMode="none" flexShrink={0}>
+                {" · "}
+                {state.remote}
+              </text>
+            </Show>
             <Show when={state.tasks > 0}>
               <text fg={palette().muted} wrapMode="none" flexShrink={0}>
                 {" · "}
@@ -2024,6 +2049,7 @@ export const createChatTui = (options: {
     apply,
     addUser: (text) => push({ kind: "user", text }),
     note: (text) => push({ kind: "note", text }),
+    qr: (text) => push({ kind: "qr", text }),
     error: (text) => push({ kind: "error", text }),
     setModel: (ref, contextWindow) => setState({ model: Option.some(ref), contextWindow }),
     setReasoning: (level) => setState("reasoning", level),
@@ -2039,6 +2065,7 @@ export const createChatTui = (options: {
       finishThinking();
       push({ kind: "error", text: "Interrupted" });
     },
+    setRemote: (status) => setState("remote", status),
     setStatus: (status) => setState("status", status),
     setBusy: (busy) => {
       setState("busy", busy);

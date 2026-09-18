@@ -130,7 +130,12 @@ export const Compacted = Schema.TaggedStruct("Compacted", {
   messagesAfter: Schema.Finite,
 });
 export type Compacted = typeof Compacted.Type;
-/** A model call failed in a way worth another try; the next one comes after `delayMs`. */
+/**
+ * A model call failed in a way worth another try; the next one comes after
+ * `delayMs`. It runs the call again when nothing of it reached the surface,
+ * and carries on from what the model managed to say when something did, so
+ * the surface keeps what it has shown either way.
+ */
 export const Retrying = Schema.TaggedStruct("Retrying", {
   /** This is the nth retry, of at most `limit`. */
   attempt: Schema.Finite,

@@ -2,98 +2,162 @@
   <img src="docs/logotype.svg" width="481" alt="magentic" />
 </p>
 
-**The agent harness your team can actually share.**
+magentic runs coding agents from your terminal or a self-hosted gateway. Agents can
+read and edit files, run shell commands, fetch web pages, and use tools from plugins
+and MCP servers. Conversations are saved on disk so you can pick them up later.
 
-magentic is a self-hosted, Bun-native agent gateway for a shared workspace. It gives people a terminal interface today and is designed to put the same agents, tools, conversation history, and controls behind other team surfaces.
+Built with Bun and Effect 4. Supports OpenAI/Codex, Anthropic, Z.AI, and OpenCode Zen.
 
-Run it locally and it is a capable coding agent. Run it as a gateway and one configuration can define the agents your team uses.
+Still early. Local gateway access trusts the local user; paired browsers have the
+same authority. Policy allows all actions and audit records live in memory. Keep
+the local port private and use the authenticated relay connection for remote access.
 
-> **Current status:** early-stage software. The gateway currently uses local identity, an allow-all policy, and an in-memory audit sink. It binds to loopback by default; do not expose it to an untrusted network. See [Security](#security) before changing the bind address.
+## Getting started
 
-## What it does today
-
-- Runs a gateway over Effect RPC, with a health endpoint at `GET /health`.
-- Starts a full-screen terminal chat or accepts one-shot prompts.
-- Connects to OpenAI/Codex, Anthropic, Z.AI, and OpenCode Zen model providers.
-- Lets agents use workspace-confined file tools, a shell tool, and a fetch tool that reads a public page as markdown. Shell commands run in the foreground or as background tasks they read, wait on, stop, list, and are told about when they end: at once, in a run the gateway starts, while the chat is open, or at the next message otherwise.
-- Stores conversations on disk and supports continuing or resuming them.
-- Loads additional agents from YAML, reloads them on `SIGHUP`, and can watch their directory.
-- Loads built-in, local-file, package, and MCP tool plugins, and gives a plugin an HTTP route of its own under `/plugins/<id>/`.
-- Answers mentions on GitHub through the bridge plugin: a mention of the App on an issue or a pull request runs an agent for the person who wrote it, and the answer comes back in the thread. Its forge tools read threads, comment, review, check out, commit, and push as the App, never with the operator's credentials.
-
-## Quick start
-
-### 1. Install dependencies
-
-[magentic uses Bun](https://bun.sh), not npm, pnpm, or yarn.
+Install [Bun](https://bun.sh), then run these from the repository:
 
 ```sh
 bun install
-```
-
-### 2. Sign in to a model provider
-
-```sh
 bun apps/cli/src/main.ts auth login
-bun apps/cli/src/main.ts auth list
-```
-
-Follow the provider picker. Credentials are kept in your magentic data directory, not in project configuration.
-
-### 3. Start chatting
-
-```sh
-# Opens the terminal UI. If no local gateway is running, the CLI starts one for this session.
 bun apps/cli/src/main.ts
-
-# Or open it with a message already sent.
-bun apps/cli/src/main.ts "Explain this repository"
-
-# Or print the reply and exit; for scripts, pipes and CI.
-bun apps/cli/src/main.ts -p "Explain this repository"
 ```
 
-The command line follows pi: `magentic [flags] [--] [@files...] [message...]`. `-p` (`--print`) is the non-interactive mode. The message comes from the arguments, from stdin, or both (the arguments first, then what was piped), so `git diff | magentic -p "Review this"` works, and so does `echo "prompt" | magentic` from a pipe or a service, where the chat cannot draw and prints instead. `@path` puts a file in the message: images go along as attachments, anything else as a block of text under its path. The reply goes to stdout and tool activity to stderr, so the reply alone reaches the next command. `--mode json` prints every run event as one JSON line instead, in the wire shape of `RunEvent`; the first, `RunStarted`, carries the conversation id, which `-s <id>` continues later, as `-c` continues the newest. `-a <agent>` picks the agent, `-m provider/model` the model and `--thinking <level>` its thinking level. The exit code is 1 when the run fails.
+The login command walks you through choosing a provider. Credentials live in your
+magentic data directory, separate from project configuration.
 
-The built-in `assistant` can inspect, edit, and run commands in the current workspace. While it works you can keep typing: a message sent then is steered into the run, listed above the composer until the model reads it before its next call, so you can redirect the agent without stopping it. A slash command sent during a run waits for it to end. `↑` on an empty composer takes back what the model has not read yet for editing; `Esc` stops the run and does the same.
+The CLI opens a terminal chat and starts a local gateway if one isn't already
+running. The default `assistant` works in the current directory.
 
-A few keys shape the run. `ctrl+t` cycles the model's thinking level (the catalog's effort names, or `high` and `max` budgets) and the footer shows the level in force; `ctrl+o` opens every tool result in full under its call, where edits already show as a diff. The footer also shows how much of the context window is in use and, for metered models, what the session has cost so far at the catalog's prices.
-
-List the agents available to the gateway with:
+To send a prompt immediately, or print a reply and exit:
 
 ```sh
-bun apps/cli/src/main.ts agents
+bun apps/cli/src/main.ts "Explain this repository"
+bun apps/cli/src/main.ts -p "Explain this repository"
+git diff | bun apps/cli/src/main.ts -p "Review this diff"
 ```
 
-## Run the gateway
+## Using the CLI
 
-For a long-running local gateway:
+| Option                  | What it does                                            |
+| ----------------------- | ------------------------------------------------------- |
+| `-p`, `--print`         | Print the reply and exit. Tool activity goes to stderr. |
+| `-c`                    | Continue the latest conversation.                       |
+| `-s <id>`               | Continue a conversation by ID.                          |
+| `-a <agent>`            | Choose an agent.                                        |
+| `-m provider/model`     | Choose a model.                                         |
+| `--thinking <level>`    | Set the model's thinking level.                         |
+| `--mode json`           | Print run events as JSON lines.                         |
+| `-g`, `--gateway <url>` | Connect to a running gateway.                           |
+| `--help`                | Show all commands and options.                          |
+
+Use `@path` to include a file in a prompt. Images become attachments; other files
+are included as text. Piped input is appended to any prompt arguments. Without an
+interactive terminal, the CLI prints the reply and exits. Failed runs exit with
+code 1.
+
+JSON output uses the protocol's `RunEvent` format. The first event, `RunStarted`,
+includes the conversation ID for use with `-s`.
+
+In terminal chat, you can send another message while the agent works. It waits above
+the composer until the model reads it before its next call. Slash commands wait
+until the run ends.
+
+| Key                        | Action                                      |
+| -------------------------- | ------------------------------------------- |
+| `↑` with an empty composer | Take back unread messages for editing.      |
+| `Esc`                      | Stop the run and take back unread messages. |
+| `Ctrl+T`                   | Cycle the model's thinking level.           |
+| `Ctrl+O`                   | Expand tool results. Edits show as diffs.   |
+
+The footer shows the thinking level, context usage, and estimated session cost for
+metered models.
+
+```sh
+bun apps/cli/src/main.ts agents       # list available agents
+bun apps/cli/src/main.ts auth list    # list provider credentials
+bun apps/cli/src/main.ts plugin list # list plugins
+```
+
+## Running a gateway
+
+For a gateway that stays running between CLI sessions:
 
 ```sh
 bun run dev
-# Gateway: http://127.0.0.1:4321
-# Health:  http://127.0.0.1:4321/health
 ```
 
-Point the CLI at another gateway with `--gateway` (or `-g`):
+It listens at `http://127.0.0.1:4321`, serves Effect RPC at `/rpc`, and has a health
+endpoint at `GET /health`.
+
+To connect to another gateway:
 
 ```sh
-bun apps/cli/src/main.ts --gateway http://gateway.internal:4321 agents
-bun apps/cli/src/main.ts --gateway http://gateway.internal:4321 -p "Summarize the latest changes"
+bun apps/cli/src/main.ts --gateway http://gateway.internal:4321
 ```
 
-Useful CLI commands:
+Read the [security notes](#security) before making the gateway reachable over a network.
+
+## Remote control
+
+The gateway connects to your relay in the background. You do not need to run a
+separate connector. The relay application lives in [apps/relay](apps/relay).
+
+First, mint a gateway credential using your relay's admin API (see its README).
+Save it once with the masked prompt:
 
 ```sh
-bun apps/cli/src/main.ts --help
-bun apps/cli/src/main.ts plugin list
-bun apps/cli/src/main.ts -c                 # continue the latest conversation
-bun apps/cli/src/main.ts -s <conversation>  # continue a conversation by id
+bun apps/cli/src/main.ts relay-setup --url https://relay1.magentic.run
 ```
 
-## Configure agents
+This saves `relay.json` under `MAGENTIC_DATA_DIR` with permissions `0600`. The file
+contains `url`, `token`, and optionally `publicUrl` when the browser uses a different
+hostname. You can also supply `MAGENTIC_RELAY_URL`, `MAGENTIC_RELAY_TOKEN`, and
+`MAGENTIC_REMOTE_URL` through the environment. Use HTTPS outside local development.
+Restart an already-running gateway after changing these settings.
 
-By default magentic looks for configuration in `./magentic`. Set `MAGENTIC_HOME` to use another directory. Add agent definitions under `agents/`; the built-in `assistant` remains available.
+Open the CLI and enter `/rc`. Scan the QR code to pair your browser; the link lasts
+five minutes and pairs up to four browsers, so a phone that opens it in an in-app
+view first can still reopen the same link in its real browser. The browser then
+opens the conversation list and can read or continue a chat. While a link is still
+good, `/rc` shows it again; otherwise `/rc` shows a link to the current
+conversation. `/remote-control` is an alias.
+
+| Command           | Action                                                       |
+| ----------------- | ------------------------------------------------------------ |
+| `/rc pair`        | Pair another browser, reusing a pairing link with time left. |
+| `/rc status`      | Show relay connection status.                                |
+| `/rc devices`     | List paired browsers and their IDs.                          |
+| `/rc revoke <id>` | Remove a browser's access and close its open requests.       |
+| `/rc off`         | Disconnect remote access, keeping the device list.           |
+| `/rc on`          | Reconnect and accept paired browsers again.                  |
+
+Device credentials have no server-side expiry and survive gateway restarts. The
+browser keeps its login in an HttpOnly cookie, renewed when used; clearing site
+data, browser storage limits, signing out, or revoking the device requires pairing
+again. The pairing link stays in the address bar only until it expires, so it can
+be carried to another browser, and never longer.
+
+When relay settings exist, the CLI starts a detached gateway and reuses it on later
+launches. Quitting the CLI leaves that gateway, its relay connection, and background
+tasks running. Without relay settings, the CLI still starts an embedded gateway
+that exits with it. To stop a running gateway explicitly:
+
+```sh
+bun apps/cli/src/main.ts gateway stop
+```
+
+The computer must be awake and online to handle remote requests. The connector
+retries after network changes or sleep. A reboot requires starting magentic again;
+this does not install an operating-system startup service. Logs go to
+`MAGENTIC_DATA_DIR/gateway.log`.
+
+The browser refreshes saved transcripts and streams replies it starts. It does not
+yet mirror an in-progress terminal reply token by token. A run started by a client
+still ends if that client disconnects; background tasks belong to the gateway.
+
+## Agents and tools
+
+Configuration lives in `./magentic`, or the directory set by `MAGENTIC_HOME`:
 
 ```text
 magentic/
@@ -102,7 +166,7 @@ magentic/
     └── reviewer.yaml
 ```
 
-`magentic/agents/reviewer.yaml`:
+For example, `agents/reviewer.yaml` defines a read-only reviewer:
 
 ```yaml
 name: reviewer
@@ -115,102 +179,102 @@ tools: [read_file, glob, grep]
 maxSteps: 12
 ```
 
-`tools` is an allow-list. An entry names one tool, or ends in `*` to take every tool with that prefix (`github_*` for one MCP server), or is a capability followed by `:*` to take every tool declaring it (`mcp:*` for every MCP server, `fs:read:*` for every reader). A file named after the built-in `assistant` replaces it.
+Run it with `-a reviewer`. The built-in `assistant` stays available unless you
+replace it with an agent file of the same name.
 
-An agent’s `prompt` can also load a file relative to the configuration directory:
+The `tools` list accepts exact names, prefixes such as `github_*`, and capabilities
+such as `mcp:*` or `fs:read:*`. To keep a prompt in a separate file, use a path
+relative to the configuration directory:
 
 ```yaml
 prompt:
   file: prompts/reviewer.md
 ```
 
-Use `reload: watch` in `magentic.yaml` to rebuild configured agents when their files change. Sending `SIGHUP` to the gateway also reloads them.
+In `magentic.yaml`, you can watch agent files for changes, disable tools, and load
+plugins:
 
 ```yaml
 reload: watch
 
-# Disable a built-in tool everywhere.
 tools:
   shell: false
 
-# Disable a built-in plugin or load a trusted external plugin.
 plugins:
   disable: []
   use: []
 ```
 
-See [docs/plugins.md](docs/plugins.md) for plugin and MCP configuration. Treat external plugins as trusted code: they run in the gateway process with its privileges.
+Sending `SIGHUP` to the gateway also reloads agents.
+
+Plugins can come from built-ins, local files, packages, or MCP servers. They can
+also serve HTTP routes under `/plugins/<id>/`. The GitHub bridge uses this to turn
+issue and pull request mentions into agent runs, with replies and forge actions
+performed as the GitHub App.
+
+See the [plugin guide](docs/plugins.md) for setup. External plugins run with the
+gateway's privileges; only load code you trust.
 
 ## Environment
 
-Bun loads `.env` from the working directory. Do not commit credentials.
+Bun loads `.env` from the working directory. Keep credentials out of version control.
 
-| Variable                   | Default                              | Purpose                                                                                                                                                                                                 |
-| -------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PORT`                     | `4321`                               | Gateway port.                                                                                                                                                                                           |
-| `MAGENTIC_HOST`            | `127.0.0.1`                          | Address on which the gateway listens.                                                                                                                                                                   |
-| `IDENTITY_LOCAL`           | `false`                              | Explicitly permits a non-loopback bind with local identity. See [Security](#security).                                                                                                                  |
-| `MAGENTIC_HOME`            | `./magentic`                         | Configuration directory containing `magentic.yaml` and `agents/`.                                                                                                                                       |
-| `MAGENTIC_DATA_DIR`        | `$HOME/.config/magentic`             | Local conversations, CLI state, `gateway.log` from a gateway the CLI started, and `tool-output/` with the full output of shell commands too long to show the model whole, and of every background task. |
-| `MAGENTIC_WORKSPACE`       | Current working directory            | Root available to built-in file and shell tools.                                                                                                                                                        |
-| `MAGENTIC_API_KEYS_FILE`   | `$MAGENTIC_DATA_DIR/api-keys.json`   | Stored model API keys.                                                                                                                                                                                  |
-| `MAGENTIC_CODEX_AUTH_FILE` | `$MAGENTIC_DATA_DIR/codex-auth.json` | Stored ChatGPT/Codex login.                                                                                                                                                                             |
-| `CODEX_HOME`               | `$HOME/.codex`                       | Codex CLI directory used when importing its login.                                                                                                                                                      |
-| `MAGENTIC_MODELS_URL`      | `https://models.dev/api.json`        | Model catalog source.                                                                                                                                                                                   |
-| `MAGENTIC_MODELS_CACHE`    | `$HOME/.cache/magentic/models.json`  | Cached model catalog.                                                                                                                                                                                   |
-| `MAGENTIC_MODELS_OFFLINE`  | `false`                              | Use only the cached or bundled model catalog.                                                                                                                                                           |
-| `USER`                     | `local`                              | Subject assigned by local identity.                                                                                                                                                                     |
-| `GITHUB_APP_PRIVATE_KEY`   | unset                                | The GitHub App's private key, for the bridge plugin. `\n` in the value stands for a newline.                                                                                                            |
-| `GITHUB_WEBHOOK_SECRET`    | unset                                | What GitHub signs webhook deliveries with; unset means the bridge's route refuses every delivery.                                                                                                       |
+| Variable                   | Default                              | Purpose                                                                |
+| -------------------------- | ------------------------------------ | ---------------------------------------------------------------------- |
+| `PORT`                     | `4321`                               | Gateway port.                                                          |
+| `MAGENTIC_HOST`            | `127.0.0.1`                          | Listen address.                                                        |
+| `IDENTITY_LOCAL`           | `false`                              | Permit a non-loopback bind with local identity.                        |
+| `MAGENTIC_HOME`            | `./magentic`                         | Configuration directory.                                               |
+| `MAGENTIC_DATA_DIR`        | `$HOME/.config/magentic`             | Conversations, CLI state, gateway logs, and saved tool output.         |
+| `MAGENTIC_WORKSPACE`       | Current directory                    | Working directory for file and shell tools.                            |
+| `MAGENTIC_API_KEYS_FILE`   | `$MAGENTIC_DATA_DIR/api-keys.json`   | Stored provider API keys.                                              |
+| `MAGENTIC_CODEX_AUTH_FILE` | `$MAGENTIC_DATA_DIR/codex-auth.json` | Stored ChatGPT/Codex login.                                            |
+| `CODEX_HOME`               | `$HOME/.codex`                       | Codex CLI directory when importing a login.                            |
+| `MAGENTIC_MODELS_URL`      | `https://models.dev/api.json`        | Model catalog source.                                                  |
+| `MAGENTIC_MODELS_CACHE`    | `$HOME/.cache/magentic/models.json`  | Model catalog cache.                                                   |
+| `MAGENTIC_MODELS_OFFLINE`  | `false`                              | Use only the cached or bundled catalog.                                |
+| `USER`                     | `local`                              | Subject assigned by local identity.                                    |
+| `GITHUB_APP_PRIVATE_KEY`   | Unset                                | GitHub App private key. Literal `\n` sequences become newlines.        |
+| `GITHUB_WEBHOOK_SECRET`    | Unset                                | Webhook signing secret. Without it, the bridge rejects all deliveries. |
 
 ## Security
 
-The gateway is deliberately conservative while authentication is still under development:
+The gateway binds to loopback by default. Other bind addresses require
+`IDENTITY_LOCAL=true`, which trusts reachable callers as the local user. There is
+no production authorization boundary yet: policy allows all actions and audit
+records are held in memory.
 
-- It listens on `127.0.0.1` by default.
-- Setting `MAGENTIC_HOST` to anything else fails unless you also set `IDENTITY_LOCAL=true`.
-- With local identity enabled, callers on the reachable network are trusted as the local user.
-- The current policy allows actions and the audit sink is in memory. Do not treat this as a multi-tenant or production authorization boundary.
-- Built-in workspace tools are confined to `MAGENTIC_WORKSPACE`; the shell tool runs with the gateway process’s privileges inside that workspace. A background task runs until it ends, is stopped, or the gateway exits, and only the principal who started it can read or stop it.
-- A bridge needs its provider to reach the gateway, which loopback does not allow. Put a tunnel or a reverse proxy in front of `/plugins/<id>/` rather than binding the gateway itself wider: the plugin verifies the delivery's signature, but everything else on the port, `/rpc` included, is still trusted as the local user.
+File tools are confined to `MAGENTIC_WORKSPACE`. The shell starts in that directory
+but runs with the gateway process's privileges. Background commands run until they
+finish, are stopped, or the gateway exits. Only the principal who started a
+background task can read or stop it.
 
-For the intended identity and policy model, read [docs/identity.md](docs/identity.md). For a public deployment, keep the gateway behind a trusted network boundary until authenticated edge support lands.
+For webhook bridges, expose only `/plugins/<id>/` through a tunnel or reverse proxy.
+The plugin verifies webhook signatures; `/rpc` still trusts callers as the local
+user and should remain private.
+
+The [identity design](docs/identity.md) describes the planned authentication and
+policy model.
 
 ## Development
 
 ```sh
 bun run dev        # gateway with reload
-bun run test       # Vitest suite on the Bun runtime
+bun run test       # Vitest suite on Bun
 bun run typecheck  # TypeScript checks
-bun run lint       # oxlint and formatting check
-bun run check      # typecheck + lint + knip + tests
+bun run lint       # lint and formatting checks
+bun run check      # typecheck, lint, unused-code checks, and tests
 ```
 
-This is a Bun workspace built on [Effect](https://effect.website) 4. Read [CLAUDE.md](CLAUDE.md) for repository conventions and contributor commands.
+`apps/gateway` hosts agents and wires services together. `apps/cli` is the terminal
+client, `apps/web` is the Solid browser client, and `apps/relay` deploys separately to
+Cloudflare or runs as a Bun server. Shared packages under `packages/` cover the runtime, RPC protocol, model
+providers, tools, plugins, identity, policy, and audit.
 
-## Repository layout
-
-| Path                     | Responsibility                                                                                       |
-| ------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `apps/gateway`           | Gateway server: configuration, plugin hosting, RPC routes, and service wiring.                       |
-| `apps/cli`               | `magentic` terminal client and full-screen chat.                                                     |
-| `packages/protocol`      | Shared schemas and Effect RPC API.                                                                   |
-| `packages/core`          | Agent runtime, conversations, plugin host, retries, and configuration primitives.                    |
-| `packages/plugin`        | Public plugin contract and model catalog.                                                            |
-| `packages/model`         | Model-provider plugins, API keys, and Codex login.                                                   |
-| `packages/tools`         | Workspace-confined file and shell tools.                                                             |
-| `packages/mcp`           | MCP client plugin and MCP-provided tools.                                                            |
-| `packages/bridge-github` | GitHub bridge plugin: mentions on issues and pull requests become runs; forge tools push as the App. |
-| `packages/identity`      | Identity abstractions and local identity implementation.                                             |
-| `packages/policy`        | Policy decisions and enforcement interfaces.                                                         |
-| `packages/audit`         | Audit interfaces and current in-memory implementation.                                               |
-| `docs/`                  | Design notes, configuration details, and research.                                                   |
-
-## Documentation
-
-- [Harness design](docs/harness.md) — architecture, request lifecycle, and delivery phases.
-- [Identity design](docs/identity.md) — planned credentials, sessions, and authorization boundary.
-- [Plugin guide](docs/plugins.md) — plugin contract, external plugins, and MCP servers.
+- [Repository conventions](CLAUDE.md)
+- [Harness design](docs/harness.md)
+- [Identity design](docs/identity.md)
+- [Plugin guide](docs/plugins.md)
 
 ## License
 

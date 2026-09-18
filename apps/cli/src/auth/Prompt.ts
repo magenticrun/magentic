@@ -20,19 +20,24 @@ export const log = {
 /** Grey text for secondary detail on the same line as a label. */
 export const dim = (text: string) => `\x1b[90m${text}\x1b[0m`;
 
-const optional = <A>(result: A | symbol): Option.Option<A> =>
-  prompts.isCancel(result) ? Option.none() : Option.some(result);
+const optional = <A>(result: A | symbol): Option.Option<A> => {
+  if (prompts.isCancel(result)) {
+    return Option.none<A>();
+  }
+  // SAFETY: `isCancel` excludes Clack's symbol sentinel, leaving the prompt's declared value type.
+  return Option.some(result as A);
+};
 
 export const select = <Value>(options: prompts.SelectOptions<Value>) =>
   Effect.map(
     Effect.promise(() => prompts.select(options)),
-    (result) => optional(result),
+    (result) => optional<Value>(result),
   );
 
 export const password = (options: prompts.PasswordOptions) =>
   Effect.map(
     Effect.promise(() => prompts.password(options)),
-    (result) => optional(result),
+    (result) => optional<string>(result),
   );
 
 export interface Spinner {

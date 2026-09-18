@@ -53,8 +53,8 @@ const seed = (toolkit: FileToolkit, files: Record<string, string>) =>
 
 /** Narrows a listing to what the model sees when it worked. */
 const expectListing = (result: Tool.Result<typeof ListDir>): Tool.Success<typeof ListDir> => {
-  if (result instanceof FileToolError || result instanceof AiError.AiError) {
-    return assert.fail(`expected a listing, got ${result.message}`);
+  if (result instanceof FileToolError || result instanceof AiError.AiError || "type" in result) {
+    return assert.fail("expected a listing");
   }
   return result;
 };
@@ -345,8 +345,12 @@ layer(TestLayer)("file tools size limits", (it) => {
         .pipe(Effect.flatMap(lastResult));
       assert.isFalse(read.isFailure);
       const content = read.result;
-      if (content instanceof FileToolError || content instanceof AiError.AiError) {
-        return assert.fail(`expected content, got ${content.message}`);
+      if (
+        content instanceof FileToolError ||
+        content instanceof AiError.AiError ||
+        "type" in content
+      ) {
+        return assert.fail("expected content");
       }
       // The first page: the line limit's worth, without the break that starts the next line.
       assert.strictEqual(content.content, line.repeat(READ_LINE_LIMIT).slice(0, -1));
@@ -358,8 +362,8 @@ layer(TestLayer)("file tools size limits", (it) => {
         .handle("read_file", { path: "huge.txt", offset: lines - 1, limit: 10 })
         .pipe(Effect.flatMap(lastResult));
       const rest = tail.result;
-      if (rest instanceof FileToolError || rest instanceof AiError.AiError) {
-        return assert.fail(`expected content, got ${rest.message}`);
+      if (rest instanceof FileToolError || rest instanceof AiError.AiError || "type" in rest) {
+        return assert.fail("expected content");
       }
       assert.strictEqual(rest.content, line.repeat(2));
       assert.deepStrictEqual(rest.lines, { from: lines - 1, to: lines, total: lines });
@@ -368,8 +372,12 @@ layer(TestLayer)("file tools size limits", (it) => {
         .handle("grep", { pattern: "needle-in-a-huge" })
         .pipe(Effect.flatMap(lastResult));
       const matches = found.result;
-      if (matches instanceof FileToolError || matches instanceof AiError.AiError) {
-        return assert.fail(`expected matches, got ${matches.message}`);
+      if (
+        matches instanceof FileToolError ||
+        matches instanceof AiError.AiError ||
+        "type" in matches
+      ) {
+        return assert.fail("expected matches");
       }
       assert.deepStrictEqual(
         matches.matches.map((m) => m.path),

@@ -122,9 +122,9 @@ export const resolveConfig = (options: GitHubBridgeOptions): GitHubBridgeConfig 
  * The App's private key, as GitHub issued it. An environment variable cannot
  * hold a newline in every shell, so `\n` in the value stands for one.
  */
-export const privateKey = Config.redacted("GITHUB_APP_PRIVATE_KEY").pipe(
+export const privateKey = Config.Redacted("GITHUB_APP_PRIVATE_KEY").pipe(
   Config.map((key) => Redacted.make(Redacted.value(key).replaceAll("\\n", "\n"))),
 );
 
 /** What GitHub signs webhook deliveries with; absent means the webhook route refuses every delivery. */
-export const webhookSecret = Config.redacted("GITHUB_WEBHOOK_SECRET").pipe(Config.option);
+export const webhookSecret = Config.Redacted("GITHUB_WEBHOOK_SECRET").pipe(Config.option);

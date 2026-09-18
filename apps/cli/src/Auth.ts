@@ -11,13 +11,13 @@ import { Reported } from "./Reported.ts";
 
 const providerIds = modelPlugins.map((p) => p.id).join(", ");
 
-const providerFlag = Flag.string("provider").pipe(
+const providerFlag = Flag.String("provider").pipe(
   Flag.withAlias("p"),
   Flag.withDescription(`Provider id to log in to, skips the picker: ${providerIds}`),
   Flag.optional,
 );
 
-const methodFlag = Flag.string("method").pipe(
+const methodFlag = Flag.String("method").pipe(
   Flag.withAlias("m"),
   Flag.withDescription("Login method id, skips the method picker: chatgpt, import or api-key"),
   Flag.optional,
@@ -47,7 +47,7 @@ const tilde = (home: string, file: string) =>
 /** The directories the credential files live in, for the `list` header. */
 const credentialDirs = Effect.fn("Auth.credentialDirs")(function* () {
   const path = yield* Path.Path;
-  const home = yield* Config.string("HOME");
+  const home = yield* Config.String("HOME");
   const files = [yield* Codex.codexAuthFile, yield* apiKeysFile];
   const dirs = new Set(files.map((file) => tilde(home, path.dirname(file))));
   return [...dirs].join(", ");
@@ -90,7 +90,7 @@ const list = Command.make(
   }),
 ).pipe(Command.withAlias("ls"), Command.withDescription("List providers and credentials"));
 
-const providerArgument = Argument.string("provider").pipe(
+const providerArgument = Argument.String("provider").pipe(
   Argument.withDescription("Provider id or name to log out from"),
   Argument.optional,
 );

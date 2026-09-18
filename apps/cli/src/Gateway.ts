@@ -1,4 +1,7 @@
-import { dataDir, describeCause } from "@magentic/core";
+import { spawn } from "node:child_process";
+import { openSync, closeSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dataDir, describeCause, relayConfig } from "@magentic/core";
 import { ModelCatalog } from "@magentic/plugin";
 import { Api, RPC_PATH } from "@magentic/protocol";
 import {
@@ -115,6 +118,42 @@ export const ensureGateway = Effect.fn("Cli.ensureGateway")(function* (baseUrl: 
     });
   }
   const port = url.port === "" ? 80 : Number.parseInt(url.port, 10);
+  const relay = yield* relayConfig;
+  if (Option.isSome(relay)) {
+    const fs = yield* FileSystem.FileSystem;
+    const dir = yield* dataDir;
+    yield* fs.makeDirectory(dir, { recursive: true, mode: 0o700 });
+    yield* Effect.try({
+      try: () => {
+        const log = openSync(`${dir}/gateway.log`, "a", 0o600);
+        try {
+          const child = spawn(
+            process.execPath,
+            [fileURLToPath(import.meta.resolve("@magentic/gateway/daemon")), String(port)],
+            {
+              detached: true,
+              stdio: ["ignore", log, log],
+              cwd: process.cwd(),
+            },
+          );
+          child.on("error", () => undefined);
+          child.unref();
+        } finally {
+          closeSync(log);
+        }
+      },
+      catch: () => unreachable(`Could not start the background gateway. See ${dir}/gateway.log.`),
+    });
+    yield* healthOnce.pipe(
+      Effect.retry({ times: 100, schedule: Schedule.spaced("100 millis") }),
+      Effect.timeoutOrElse({
+        duration: START_TIMEOUT,
+        orElse: () =>
+          Effect.fail(unreachable(`The background gateway did not start. See ${dir}/gateway.log.`)),
+      }),
+    );
+    return { client, embedded: false };
+  }
   // The server is loaded only now: most starts find a gateway already running.
   const { layerServer } = yield* Effect.promise(() => import("@magentic/gateway"));
   // Request logs would land in the transcript, or on top of the full-screen

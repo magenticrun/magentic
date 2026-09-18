@@ -1,5 +1,5 @@
 import { define, ModelInfo } from "@magentic/plugin";
-import { Context, Effect, Layer, Option, Ref, Stream } from "effect";
+import { Context, Effect, Layer, Option, Predicate, Ref, Stream } from "effect";
 import { AiError, LanguageModel, type Response } from "effect/unstable/ai";
 
 /** Token limits the fake model claims; 0 when a test does not care, as the catalog would say. */
@@ -62,13 +62,26 @@ export const fakeProviderPlugin = (script: FakeScript, limits?: FakeLimits) =>
       ),
   });
 
-/** One scripted model turn: what the fake replies with for the nth call, or the error the call fails with. */
+/**
+ * A turn the model begins and a failure ends before it finishes: what a
+ * stream cut partway through leaves behind. The parts stream as they would
+ * have, and the call fails after them.
+ */
+export interface FakeCut {
+  readonly parts: ReadonlyArray<Response.PartEncoded>;
+  readonly cutBy: AiError.AiError;
+}
+
+/**
+ * One scripted model turn: what the fake replies with for the nth call, the
+ * error the call fails with, or a reply cut short by one.
+ */
 export type FakeScript = (call: {
   readonly index: number;
   readonly options: LanguageModel.ProviderOptions;
   /** The level the run asked for, as `FakeReasoning` carries it around the call. */
   readonly reasoning: Option.Option<string>;
-}) => ReadonlyArray<Response.PartEncoded> | AiError.AiError;
+}) => ReadonlyArray<Response.PartEncoded> | AiError.AiError | FakeCut;
 
 /** The finish a real provider streams last, with usage counted at one token per part. */
 const finish = (parts: ReadonlyArray<Response.PartEncoded>): Response.StreamPartEncoded => ({
@@ -123,14 +136,26 @@ export const layerFake = (script: FakeScript): Layer.Layer<LanguageModel.Languag
           const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
           const reasoning = yield* FakeReasoning;
           const turn = script({ index, options, reasoning });
-          return turn instanceof AiError.AiError ? yield* turn : turn;
+          if (turn instanceof AiError.AiError) {
+            return yield* turn;
+          }
+          return Predicate.hasProperty(turn, "cutBy") ? turn : { parts: turn, cutBy: undefined };
         });
       return yield* LanguageModel.make({
-        generateText: (options) => next(options).pipe(Effect.map((parts) => [...parts])),
+        generateText: (options) =>
+          next(options).pipe(
+            Effect.flatMap(({ parts, cutBy }) =>
+              cutBy === undefined ? Effect.succeed([...parts]) : Effect.fail(cutBy),
+            ),
+          ),
         streamText: (options) =>
           Stream.unwrap(
             next(options).pipe(
-              Effect.map((parts) => Stream.fromIterable([...toStreamParts(parts), finish(parts)])),
+              Effect.map(({ parts, cutBy }) =>
+                cutBy === undefined
+                  ? Stream.fromIterable([...toStreamParts(parts), finish(parts)])
+                  : Stream.concat(Stream.fromIterable(toStreamParts(parts)), Stream.fail(cutBy)),
+              ),
             ),
           ),
       });

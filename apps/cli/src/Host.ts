@@ -9,6 +9,7 @@ import { ModelCatalog } from "@magentic/plugin";
 import { Effect, Layer } from "effect";
 import { conversationCommandsPlugin } from "./commands/Conversations.ts";
 import { loopCommandPlugin } from "./commands/Loop.ts";
+import { remoteCommandPlugin } from "./commands/Remote.ts";
 import { mcpCommandPlugin } from "./commands/Mcp.ts";
 
 /**
@@ -29,6 +30,7 @@ export const LocalHost = Layer.unwrap(
         builtin(contextCommandPlugin),
         builtin(conversationCommandsPlugin),
         builtin(mcpCommandPlugin),
+        builtin(remoteCommandPlugin),
         builtin(loopCommandPlugin),
       ],
       paths: { config, workspace: process.cwd(), data },

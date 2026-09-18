@@ -18,7 +18,7 @@ import { mcpPlugin, McpServers } from "@magentic/mcp";
 import { layerCredentialStores, modelPlugins } from "@magentic/model";
 import { define, ModelCatalog, Notices } from "@magentic/plugin";
 import { Policy } from "@magentic/policy";
-import { Api, RPC_PATH } from "@magentic/protocol";
+import { Api, RPC_PATH, RemoteApi, REMOTE_CONTROL_PATH } from "@magentic/protocol";
 import {
   BackgroundTasks,
   fileToolsPlugin,
@@ -41,6 +41,7 @@ import { configAgentsPlugin } from "./ConfigAgents.ts";
 import { ToolCallGuardLive } from "./Guard.ts";
 import { RpcHandlers } from "./Handlers.ts";
 import { loadExternalPlugin, loadGatewayConfig } from "./Plugins.ts";
+import { RemoteControl, RemoteHandlers } from "./RemoteControl.ts";
 import { Wakeups } from "./Wakeups.ts";
 
 /** The one agent every gateway has until `agents/*.yaml` exists. */
@@ -100,7 +101,7 @@ export const assistantPlugin = define({
 });
 
 /** Directory the file tools may touch. Defaults to where the gateway was started. */
-const workspaceRoot = Config.string("MAGENTIC_WORKSPACE").pipe(Config.withDefault(process.cwd()));
+const workspaceRoot = Config.String("MAGENTIC_WORKSPACE").pipe(Config.withDefault(process.cwd()));
 
 /**
  * The workspace, said out loud when it is not a directory. Every file and
@@ -123,10 +124,10 @@ const WorkspaceLayer = Layer.unwrap(
 );
 
 /** Address the gateway listens on. Loopback until authentication exists; see docs/identity.md. */
-const listenHost = Config.string("MAGENTIC_HOST").pipe(Config.withDefault("127.0.0.1"));
+const listenHost = Config.String("MAGENTIC_HOST").pipe(Config.withDefault("127.0.0.1"));
 
 /** Whether the operator accepted that local identity trusts every caller on this network. */
-const localIdentityAcknowledged = Config.boolean("IDENTITY_LOCAL").pipe(Config.withDefault(false));
+const localIdentityAcknowledged = Config.Boolean("IDENTITY_LOCAL").pipe(Config.withDefault(false));
 
 export class UnsafeBind extends Schema.TaggedError<UnsafeBind>()("UnsafeBind", {
   host: Schema.String,
@@ -312,10 +313,21 @@ export interface ServerOptions {
 
 /** The whole gateway on one port. Building the layer starts serving. */
 export const layerServer = (port: number, options: ServerOptions = {}) =>
-  HttpRouter.serve(AllRoutes, {
-    disableLogger: options.quiet === true,
-    disableListenLog: options.quiet === true,
-  }).pipe(
+  HttpRouter.serve(
+    Layer.mergeAll(
+      AllRoutes,
+      RpcServer.layerHttp({ group: RemoteApi, path: REMOTE_CONTROL_PATH, protocol: "http" }).pipe(
+        Layer.provide([
+          RemoteHandlers.pipe(Layer.provide(RemoteControl.layer(port))),
+          RpcSerialization.layerNdjson,
+        ]),
+      ),
+    ),
+    {
+      disableLogger: options.quiet === true,
+      disableListenLog: options.quiet === true,
+    },
+  ).pipe(
     // Bun closes a request that sends nothing for ten seconds; compacting a
     // conversation waits on the model longer than that. 255 is Bun's most.
     Layer.provide(
@@ -328,7 +340,7 @@ export const layerServer = (port: number, options: ServerOptions = {}) =>
 /** `Layer.launch` this to run the gateway on `PORT`, listening on `MAGENTIC_HOST`. */
 export const HttpServerLayer = Layer.unwrap(
   Effect.gen(function* () {
-    const port = yield* Config.port("PORT").pipe(Config.withDefault(4321));
+    const port = yield* Config.Port("PORT").pipe(Config.withDefault(4321));
     const hostname = yield* checkBind(yield* listenHost, yield* localIdentityAcknowledged);
     return layerServer(port, { hostname });
   }),

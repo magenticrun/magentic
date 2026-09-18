@@ -41,7 +41,7 @@ import { LanguageModel } from "effect/unstable/ai";
 import { Wakeups } from "./Wakeups.ts";
 
 /** Until sessions exist, the OS user is the caller. */
-const localSubject = Config.string("USER").pipe(Config.withDefault("local"));
+const localSubject = Config.String("USER").pipe(Config.withDefault("local"));
 
 /** Who is calling, resolved the way every handler does it for now. */
 const callerVia = (identity: Identity["Service"]) =>

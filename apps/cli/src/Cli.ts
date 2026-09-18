@@ -2,6 +2,8 @@ import { BunRuntime, BunServices } from "@effect/platform-bun";
 import { Console, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
+import { remoteClient, remoteCommand } from "./Remote.ts";
+import { relaySetup } from "./RelaySetup.ts";
 import { auth } from "./Auth.ts";
 import { ensureGateway } from "./Gateway.ts";
 import { LocalHost } from "./Host.ts";
@@ -10,42 +12,42 @@ import { print, type OutputMode } from "./Print.ts";
 import { Reported } from "./Reported.ts";
 import { VERSION } from "./Version.ts";
 
-const gateway = Flag.string("gateway").pipe(
+const gateway = Flag.String("gateway").pipe(
   Flag.withAlias("g"),
   Flag.withDescription("Base URL of the gateway; started here when nothing answers locally"),
   Flag.withDefault("http://localhost:4321"),
 );
 
-const agentFlag = Flag.string("agent").pipe(
+const agentFlag = Flag.String("agent").pipe(
   Flag.withAlias("a"),
   Flag.withDescription("Agent to talk to; the first one the gateway hosts by default"),
   Flag.optional,
 );
 
-const continueFlag = Flag.boolean("continue").pipe(
+const continueFlag = Flag.Boolean("continue").pipe(
   Flag.withAlias("c"),
   Flag.withDescription("Continue the most recent conversation, of the agent when one is named"),
   Flag.withDefault(false),
 );
 
-const sessionFlag = Flag.string("session").pipe(
+const sessionFlag = Flag.String("session").pipe(
   Flag.withAlias("s"),
   Flag.withDescription("Continue the conversation with this id; /resume in the chat lists them"),
   Flag.optional,
 );
 
-const modelFlag = Flag.string("model").pipe(
+const modelFlag = Flag.String("model").pipe(
   Flag.withAlias("m"),
   Flag.withDescription("Run on this provider/model instead of the agent's own"),
   Flag.optional,
 );
 
-const thinkingFlag = Flag.string("thinking").pipe(
+const thinkingFlag = Flag.String("thinking").pipe(
   Flag.withDescription("How hard the model thinks: one of its levels, such as low, medium or high"),
   Flag.optional,
 );
 
-const printFlag = Flag.boolean("print").pipe(
+const printFlag = Flag.Boolean("print").pipe(
   Flag.withAlias("p"),
   Flag.withDescription(
     "Print the reply and exit instead of opening the chat; what is piped on stdin joins the message",
@@ -53,14 +55,17 @@ const printFlag = Flag.boolean("print").pipe(
   Flag.withDefault(false),
 );
 
-const modeFlag = Flag.choice("mode", ["text", "json"]).pipe(
+const modeFlag = Flag.ChoiceWithValue("mode", [
+  ["text", "text"],
+  ["json", "json"],
+] as const).pipe(
   Flag.withDescription(
     "What --print writes: text puts the reply on stdout and tool activity on stderr; json puts every run event on stdout, one JSON line each, and implies --print",
   ),
   Flag.withDefault<OutputMode>("text"),
 );
 
-const messageArgument = Argument.string("message").pipe(
+const messageArgument = Argument.String("message").pipe(
   Argument.withDescription(
     "What to send, with @path for a file to send along; opens the chat with it sent, or with --print, prints the reply",
   ),
@@ -178,8 +183,43 @@ const plugin = Command.make("plugin").pipe(
   Command.withSubcommands([pluginList]),
 );
 
+const rc = Command.make(
+  "rc",
+  { action: Argument.String("action").pipe(Argument.optional) },
+  Effect.fn(function* ({ action }) {
+    const root = yield* magentic;
+    yield* ensureGateway(root.gateway);
+    const client = yield* remoteClient(root.gateway);
+    yield* Console.log(
+      yield* remoteCommand(
+        client,
+        Option.getOrElse(action, () => ""),
+        Effect.succeed(Option.none()),
+      ).pipe(
+        Effect.catchTag("CommandError", (error) =>
+          Console.error(error.message).pipe(
+            Effect.andThen(new Reported({ message: error.message })),
+          ),
+        ),
+      ),
+    );
+  }, Effect.scoped),
+).pipe(Command.withDescription("Pair a browser or check remote-control status"));
+
+const gatewayStop = Command.make(
+  "stop",
+  {},
+  Effect.fn(function* () {
+    const root = yield* magentic;
+    const client = yield* remoteClient(root.gateway);
+    yield* client.stopGateway();
+    yield* Console.log("Gateway stopping. Remote access and background tasks stop with it.");
+  }, Effect.scoped),
+);
+const gatewayCommands = Command.make("gateway").pipe(Command.withSubcommands([gatewayStop]));
+
 magentic.pipe(
-  Command.withSubcommands([agents, plugin, auth]),
+  Command.withSubcommands([agents, plugin, auth, rc, relaySetup, gatewayCommands]),
   Command.run({ version: VERSION }),
   Effect.provide([BunServices.layer, FetchHttpClient.layer]),
   BunRuntime.runMain,
