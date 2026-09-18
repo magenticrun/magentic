@@ -117,6 +117,8 @@ export interface SessionSchedules {
 /** The chat a command runs in, and what it may change about it. */
 export interface ChatSession {
   readonly agent: string;
+  /** Gateway-owned remote access; absent on surfaces without pairing controls. */
+  readonly remoteControl?: (args: string) => Effect.Effect<string, CommandError>;
   /** The `provider/model` runs use, when one was chosen. */
   readonly model: Effect.Effect<Option.Option<string>>;
   setModel(ref: string): Effect.Effect<void>;

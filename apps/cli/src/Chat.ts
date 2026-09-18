@@ -29,6 +29,7 @@ import {
 } from "effect";
 import { composeMessage, type Message } from "./Attachments.ts";
 import { ago } from "./commands/Conversations.ts";
+import { remoteClient, remoteCommand } from "./Remote.ts";
 import { ensureGateway } from "./Gateway.ts";
 import { appendHistory, loadHistory } from "./History.ts";
 import { pickUp, type PickUpOptions } from "./Resume.ts";
@@ -151,6 +152,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   const { renderer, close: closeScreen } = yield* acquireScreen;
   const themed = yield* Effect.forkChild(Effect.promise(() => renderer.waitForThemeMode(300)));
   const { client } = yield* ensureGateway(options.baseUrl);
+  const remote = yield* remoteClient(options.baseUrl);
   const { agent, starting } = yield* pickUp(client, options);
   const commands = yield* CommandRegistry;
   const models = yield* ModelRegistry;
@@ -211,7 +213,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   const conversation = yield* Ref.make(Option.none<string>());
 
   // The header shows where the chat runs, with the home directory as `~`.
-  const home = yield* Config.string("HOME").pipe(Config.withDefault(""));
+  const home = yield* Config.String("HOME").pipe(Config.withDefault(""));
   const cwd = process.cwd();
   const directory =
     home.length > 0 && (cwd === home || cwd.startsWith(`${home}/`))
@@ -608,6 +610,24 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     }
   });
 
+  yield* Effect.forever(
+    remote.remoteStatus().pipe(
+      Effect.tap((status) =>
+        Effect.sync(() =>
+          tui.setRemote(
+            !status.configured
+              ? ""
+              : !status.enabled
+                ? "rc off"
+                : `${status.connected ? "rc connected" : "rc offline"} · ${status.devices.length} devices`,
+          ),
+        ),
+      ),
+      Effect.catch(() => Effect.sync(() => tui.setRemote(""))),
+      Effect.andThen(Effect.sleep("5 seconds")),
+    ),
+  ).pipe(Effect.forkScoped);
+
   const ui: CommandUi = {
     pick: (picker) =>
       Effect.callback((resume) => {
@@ -618,6 +638,8 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   const gatewayFailed = (command: string) => (cause: Cause.Cause<unknown>) =>
     new CommandError({ command, message: describeCause(cause) });
   const session: ChatSession = {
+    remoteControl: (args) =>
+      remoteCommand(remote, args, Ref.get(conversation), (code) => Effect.sync(() => tui.qr(code))),
     agent: agent.name,
     model: Ref.get(model),
     setModel: chooseModel,

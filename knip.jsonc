@@ -8,8 +8,9 @@
       "ignoreDependencies": ["@magentic/bridge-github", "@magentic/plugin", "@magentic/protocol"],
     },
   },
-  // Placeholders for phases 3 and 4; they hold no code yet.
-  "ignoreWorkspaces": ["packages/surface-cursor", "packages/surface-slack"],
+  // The relay keeps a separate Worker toolchain and checks its deployment entries
+  // with its own check command. The surface packages are still placeholders.
+  "ignoreWorkspaces": ["apps/relay", "packages/surface-cursor", "packages/surface-slack"],
   // Installed by `effect-tsgo patch` into TypeScript itself, not as a package.
   "ignoreDependencies": ["@effect/language-service"],
 }

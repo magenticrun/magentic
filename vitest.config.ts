@@ -13,6 +13,10 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["apps/*/src/**/*.test.{ts,tsx}", "packages/*/src/**/*.test.{ts,tsx}"],
+    include: [
+      "apps/*/src/**/*.test.{ts,tsx}",
+      "packages/*/src/**/*.test.{ts,tsx}",
+      "apps/relay/test/**/*.test.ts",
+    ],
   },
 });

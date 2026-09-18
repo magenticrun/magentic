@@ -470,6 +470,78 @@ layer(FlakyLayer)("Runner retries", (it) => {
   );
 });
 
+/** What a dropped connection leaves: the stream ends where it is, and the call fails. */
+const streamCut = new AiError.AiError({
+  module: "Fake",
+  method: "streamText",
+  reason: new AiError.InvalidOutputError({ description: "Failed to decode response" }),
+});
+
+/** The first call is cut after the model has begun answering; the second picks it up. */
+const cutOff: FakeScript = ({ index, options }) =>
+  index === 0
+    ? { parts: [{ type: "text", text: "the lint failure is " }], cutBy: streamCut }
+    : [{ type: "text", text: `formatting only, messages=${options.prompt.content.length}` }];
+
+const CutOffLayer = Runner.layer.pipe(
+  Layer.provideMerge(
+    Layer.mergeAll(
+      PluginHost.layer({
+        plugins: [builtin(fakeProviderPlugin(cutOff))],
+        paths: { config: "/nonexistent", workspace: "/nonexistent", data: "/nonexistent" },
+      }).pipe(Layer.provide(ToolCallGuard.layerAllowAll)),
+      ConversationStore.layerMemory,
+      Steering.layer,
+      Notices.layer,
+      ScheduledTasks.layer.pipe(Layer.provide(ScheduledTaskStore.layerMemory)),
+    ),
+  ),
+  Layer.provideMerge(
+    Layer.mergeAll(BunServices.layer, FetchHttpClient.layer, ModelCatalog.layerSnapshot),
+  ),
+);
+
+layer(CutOffLayer)("Runner picks up a cut answer", (it) => {
+  it.effect("carries on from what the model said when the stream died mid-answer", () =>
+    Effect.gen(function* () {
+      const runner = yield* Runner;
+      const collecting = yield* Effect.forkChild(
+        Stream.runCollect(
+          runner.run({
+            agent: talker,
+            principal: alice,
+            input: "does lint pass?",
+            attachments: [],
+            conversationId: Option.none(),
+            model: Option.none(),
+            directory: Option.none(),
+            reasoning: Option.none(),
+          }),
+        ),
+      );
+      yield* TestClock.adjust("1 minute");
+      const events = yield* Fiber.join(collecting);
+      // What the cut call said stays on the surface; the run does not end on it.
+      assert.deepStrictEqual(
+        events.map((e) => e._tag),
+        ["RunStarted", "TextDelta", "Retrying", "TextDelta", "TokenUsage", "RunFinished"],
+      );
+      const begun = events[1];
+      assert.isTrue(begun?._tag === "TextDelta" && begun.text === "the lint failure is ");
+      const picking = events[2];
+      assert.isTrue(
+        picking?._tag === "Retrying" && picking.message.includes("Failed to decode response"),
+      );
+      // The half answer went back with the history, and the input did not go twice:
+      // system, the question, and what the model got out before the stream died.
+      const rest = events[3];
+      assert.isTrue(rest?._tag === "TextDelta" && rest.text === "formatting only, messages=3");
+      const finished = events[5];
+      assert.isTrue(finished?._tag === "RunFinished" && finished.reason === "stop");
+    }),
+  );
+});
+
 /**
  * Asks for the file again on every call, so only the step limit ends the run,
  * and answers in text when the call comes with no tools, as a provider does.

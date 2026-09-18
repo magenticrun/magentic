@@ -143,19 +143,19 @@ const parseJson = (text: string) =>
   });
 
 /** Where the live catalog comes from. */
-export const modelsUrl = Config.string("MAGENTIC_MODELS_URL").pipe(
+export const modelsUrl = Config.String("MAGENTIC_MODELS_URL").pipe(
   Config.withDefault("https://models.dev/api.json"),
 );
 
 /** The on-disk copy of the last fetch. Shared by the gateway and the CLI. */
-export const modelsCacheFile = Config.string("MAGENTIC_MODELS_CACHE").pipe(
+export const modelsCacheFile = Config.String("MAGENTIC_MODELS_CACHE").pipe(
   Config.orElse(() =>
-    Config.map(Config.string("HOME"), (home) => `${home}/.cache/magentic/models.json`),
+    Config.map(Config.String("HOME"), (home) => `${home}/.cache/magentic/models.json`),
   ),
 );
 
 /** Never fetch; use the cache if present, else the bundled snapshot. */
-export const modelsOffline = Config.schema(Config.Boolean, "MAGENTIC_MODELS_OFFLINE").pipe(
+export const modelsOffline = Config.Boolean("MAGENTIC_MODELS_OFFLINE").pipe(
   Config.withDefault(false),
 );
 

@@ -9,7 +9,6 @@ export interface Palette {
   readonly text: string;
   readonly muted: string;
   readonly border: string;
-  readonly placeholder: string;
   /** The dot in the logo, the spinner and the welcome frame. */
   readonly accent: string;
   readonly success: string;
@@ -33,7 +32,6 @@ const dark: Palette = {
   text: "#e5e7eb",
   muted: "#9ca3af",
   border: "#4b5563",
-  placeholder: "#6b7280",
   accent: BRAND,
   success: "#86efac",
   error: "#fca5a5",
@@ -48,7 +46,6 @@ const light: Palette = {
   text: "#1f2937",
   muted: "#6b7280",
   border: "#9ca3af",
-  placeholder: "#9ca3af",
   accent: BRAND,
   success: "#15803d",
   error: "#b91c1c",

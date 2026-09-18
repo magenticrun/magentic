@@ -46,8 +46,17 @@ import { estimateContext } from "./ContextEstimate.ts";
 import { ConversationStore } from "./ConversationStore.ts";
 import { describeCause } from "./Errors.ts";
 import { noticeMessage, scheduledMessage } from "./Marks.ts";
+import { cacheRetention, withCachePoints } from "./PromptCache.ts";
 import { RunEventBus } from "./EventBus.ts";
-import { rejectedToolCall, retryPolicy, toRetryEvent } from "./Retry.ts";
+import {
+  MAX_RESUMES,
+  modelFailure,
+  rejectedToolCall,
+  resumeDelay,
+  retryPolicy,
+  shouldRetry,
+  toRetryEvent,
+} from "./Retry.ts";
 import { ModelRegistry } from "./plugin/ModelRegistry.ts";
 import { ToolRegistry } from "./plugin/ToolRegistry.ts";
 import { ScheduledTasks } from "./ScheduledTasks.ts";
@@ -295,22 +304,19 @@ const withNotices = (notices: ReadonlyArray<string>, input: Prompt.RawInput): Pr
 
 /**
  * What the model hears when the provider threw its tool call out: the
- * complaint and the arguments it sent, neither of which is in the history,
- * after whatever the step was already going to say, so nothing of the input
- * is lost when the very first call is the one thrown out.
+ * complaint, which is not in the history, after whatever the step was already
+ * going to say, so nothing of the input is lost when the very first call is
+ * the one thrown out.
  */
 const correctionPrompt = (
   prompt: Prompt.RawInput,
   rejected: AiError.ToolParameterValidationError,
-): Prompt.RawInput => {
-  const params = JSON.stringify(rejected.toolParams);
-  const shown = params.length > PARAMS_SHOWN ? `${params.slice(0, PARAMS_SHOWN)}…` : params;
-  return Prompt.concat(
+): Prompt.RawInput =>
+  Prompt.concat(
     Prompt.make(prompt),
-    `Your ${rejected.toolName} call did not run: its arguments ${shown} do not match the tool's ` +
+    `Your ${rejected.toolName} call did not run because its arguments do not match the tool's ` +
       `schema. ${rejected.description}. Call it again with arguments the schema allows.`,
   );
-};
 
 /**
  * A conversation open for a run: the chat holds what the model sees, the
@@ -318,7 +324,7 @@ const correctionPrompt = (
  * still shows everything.
  */
 interface Opened {
-  readonly chat: Chat.Service;
+  readonly chat: Chat.Chat;
   readonly archived: Ref.Ref<ReadonlyArray<Prompt.Message>>;
 }
 
@@ -356,6 +362,7 @@ export class Runner extends Context.Service<
       const steering = yield* Steering;
       const notices = yield* Notices;
       const schedules = yield* ScheduledTasks;
+      const retention = yield* cacheRetention;
 
       /**
        * The conversation's chat, restored from the store when it has one. A
@@ -461,7 +468,7 @@ export class Runner extends Context.Service<
        */
       const compactOpened = Effect.fn("Runner.compactOpened")(function* (
         opened: Opened,
-        model: LanguageModel.Service,
+        model: LanguageModel.LanguageModel,
         keep: number,
       ) {
         const done = yield* compactContext(yield* Ref.get(opened.chat.history), keep).pipe(
@@ -681,36 +688,46 @@ export class Runner extends Context.Service<
                   let closing = false;
                   /** Tool calls the provider threw out so far, over the whole run. */
                   const corrected = yield* Ref.make(0);
+                  /** Answers cut short and picked up again, over the whole run. */
+                  const resumed = yield* Ref.make(0);
                   for (let step = 1; ; step++) {
                     const calledTool = yield* Ref.make(false);
                     const usage = yield* Ref.make(Option.none<Response.Usage>());
                     // A call that fails before anything reached the surface is tried
                     // again from the same history: the chat appends the prompt and
                     // whatever came back even when the stream fails. One that fails
-                    // after speaking is not, so nothing shows twice.
+                    // after speaking is not, so nothing shows twice; it is picked
+                    // up from what it said instead, below.
                     const before = yield* Ref.get(chat.history);
                     const spoke = yield* Ref.make(false);
+                    // Where the call asks Anthropic to read back what it was
+                    // already sent. The history and the input are marked
+                    // together: the moving marker belongs on the last message
+                    // of the call, which is in the input when it carries one.
+                    const cached = withCachePoints(before, prompt, retention);
                     const attempt = Effect.andThen(
-                      Ref.set(chat.history, before),
-                      chat.streamText({ prompt, toolkit: closing ? bare : tools }).pipe(
-                        Stream.provideService(LanguageModel.LanguageModel, model),
-                        withThinking,
-                        Stream.runForEach((part) =>
-                          Effect.gen(function* () {
-                            if (part.type === "tool-call") {
-                              yield* Ref.set(calledTool, true);
-                            }
-                            if (part.type === "finish") {
-                              yield* Ref.set(finishReason, part.reason);
-                              yield* Ref.set(usage, Option.some(part.usage));
-                            }
-                            for (const event of toEvents(part)) {
-                              yield* Ref.set(spoke, true);
-                              yield* emit(event);
-                            }
-                          }),
+                      Ref.set(chat.history, cached.history),
+                      chat
+                        .streamText({ prompt: cached.input, toolkit: closing ? bare : tools })
+                        .pipe(
+                          Stream.provideService(LanguageModel.LanguageModel, model),
+                          withThinking,
+                          Stream.runForEach((part) =>
+                            Effect.gen(function* () {
+                              if (part.type === "tool-call") {
+                                yield* Ref.set(calledTool, true);
+                              }
+                              if (part.type === "finish") {
+                                yield* Ref.set(finishReason, part.reason);
+                                yield* Ref.set(usage, Option.some(part.usage));
+                              }
+                              for (const event of toEvents(part)) {
+                                yield* Ref.set(spoke, true);
+                                yield* emit(event);
+                              }
+                            }),
+                          ),
                         ),
-                      ),
                     );
                     const call = yield* Effect.exit(
                       Effect.retry(
@@ -725,7 +742,37 @@ export class Runner extends Context.Service<
                       const rejected = rejectedToolCall(call.cause);
                       const corrections = yield* Ref.get(corrected);
                       if (Option.isNone(rejected) || corrections >= MAX_CORRECTIONS) {
-                        return yield* call;
+                        // A call that died after the model began answering cannot
+                        // be tried again, but what it said is in the history, so
+                        // the run picks the answer up in another call rather than
+                        // ending on half of one. Not when a tool call was among
+                        // what arrived: one left without its result would fail
+                        // every call after it.
+                        const resumes = yield* Ref.get(resumed);
+                        const began = yield* Ref.get(spoke);
+                        const ranTool = yield* Ref.get(calledTool);
+                        const cut =
+                          began && !ranTool && resumes < MAX_RESUMES
+                            ? Option.filter(modelFailure(call.cause), shouldRetry)
+                            : Option.none<AiError.AiError>();
+                        if (Option.isNone(cut)) {
+                          return yield* call;
+                        }
+                        yield* Ref.set(resumed, resumes + 1);
+                        const delay = yield* resumeDelay(resumes + 1, cut.value);
+                        yield* emit(
+                          toRetryEvent({
+                            attempt: resumes + 1,
+                            limit: MAX_RESUMES,
+                            error: cut.value,
+                            delay,
+                          }),
+                        );
+                        yield* Effect.sleep(delay);
+                        // The prompt went out with the call that failed, and the
+                        // chat kept it; this one carries the history alone.
+                        prompt = [];
+                        continue;
                       }
                       // Nothing of a response that died on a bad tool call is in the
                       // history, so the model hears what the call got wrong and takes

@@ -31,9 +31,9 @@ type Keys = ReadonlyMap<ApiKeyProvider, Redacted.Redacted<string>>;
 const storage = (message: string) => new ApiKeyStoreError({ message });
 
 /** Where the gateway and the CLI keep API keys. Never inside the config directory. */
-export const apiKeysFile = Config.string("MAGENTIC_API_KEYS_FILE").pipe(
+export const apiKeysFile = Config.String("MAGENTIC_API_KEYS_FILE").pipe(
   Config.orElse(() =>
-    Config.map(Config.string("HOME"), (home) => `${home}/.config/magentic/api-keys.json`),
+    Config.map(Config.String("HOME"), (home) => `${home}/.config/magentic/api-keys.json`),
   ),
 );
 

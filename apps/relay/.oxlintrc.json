@@ -1,0 +1,27 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oxc-project/oxc/main/npm/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "import", "oxc", "eslint", "unicorn", "node"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "error"
+  },
+  "ignorePatterns": ["**/node_modules", "**/dist"],
+  "rules": {
+    "typescript/consistent-type-imports": ["error", { "fixStyle": "inline-type-imports" }],
+    "typescript/no-import-type-side-effects": "error",
+    "typescript/array-type": ["error", { "default": "generic", "readonly": "generic" }],
+    "typescript/no-unused-vars": [
+      "error",
+      { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }
+    ],
+    "import/no-duplicates": "error",
+    "import/no-self-import": "error",
+    "eslint/no-var": "error",
+    "eslint/no-unneeded-ternary": "error",
+    "eslint/no-unused-vars": "off",
+    "eslint/no-await-in-loop": "off",
+    "typescript/no-explicit-any": "error",
+    "unicorn/prefer-array-flat-map": "error"
+  }
+}

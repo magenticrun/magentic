@@ -17,7 +17,7 @@ interface Built {
    * built again; none means signed out.
    */
   readonly signature: string;
-  readonly model: LanguageModel.Service;
+  readonly model: LanguageModel.LanguageModel;
   /** Closed when the model is replaced, releasing what its layer acquired. */
   readonly scope: Scope.Closeable;
 }
@@ -55,7 +55,9 @@ export class ModelRegistry extends Context.Service<
      * The model `resolve` lands on, built once per provider and model and
      * kept until the provider's credentials change or it signs out.
      */
-    languageModel(ref: Option.Option<string>): Effect.Effect<LanguageModel.Service, ModelFailure>;
+    languageModel(
+      ref: Option.Option<string>,
+    ): Effect.Effect<LanguageModel.LanguageModel, ModelFailure>;
   }
 >()("magentic/core/ModelRegistry") {}
 

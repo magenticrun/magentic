@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "magentic-relay",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-06-01",
+  "observability": { "enabled": true },
+  // One gateway on one hostname, so RELAY_GATEWAY names it and RELAY_ZONE stays empty.
+  "routes": [{ "pattern": "relay1.magentic.run", "custom_domain": true }],
+  "durable_objects": {
+    // One object per gateway. Both ends of that gateway's tunnel land on it.
+    "bindings": [{ "name": "GATEWAY", "class_name": "GatewayLink" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GatewayLink"] }],
+  "vars": {
+    // The hostname suffix that names a gateway, so `laptop.relay.example.com`
+    // reaches the gateway `laptop`. Leave it empty for a one-gateway relay and
+    // set RELAY_GATEWAY instead.
+    "RELAY_ZONE": "",
+    "RELAY_GATEWAY": "laptop",
+  },
+  // RELAY_ADMIN_TOKEN is a secret:
+  //   bunx wrangler secret put RELAY_ADMIN_TOKEN
+}

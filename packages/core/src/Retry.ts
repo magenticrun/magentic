@@ -96,6 +96,12 @@ export const retryPolicy = <R>(
     }),
   );
 
+/** The model call's own failure in a cause, when that is what ended the step. */
+export const modelFailure = (cause: Cause.Cause<unknown>): Option.Option<AiError.AiError> =>
+  Option.flatMap(Cause.findErrorOption(cause), (error) =>
+    AiError.isAiError(error) ? Option.some(error) : Option.none(),
+  );
+
 /**
  * The tool call the provider threw out before it ran, when that is what failed
  * the model call. An endpoint that does not hold the model to the tool schema
@@ -105,14 +111,29 @@ export const retryPolicy = <R>(
  */
 export const rejectedToolCall = (
   cause: Cause.Cause<unknown>,
-): Option.Option<AiError.ToolParameterValidationError> => {
-  const error = Cause.findErrorOption(cause);
-  if (Option.isNone(error) || !AiError.isAiError(error.value)) {
-    return Option.none();
-  }
-  const { reason } = error.value;
-  return reason._tag === "ToolParameterValidationError" ? Option.some(reason) : Option.none();
-};
+): Option.Option<AiError.ToolParameterValidationError> =>
+  Option.flatMap(modelFailure(cause), ({ reason }) =>
+    reason._tag === "ToolParameterValidationError" ? Option.some(reason) : Option.none(),
+  );
+
+/**
+ * A call the model had already begun answering when it failed: a stream cut
+ * partway through, most often. It cannot be tried again, since the surface
+ * would show what was said twice, but what arrived is in the history, so the
+ * run picks the answer up from there instead of ending on it. This many times
+ * over a run: a connection that keeps dying mid-answer will not finish one.
+ */
+export const MAX_RESUMES = 3;
+
+/**
+ * The wait before a call is picked up again, the same backoff a retry takes,
+ * so a provider that just dropped the connection is given the same room.
+ */
+export const resumeDelay = (
+  attempt: number,
+  error: AiError.AiError,
+): Effect.Effect<Duration.Duration> =>
+  Effect.map(Random.next, (random) => delayFor(attempt, error, random));
 
 /** The event a surface gets for one retry. */
 export const toRetryEvent = (retrying: Retrying): RunEvent => ({

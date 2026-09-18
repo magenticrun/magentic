@@ -21,6 +21,7 @@
     "@magentic/plugin": "workspace:*",
     "@magentic/protocol": "workspace:*",
     "@opentui/core": "catalog:",
+    "@opentui/qrcode": "catalog:",
     "@opentui/solid": "catalog:",
     "effect": "catalog:",
     "solid-js": "catalog:"
