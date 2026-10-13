@@ -132,6 +132,11 @@ Each is a `Context.Service` with static layers. Ids are `magentic/core/<Name>`.
   the team), `principal` (private to one person), `conversation`. Storage is `KeyValueStore`
   first, SQL with full-text search second, embeddings (`EmbeddingModel`) third.
 - **ConversationStore**: `get(id)`, `history(id)`, `list`, `save(info, chatJson)`, `remove(id)`.
+- **SessionIndex**: an SQLite FTS5 index of every conversation in `sessions.db`, kept current by
+  wrapping the `ConversationStore` (save reindexes, update rewrites the details, remove deletes)
+  and caught up from the histories at start. It indexes what was said, summaries, and tool
+  arguments, not tool results. The `session_search` and `session_read` tools (capability
+  `session:read`) reach only the caller's own conversations.
   History is `Chat.exportJson` output, opaque to us, so it survives model provider changes;
   beside it sits a `Conversation` record (agent, principal, title from the first input, the
   model of the latest run, the directory the surface started it from, timestamps, message

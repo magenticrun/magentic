@@ -215,6 +215,18 @@ performed as the GitHub App.
 See the [plugin guide](docs/plugins.md) for setup. External plugins run with the
 gateway's privileges; only load code you trust.
 
+Agents can look through your earlier conversations with two tools.
+`session_search` finds conversations by the words in them, and `session_read`
+reads the exchange around a match. Both reach only your own conversations, and
+search leaves out the current one. The built-in `assistant` has them; add them
+to an agent's `tools` to grant them.
+
+The gateway keeps a full-text index in `sessions.db` under the data directory.
+It covers what you and the agent wrote, compaction summaries, and tool arguments,
+but not tool results. Saving, renaming, or deleting a conversation updates the
+index. Conversations saved while the gateway was stopped are indexed when it
+starts, so deleting `sessions.db` while the gateway is stopped is safe.
+
 ## Tracing
 
 The gateway traces every run: each model call with its latency, time to first
