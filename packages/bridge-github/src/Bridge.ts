@@ -12,7 +12,7 @@ import {
   renderContext,
   trackProgress,
 } from "@magentic/plugin";
-import { Clock, DateTime, Duration, Effect, Option, Ref, Schema, Stream } from "effect";
+import { Cache, Data, DateTime, Duration, Effect, Exit, Option, Ref, Schema, Stream } from "effect";
 import type { GitHubBridgeConfig } from "./Config.ts";
 import { conversationIdFor, type Mention, pullOf, PullRequest } from "./Events.ts";
 import { type GitHubApi, type GitHubApiError, type GitHubAuth, latest } from "./GitHubApi.ts";
@@ -48,16 +48,23 @@ const Comments = Schema.Array(
 
 /** How long a permission lookup is trusted before GitHub is asked again. */
 const PERMISSION_TTL = Duration.minutes(5);
+/** How many people's permissions are remembered at once. */
+const PERMISSION_CAPACITY = 1024;
 /** Comments carried into the first run on a thread, when there is no earlier run to count from. */
 const FIRST_RUN_COMMENTS = 10;
 
 const toPermission = (value: string): Permission =>
   value === "admin" || value === "write" || value === "read" ? value : "none";
 
-const repoPath = (mention: Mention) =>
+/** Where a request about a repository goes, and as whom. */
+type RepositoryRef = Pick<Mention, "installationId"> & {
+  readonly repository: Pick<Mention["repository"], "owner" | "repo">;
+};
+
+const repoPath = (mention: RepositoryRef) =>
   `/repos/${encodeURIComponent(mention.repository.owner)}/${encodeURIComponent(mention.repository.repo)}`;
 
-const authFor = (mention: Mention): GitHubAuth =>
+const authFor = (mention: RepositoryRef): GitHubAuth =>
   Option.match(mention.installationId, {
     onNone: () => ({
       _tag: "Repository",
@@ -66,6 +73,16 @@ const authFor = (mention: Mention): GitHubAuth =>
     }),
     onSome: (installationId) => ({ _tag: "Installation", installationId }),
   });
+
+/** Everything a permission lookup reads from a mention, so equal questions share one answer. */
+class PermissionQuery extends Data.Class<{
+  readonly owner: string;
+  readonly repo: string;
+  readonly login: string;
+  readonly association: string;
+  readonly ownerIsOrganization: boolean;
+  readonly installationId: Option.Option<number>;
+}> {}
 
 const toolLines = (state: ProgressState) =>
   state.tools.map(
@@ -103,38 +120,32 @@ const renderLog = (slug: string, state: ProgressState): string => {
 const footer = (conversationId: string) =>
   `\n\n<sub>magentic · conversation \`${conversationId}\`</sub>`;
 
-export const handleMention = (deps: BridgeDeps) => {
+export const handleMention = Effect.fn("githubBridge.handleMentionFor")(function* (
+  deps: BridgeDeps,
+) {
   const { config, api, handle, state, permits, capabilities } = deps;
   const delivery = Option.getOrElse(config.progressAfter, () => deliveryFor(capabilities));
-  /** Permission lookups, by `owner/repo/login`, for a few minutes. */
-  const permissionCache = new Map<
-    string,
-    {
-      readonly groups: ReadonlyArray<string>;
-      readonly permission: Permission;
-      readonly until: number;
-    }
-  >();
 
   /** What the person may do in the repository, from GitHub, not from `author_association`. */
-  const groupsOf = Effect.fn("githubBridge.groupsOf")(function* (mention: Mention) {
-    const login = mention.author.login;
-    const key = `${mention.repository.owner}/${mention.repository.repo}/${login}`.toLowerCase();
-    const now = yield* Clock.currentTimeMillis;
-    const cached = permissionCache.get(key);
-    if (cached !== undefined && cached.until > now) {
-      return cached;
-    }
+  const lookupPermission = Effect.fn("githubBridge.lookupPermission")(function* (
+    query: PermissionQuery,
+  ) {
+    const { login } = query;
+    const where: RepositoryRef = {
+      repository: { owner: query.owner, repo: query.repo },
+      installationId: query.installationId,
+    };
+    const key = `${query.owner}/${query.repo}/${login}`.toLowerCase();
     // `NONE` is a hint that saves the call for a stranger; anyone else is asked about.
     const allowListed = config.allow.logins.has(login.toLowerCase());
     const permission =
-      mention.author.association === "NONE" && !allowListed
+      query.association === "NONE" && !allowListed
         ? "none"
         : yield* api
             .request(
-              authFor(mention),
+              authFor(where),
               "GET",
-              `${repoPath(mention)}/collaborators/${encodeURIComponent(login)}/permission`,
+              `${repoPath(where)}/collaborators/${encodeURIComponent(login)}/permission`,
               { schema: PermissionResponse },
             )
             .pipe(
@@ -149,12 +160,12 @@ export const handleMention = (deps: BridgeDeps) => {
             );
     // A stranger is not a member; only someone with a standing is asked about.
     const member =
-      mention.repository.ownerIsOrganization && (permission !== "none" || allowListed)
+      query.ownerIsOrganization && (permission !== "none" || allowListed)
         ? yield* api
             .request(
-              authFor(mention),
+              authFor(where),
               "GET",
-              `/orgs/${encodeURIComponent(mention.repository.owner)}/members/${encodeURIComponent(login)}`,
+              `/orgs/${encodeURIComponent(query.owner)}/members/${encodeURIComponent(login)}`,
               { schema: Schema.NullOr(Schema.Json) },
             )
             .pipe(
@@ -162,14 +173,28 @@ export const handleMention = (deps: BridgeDeps) => {
               Effect.catchTag("GitHubApiError", () => Effect.succeed(false)),
             )
         : false;
-    const found = {
+    return {
       permission,
       groups: [permission, ...(member ? ["org-member"] : []), ...(allowListed ? ["allowed"] : [])],
-      until: now + Duration.toMillis(PERMISSION_TTL),
     };
-    permissionCache.set(key, found);
-    return found;
   });
+  // Concurrent mentions by one person share a single lookup; a failed one is not remembered.
+  const permissions = yield* Cache.makeWith(lookupPermission, {
+    capacity: PERMISSION_CAPACITY,
+    timeToLive: (exit) => (Exit.isSuccess(exit) ? PERMISSION_TTL : Duration.zero),
+  });
+  const groupsOf = (mention: Mention) =>
+    Cache.get(
+      permissions,
+      new PermissionQuery({
+        owner: mention.repository.owner,
+        repo: mention.repository.repo,
+        login: mention.author.login,
+        association: mention.author.association,
+        ownerIsOrganization: mention.repository.ownerIsOrganization,
+        installationId: mention.installationId,
+      }),
+    );
 
   const react = Effect.fn("githubBridge.react")(function* (mention: Mention) {
     const path = (() => {
@@ -568,4 +593,4 @@ export const handleMention = (deps: BridgeDeps) => {
       text,
     );
   });
-};
+});

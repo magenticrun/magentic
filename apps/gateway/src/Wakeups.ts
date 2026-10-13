@@ -116,90 +116,93 @@ export class Wakeups extends Context.Service<
         });
 
       /** One wake-up of the conversation, as its followers asked for, and what it emits to them. */
-      const wakeOnce = (conversationId: string, token: string, options: FollowOptions) =>
-        Effect.gen(function* () {
-          const info = yield* store.get(conversationId);
-          const runId = yield* Ref.make(Option.none<string>());
-          const ended = yield* Ref.make(false);
-          yield* runner
-            .wake({
-              agent: options.agent,
-              principal: options.principal,
-              conversationId,
-              model: Option.flatMap(info, (c) => Option.fromNullishOr(c.model)),
-              reasoning: options.reasoning,
-            })
-            .pipe(
-              Stream.runForEach((event) =>
-                Effect.gen(function* () {
-                  if (event._tag === "RunStarted") {
-                    yield* Ref.set(runId, Option.some(event.runId));
-                    yield* Ref.update(inFlight, (all) =>
-                      new Map(all).set(event.runId, { token, principal: options.principal.id }),
-                    );
-                    yield* update(conversationId, (entry) => ({ ...entry, started: true }));
-                    yield* audit.record(
-                      new AuditEvent({
-                        at: yield* DateTime.now,
-                        principal: options.principal,
-                        action: "run.woken",
-                        detail: { runId: event.runId, conversationId, agent: options.agent.name },
-                      }),
-                    );
-                  }
-                  if (event._tag === "RunFinished" || event._tag === "RunFailed") {
-                    yield* Ref.set(ended, true);
-                  }
-                  yield* PubSub.publish(events, { conversationId, event });
-                }),
-              ),
-              Effect.catchCause((cause) =>
-                Effect.logWarning(`wake-up of conversation ${conversationId} failed`, cause),
-              ),
-              // A stop interrupts the fiber reading the run, so the end the
-              // runner emits goes unread; the followers hear of it here.
-              Effect.ensuring(
-                Effect.gen(function* () {
-                  const started = yield* Ref.get(runId);
-                  if (Option.isSome(started)) {
-                    yield* forget(started.value);
-                    if (!(yield* Ref.get(ended))) {
-                      yield* PubSub.publish(events, {
-                        conversationId,
-                        event: { _tag: "RunFinished", reason: INTERRUPTED_REASON },
-                      });
-                    }
-                  }
-                  yield* Ref.update(fibers, (all) => {
-                    const next = new Map(all);
-                    next.delete(token);
-                    return next;
-                  });
-                  const again = yield* Ref.modify(
-                    followed,
-                    (all): [boolean, Map<string, Followed>] => {
-                      const entry = all.get(conversationId);
-                      if (entry === undefined || !Option.contains(entry.wake, token)) {
-                        return [false, all];
-                      }
-                      return [
-                        entry.again,
-                        new Map(all).set(conversationId, {
-                          ...entry,
-                          wake: Option.none(),
-                          started: false,
-                          again: false,
-                        }),
-                      ];
-                    },
+      const wakeOnce = Effect.fn("Wakeups.wakeOnce")(function* (
+        conversationId: string,
+        token: string,
+        options: FollowOptions,
+      ) {
+        const info = yield* store.get(conversationId);
+        const runId = yield* Ref.make(Option.none<string>());
+        const ended = yield* Ref.make(false);
+        yield* runner
+          .wake({
+            agent: options.agent,
+            principal: options.principal,
+            conversationId,
+            model: Option.flatMap(info, (c) => Option.fromNullishOr(c.model)),
+            reasoning: options.reasoning,
+          })
+          .pipe(
+            Stream.runForEach((event) =>
+              Effect.gen(function* () {
+                if (event._tag === "RunStarted") {
+                  yield* Ref.set(runId, Option.some(event.runId));
+                  yield* Ref.update(inFlight, (all) =>
+                    new Map(all).set(event.runId, { token, principal: options.principal.id }),
                   );
-                  if (again) {
-                    yield* wake(conversationId);
+                  yield* update(conversationId, (entry) => ({ ...entry, started: true }));
+                  yield* audit.record(
+                    new AuditEvent({
+                      at: yield* DateTime.now,
+                      principal: options.principal,
+                      action: "run.woken",
+                      detail: { runId: event.runId, conversationId, agent: options.agent.name },
+                    }),
+                  );
+                }
+                if (event._tag === "RunFinished" || event._tag === "RunFailed") {
+                  yield* Ref.set(ended, true);
+                }
+                yield* PubSub.publish(events, { conversationId, event });
+              }),
+            ),
+            Effect.catchCause((cause) =>
+              Effect.logWarning(`wake-up of conversation ${conversationId} failed`, cause),
+            ),
+            // A stop interrupts the fiber reading the run, so the end the
+            // runner emits goes unread; the followers hear of it here.
+            Effect.ensuring(
+              Effect.gen(function* () {
+                const started = yield* Ref.get(runId);
+                if (Option.isSome(started)) {
+                  yield* forget(started.value);
+                  if (!(yield* Ref.get(ended))) {
+                    yield* PubSub.publish(events, {
+                      conversationId,
+                      event: { _tag: "RunFinished", reason: INTERRUPTED_REASON },
+                    });
                   }
-                }),
-              ),
-            );
-        });
+                }
+                yield* Ref.update(fibers, (all) => {
+                  const next = new Map(all);
+                  next.delete(token);
+                  return next;
+                });
+                const again = yield* Ref.modify(
+                  followed,
+                  (all): [boolean, Map<string, Followed>] => {
+                    const entry = all.get(conversationId);
+                    if (entry === undefined || !Option.contains(entry.wake, token)) {
+                      return [false, all];
+                    }
+                    return [
+                      entry.again,
+                      new Map(all).set(conversationId, {
+                        ...entry,
+                        wake: Option.none(),
+                        started: false,
+                        again: false,
+                      }),
+                    ];
+                  },
+                );
+                if (again) {
+                  yield* wake(conversationId);
+                }
+              }),
+            ),
+          );
+      });
 
       /** Queue a wake-up of the conversation, unless one is queued or in flight, or nobody follows it. */
       const wake: (conversationId: string) => Effect.Effect<void> = Effect.fn("Wakeups.wake")(
@@ -234,18 +237,17 @@ export class Wakeups extends Context.Service<
       );
 
       /** A notice landed: wake the conversation, or wake it again after the run in flight, which may have checked already. */
-      const landed = (conversationId: string) =>
-        Effect.gen(function* () {
-          const entry = (yield* Ref.get(followed)).get(conversationId);
-          if (entry === undefined) {
-            return;
-          }
-          if (Option.isNone(entry.wake)) {
-            yield* wake(conversationId);
-          } else if (entry.started) {
-            yield* update(conversationId, (current) => ({ ...current, again: true }));
-          }
-        });
+      const landed = Effect.fn("Wakeups.landed")(function* (conversationId: string) {
+        const entry = (yield* Ref.get(followed)).get(conversationId);
+        if (entry === undefined) {
+          return;
+        }
+        if (Option.isNone(entry.wake)) {
+          yield* wake(conversationId);
+        } else if (entry.started) {
+          yield* update(conversationId, (current) => ({ ...current, again: true }));
+        }
+      });
       yield* Effect.forkIn(Stream.runForEach(notices.posted, landed), scope);
       // A schedule that came due is one more thing for the conversation to
       // speak to, and reaches a run the same way a notice does: the row is
@@ -273,33 +275,32 @@ export class Wakeups extends Context.Service<
       );
 
       /** The last follower left: a wake-up not yet speaking is dropped; one speaking finishes and is saved. */
-      const leave = (conversationId: string) =>
-        Effect.gen(function* () {
-          const dropped = yield* Ref.modify(
-            followed,
-            (all): [Option.Option<string>, Map<string, Followed>] => {
-              const entry = all.get(conversationId);
-              if (entry === undefined) {
-                return [Option.none(), all];
-              }
-              if (entry.followers > 1) {
-                return [
-                  Option.none(),
-                  new Map(all).set(conversationId, { ...entry, followers: entry.followers - 1 }),
-                ];
-              }
-              const next = new Map(all);
-              next.delete(conversationId);
-              return [entry.started ? Option.none() : entry.wake, next];
-            },
-          );
-          if (Option.isSome(dropped)) {
-            const fiber = (yield* Ref.get(fibers)).get(dropped.value);
-            if (fiber !== undefined) {
-              yield* Fiber.interrupt(fiber);
+      const leave = Effect.fn("Wakeups.leave")(function* (conversationId: string) {
+        const dropped = yield* Ref.modify(
+          followed,
+          (all): [Option.Option<string>, Map<string, Followed>] => {
+            const entry = all.get(conversationId);
+            if (entry === undefined) {
+              return [Option.none(), all];
             }
+            if (entry.followers > 1) {
+              return [
+                Option.none(),
+                new Map(all).set(conversationId, { ...entry, followers: entry.followers - 1 }),
+              ];
+            }
+            const next = new Map(all);
+            next.delete(conversationId);
+            return [entry.started ? Option.none() : entry.wake, next];
+          },
+        );
+        if (Option.isSome(dropped)) {
+          const fiber = (yield* Ref.get(fibers)).get(dropped.value);
+          if (fiber !== undefined) {
+            yield* Fiber.interrupt(fiber);
           }
-        });
+        }
+      });
 
       const follow = (options: FollowOptions): Stream.Stream<FollowEvent> =>
         Stream.unwrap(

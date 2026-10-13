@@ -56,56 +56,55 @@ const transportError = (request: HttpClientRequest.HttpClientRequest, descriptio
   });
 
 /** Assembles the JSON the non-streaming endpoint would have returned. */
-const collectFinalResponse = (
+const collectFinalResponse = Effect.fn("CodexStreamShim.collectFinalResponse")(function* (
   request: HttpClientRequest.HttpClientRequest,
   response: HttpClientResponse.HttpClientResponse,
-) =>
-  Effect.gen(function* () {
-    const text = yield* response.text;
-    const items: Array<typeof Schema.Unknown.Type> = [];
-    for (const chunk of text.split("\n\n")) {
-      for (const line of chunk.split("\n")) {
-        if (!line.startsWith("data:")) {
-          continue;
-        }
-        const decoded = Schema.decodeOption(StreamEvent)(line.slice(5).trim());
-        if (decoded._tag !== "Some") {
-          continue;
-        }
-        const event = decoded.value;
-        switch (event.type) {
-          case "response.output_item.done":
-            if (event.item !== undefined) {
-              items.push(event.item);
-            }
-            continue;
-          case "response.completed":
-          case "response.incomplete": {
-            if (event.response === undefined) {
-              continue;
-            }
-            const sent = Schema.decodeUnknownOption(OutputItems)(event.response["output"]);
-            const output = sent._tag === "Some" && sent.value.length > 0 ? sent.value : items;
-            return HttpClientResponse.fromWeb(
-              request,
-              new Response(JSON.stringify({ ...event.response, output }), {
-                status: 200,
-                headers: { "content-type": "application/json" },
-              }),
-            );
+) {
+  const text = yield* response.text;
+  const items: Array<typeof Schema.Unknown.Type> = [];
+  for (const chunk of text.split("\n\n")) {
+    for (const line of chunk.split("\n")) {
+      if (!line.startsWith("data:")) {
+        continue;
+      }
+      const decoded = Schema.decodeOption(StreamEvent)(line.slice(5).trim());
+      if (decoded._tag !== "Some") {
+        continue;
+      }
+      const event = decoded.value;
+      switch (event.type) {
+        case "response.output_item.done":
+          if (event.item !== undefined) {
+            items.push(event.item);
           }
-          case "response.failed":
-            return yield* transportError(
-              request,
-              `model request failed: ${JSON.stringify(event.response)}`,
-            );
-          default:
+          continue;
+        case "response.completed":
+        case "response.incomplete": {
+          if (event.response === undefined) {
             continue;
+          }
+          const sent = Schema.decodeUnknownOption(OutputItems)(event.response["output"]);
+          const output = sent._tag === "Some" && sent.value.length > 0 ? sent.value : items;
+          return HttpClientResponse.fromWeb(
+            request,
+            new Response(JSON.stringify({ ...event.response, output }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }),
+          );
         }
+        case "response.failed":
+          return yield* transportError(
+            request,
+            `model request failed: ${JSON.stringify(event.response)}`,
+          );
+        default:
+          continue;
       }
     }
-    return yield* transportError(request, "stream ended without a response.completed event");
-  });
+  }
+  return yield* transportError(request, "stream ended without a response.completed event");
+});
 
 export const withStreamOnlyBackend = (client: HttpClient.HttpClient): HttpClient.HttpClient => {
   /** Requests this shim rewrote, so the response side knows to collect the stream. */

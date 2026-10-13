@@ -181,11 +181,9 @@ export const ensureGateway = Effect.fn("Cli.ensureGateway")(function* (baseUrl: 
     // accepts before its routes are mounted. Wait for it rather than hand
     // the person a bind error for a server they never asked to start.
     return yield* Effect.as(waitForHealth, { client, embedded: false }).pipe(
-      Effect.catch(() =>
-        Effect.fail(
-          unreachable(
-            `nothing answers at ${baseUrl} and a gateway cannot be started there: ${describeCause(started.cause)}`,
-          ),
+      Effect.mapError(() =>
+        unreachable(
+          `nothing answers at ${baseUrl} and a gateway cannot be started there: ${describeCause(started.cause)}`,
         ),
       ),
     );

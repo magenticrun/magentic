@@ -176,7 +176,7 @@ export const githubBridgePlugin = define({
       provider: "github",
       capabilities,
     });
-    const onMention = handleMention({ config, api, handle, state, permits, capabilities });
+    const onMention = yield* handleMention({ config, api, handle, state, permits, capabilities });
     const guarded = (mention: Mention) =>
       onMention(mention).pipe(
         Effect.catchCause((cause) =>

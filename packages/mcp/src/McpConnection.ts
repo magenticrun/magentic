@@ -2,10 +2,13 @@ import { messageOf } from "@magentic/plugin";
 import {
   type CallToolResult,
   Client,
+  SdkHttpError,
   SSEClientTransport,
+  SseError,
   StreamableHTTPClientTransport,
   type Tool as McpToolDefinition,
   type Transport,
+  UnauthorizedError,
 } from "@modelcontextprotocol/client";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { Duration, Effect, Option, Path, Predicate, Queue, Schema } from "effect";
@@ -77,6 +80,58 @@ const forwardStderr = (transport: StdioClientTransport, events: Queue.Enqueue<Co
   });
 };
 
+/** A way to reach the server, and what to call it when it fails. */
+interface Candidate {
+  readonly name: string;
+  readonly transport: Transport;
+}
+
+/** One transport's failure to connect; `refused` is the status when the server said 401 or 403. */
+class AttemptFailed extends Schema.TaggedError<AttemptFailed>()("AttemptFailed", {
+  transport: Schema.String,
+  message: Schema.String,
+  refused: Schema.optional(Schema.Literals([401, 403])),
+}) {}
+
+const refusal = (status: number | undefined) =>
+  status === 401 || status === 403 ? status : undefined;
+
+/**
+ * The status when the server turned the client away rather than failing to
+ * answer: the SDK's own unauthorized error, or an HTTP error carrying 401 or 403.
+ */
+const refusedWith = (cause: unknown): 401 | 403 | undefined => {
+  if (UnauthorizedError.isInstance(cause)) {
+    return 401;
+  }
+  if (SdkHttpError.isInstance(cause)) {
+    return refusal(cause.status);
+  }
+  return SseError.isInstance(cause) ? refusal(cause.code) : undefined;
+};
+
+/**
+ * The one error a server that could not be reached reports. A refusal wins
+ * over whatever the other transport said: a server that answers the
+ * Streamable HTTP handshake with 401 usually answers the SSE fallback with
+ * something beside the point, such as 404 or 405, and reporting that would
+ * send a person looking in the wrong place. Otherwise every transport's
+ * error is kept, each under its name.
+ */
+const describeFailures = (failures: ReadonlyArray<AttemptFailed>): string => {
+  const refused = failures.find((failure) => failure.refused !== undefined);
+  if (refused !== undefined) {
+    return `the server refused the connection over ${refused.transport} (HTTP ${refused.refused}): ${refused.message}; check the credentials in the entry's headers`;
+  }
+  const [first, ...rest] = failures;
+  if (first === undefined) {
+    return "no transport to try";
+  }
+  return rest.length === 0
+    ? first.message
+    : failures.map((failure) => `${failure.transport}: ${failure.message}`).join("; ");
+};
+
 /** Builds the transports to try, in order. Remote servers get SSE as a fallback. */
 const transportsFor = Effect.fn("Mcp.transportsFor")(function* (
   config: McpServerConfig,
@@ -90,8 +145,8 @@ const transportsFor = Effect.fn("Mcp.transportsFor")(function* (
     const env = { ...getDefaultEnvironment(), ...config.environment };
     const stdio = new StdioClientTransport({ command, args, cwd, env, stderr: "pipe" });
     forwardStderr(stdio, events);
-    const transport: Transport = stdio;
-    return [transport];
+    const candidate: Candidate = { name: "stdio", transport: stdio };
+    return [candidate];
   }
   const url = yield* Effect.try({
     try: () => new URL(config.url),
@@ -99,8 +154,11 @@ const transportsFor = Effect.fn("Mcp.transportsFor")(function* (
   });
   const headers = config.headers;
   const options = headers === undefined ? {} : { requestInit: { headers } };
-  const streamable: Transport = new StreamableHTTPClientTransport(url, options);
-  const sse: Transport = new SSEClientTransport(url, options);
+  const streamable: Candidate = {
+    name: "Streamable HTTP",
+    transport: new StreamableHTTPClientTransport(url, options),
+  };
+  const sse: Candidate = { name: "SSE", transport: new SSEClientTransport(url, options) };
   return [streamable, sse];
 });
 
@@ -142,35 +200,42 @@ export const connect = Effect.fn("Mcp.connect")(function* (
   };
 
   /** A fresh client per transport: the SDK does not reconnect one that failed. */
-  const attempt = (transport: Transport) =>
-    Effect.gen(function* () {
-      const client = new Client(
-        { name: "magentic", version: "0.0.0" },
-        { capabilities: { roots: {} } },
-      );
-      attach(client);
-      const connected = yield* Effect.tryPromise({
-        try: (signal) => client.connect(transport, { signal, timeout }),
-        catch: (cause) => failed(messageOf(cause)),
-      }).pipe(Effect.timeoutOption(Duration.millis(timeout)));
-      if (Option.isNone(connected)) {
-        yield* Effect.tryPromise(() => client.close()).pipe(Effect.ignore);
-        return yield* failed(`no answer after ${timeout}ms`);
-      }
-      return client;
-    });
+  const attempt = Effect.fn("Mcp.attempt")(function* ({ name, transport }: Candidate) {
+    const client = new Client(
+      { name: "magentic", version: "0.0.0" },
+      { capabilities: { roots: {} } },
+    );
+    attach(client);
+    const connected = yield* Effect.tryPromise({
+      try: (signal) => client.connect(transport, { signal, timeout }),
+      catch: (cause) =>
+        new AttemptFailed({
+          transport: name,
+          message: messageOf(cause),
+          refused: refusedWith(cause),
+        }),
+    }).pipe(Effect.timeoutOption(Duration.millis(timeout)));
+    if (Option.isNone(connected)) {
+      yield* Effect.tryPromise(() => client.close()).pipe(Effect.ignore);
+      return yield* new AttemptFailed({
+        transport: name,
+        message: `no answer after ${timeout}ms`,
+      });
+    }
+    return client;
+  });
 
-  /** The first transport that completes the handshake; the last error when none does. */
+  /** The first transport that completes the handshake; every failure when none does. */
   const connectAny = Effect.gen(function* () {
-    let last = Option.none<McpError>();
-    for (const transport of transports) {
-      const outcome = yield* Effect.result(attempt(transport));
+    const failures: Array<AttemptFailed> = [];
+    for (const candidate of transports) {
+      const outcome = yield* Effect.result(attempt(candidate));
       if (outcome._tag === "Success") {
         return outcome.success;
       }
-      last = Option.some(outcome.failure);
+      failures.push(outcome.failure);
     }
-    return yield* Option.getOrElse(last, () => failed("no transport to try"));
+    return yield* failed(describeFailures(failures));
   });
 
   const client = yield* Effect.acquireRelease(connectAny, (c) =>

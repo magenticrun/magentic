@@ -1,4 +1,4 @@
-import { Effect, Option, Predicate, type Schema, Stream } from "effect";
+import { Effect, Option, Predicate, Schema, Stream } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 /**
@@ -66,17 +66,17 @@ export const normalizeAnthropicJson = (value: Schema.Json): Schema.Json => {
   }
 };
 
+/** Parsed JSON, or none for text that is not JSON. */
+const parseJson = Schema.decodeOption(Schema.fromJsonString(Schema.Json));
+
 /** One SSE line; only `data:` lines carrying JSON are touched. */
-export const normalizeSseLine = (line: string): string => {
-  if (!line.startsWith("data:")) {
-    return line;
-  }
-  try {
-    return `data: ${JSON.stringify(normalizeAnthropicJson(JSON.parse(line.slice(5))))}`;
-  } catch {
-    return line;
-  }
-};
+export const normalizeSseLine = (line: string): string =>
+  line.startsWith("data:")
+    ? Option.match(parseJson(line.slice(5)), {
+        onNone: () => line,
+        onSome: (json) => `data: ${JSON.stringify(normalizeAnthropicJson(json))}`,
+      })
+    : line;
 
 const isEventStream = (response: HttpClientResponse.HttpClientResponse) =>
   (response.headers["content-type"] ?? "").includes("text/event-stream");
@@ -103,10 +103,10 @@ const normalizeResponse = Effect.fn("anthropicCompatibleClient.normalize")(funct
   }
   const text = yield* response.text;
   // Not JSON (an HTML error page, say) goes through as it is: the client reports it.
-  const normalized = Option.getOrElse(
-    Option.liftThrowable(() => JSON.stringify(normalizeAnthropicJson(JSON.parse(text))))(),
-    () => text,
-  );
+  const normalized = Option.match(parseJson(text), {
+    onNone: () => text,
+    onSome: (json) => JSON.stringify(normalizeAnthropicJson(json)),
+  });
   return HttpClientResponse.fromWeb(response.request, new Response(normalized, init));
 });
 

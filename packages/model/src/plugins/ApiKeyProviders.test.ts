@@ -77,7 +77,7 @@ const registered = Effect.fn("registered")(function* (plugin: ApiKeyPlugin) {
   const ctx: PluginContext = {
     options: {},
     paths: { config: "/nonexistent/magentic", workspace: "/nonexistent", data: "/nonexistent" },
-    tool: { registerToolkit: () => unused, hook: () => unused },
+    tool: { registerToolkit: () => unused, arriving: () => unused, hook: () => unused },
     model: {
       register: (provider) =>
         Ref.set(seen, Option.some(provider)).pipe(Effect.as({ dispose: Effect.void })),

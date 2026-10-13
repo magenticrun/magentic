@@ -11,6 +11,9 @@
   // The relay keeps a separate Worker toolchain and checks its deployment entries
   // with its own check command. The surface packages are still placeholders.
   "ignoreWorkspaces": ["apps/relay", "packages/surface-cursor", "packages/surface-slack"],
+  // The Helium extension is loaded unpacked by the browser, which reads its
+  // entries from manifest.json; nothing in the workspace imports them.
+  "ignore": ["apps/helium-extension/**"],
   // Installed by `effect-tsgo patch` into TypeScript itself, not as a package.
   "ignoreDependencies": ["@effect/language-service"],
 }

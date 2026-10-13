@@ -5,6 +5,7 @@ import {
   CompactionFailed,
   Conversation,
   ConversationNotFound,
+  ConversationWriteFailed,
   TranscriptEntry,
 } from "./Conversation.ts";
 import { ConversationId } from "./ConversationId.ts";
@@ -29,6 +30,7 @@ import {
   ScheduleNotFound,
 } from "./Schedule.ts";
 import { BackgroundTask } from "./Task.ts";
+import { TraceSpan } from "./Trace.ts";
 
 // The API definition lives here, apart from the gateway, so surfaces derive
 // typed clients from it without pulling in server code. It is Effect RPC over
@@ -101,17 +103,27 @@ export const Api = RpcGroup.make(
   Rpc.make("rename", {
     payload: { id: ConversationId, title: Schema.NonEmptyString },
     success: Conversation,
-    error: ConversationNotFound,
+    error: Schema.Union([ConversationNotFound, ConversationWriteFailed]),
   }),
   Rpc.make("removeConversation", {
     payload: { id: ConversationId },
-    error: ConversationNotFound,
+    error: Schema.Union([ConversationNotFound, ConversationWriteFailed]),
   }),
   /** Fold the conversation so far into a summary the next run continues from. */
   Rpc.make("compact", {
     payload: { id: ConversationId },
     success: Compacted,
     error: Schema.Union([ConversationNotFound, CompactionFailed]),
+  }),
+  /**
+   * What the conversation's runs spent their time on: every span they
+   * finished, oldest first, the one in flight's too. Kept beside the
+   * conversation, so it outlives the gateway and goes when it does.
+   */
+  Rpc.make("trace", {
+    payload: { id: ConversationId },
+    success: Schema.Array(TraceSpan),
+    error: ConversationNotFound,
   }),
   Rpc.make("listPlugins", { success: Schema.Array(PluginInfo) }),
   /** The MCP servers the gateway was configured with, whether or not they connected. */
@@ -125,7 +137,7 @@ export const Api = RpcGroup.make(
   Rpc.make("openConversation", {
     payload: { agent: Schema.NonEmptyString, directory: Schema.optional(Schema.String) },
     success: Conversation,
-    error: AgentNotFound,
+    error: Schema.Union([AgentNotFound, ConversationWriteFailed]),
   }),
   /**
    * Read a cadence a person said in words, when the surface's own parser

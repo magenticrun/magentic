@@ -76,6 +76,13 @@ export interface ToolDomain {
     PluginSetupError,
     Scope.Scope | Exclude<ToolServices<Tools>, ToolCallContext>
   >;
+  /**
+   * Tools still on their way, such as those of a server that is connecting.
+   * Setup returns without them so the gateway serves at once; a run waits
+   * for `arrived` before it gathers its tools instead. Waited on by every run
+   * until it completes, so it must complete: give it a bound of its own.
+   */
+  arriving(arrived: Effect.Effect<void>): Effect.Effect<void>;
   /** Intercept tool calls. Hooks run in plugin order; later hooks see earlier edits. */
   hook<Name extends keyof ToolHooks>(
     name: Name,

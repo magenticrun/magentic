@@ -8,8 +8,12 @@ import {
   type RunEvent,
   type ScheduledInboxRow,
   type TokenUsage,
+  TRACE_CONVERSATION,
+  TRACE_KIND,
+  TRACE_RUN,
 } from "@magentic/protocol";
 import {
+  Clock,
   Context,
   DateTime,
   Effect,
@@ -46,10 +50,12 @@ import { estimateContext } from "./ContextEstimate.ts";
 import { ConversationStore } from "./ConversationStore.ts";
 import { describeCause } from "./Errors.ts";
 import { noticeMessage, scheduledMessage } from "./Marks.ts";
+import { SystemContext } from "./ProjectContext.ts";
 import { cacheRetention, withCachePoints } from "./PromptCache.ts";
 import { RunEventBus } from "./EventBus.ts";
 import {
   MAX_RESUMES,
+  isContextOverflow,
   modelFailure,
   rejectedToolCall,
   resumeDelay,
@@ -59,6 +65,7 @@ import {
 } from "./Retry.ts";
 import { ModelRegistry } from "./plugin/ModelRegistry.ts";
 import { ToolRegistry } from "./plugin/ToolRegistry.ts";
+import { AgentRegistry } from "./AgentRegistry.ts";
 import { ScheduledTasks } from "./ScheduledTasks.ts";
 import { type Steer, Steering } from "./Steering.ts";
 
@@ -240,11 +247,25 @@ const settleUnfinished = (history: Prompt.Prompt): Prompt.Prompt => {
 };
 
 /**
- * Tool calls one run may have thrown out for bad parameters before it fails
- * with the provider's complaint. A model that cannot match a tool's schema
- * after this many tries will not match it on the next one either.
+ * Tool calls one run may have thrown out, for bad parameters or a name it
+ * was not offered, before it fails with the provider's complaint. A model
+ * that cannot call a tool right after this many tries will not on the next
+ * one either.
  */
 export const MAX_CORRECTIONS = 3;
+
+/** The parts that mean the model has begun to answer, for the time to first output. */
+const OUTPUT_PARTS: ReadonlySet<string> = new Set([
+  "text-start",
+  "text-delta",
+  "reasoning-start",
+  "reasoning-delta",
+  "tool-params-start",
+  "tool-call",
+]);
+
+/** The run span's attribute saying how the run ended, when it did not end in error. */
+const OUTCOME = "magentic.run.outcome";
 
 /** Arguments echoed back to the model, past which the point is made. */
 const PARAMS_SHOWN = 1_000;
@@ -308,15 +329,8 @@ const withNotices = (notices: ReadonlyArray<string>, input: Prompt.RawInput): Pr
  * going to say, so nothing of the input is lost when the very first call is
  * the one thrown out.
  */
-const correctionPrompt = (
-  prompt: Prompt.RawInput,
-  rejected: AiError.ToolParameterValidationError,
-): Prompt.RawInput =>
-  Prompt.concat(
-    Prompt.make(prompt),
-    `Your ${rejected.toolName} call did not run because its arguments do not match the tool's ` +
-      `schema. ${rejected.description}. Call it again with arguments the schema allows.`,
-  );
+const correctionPrompt = (prompt: Prompt.RawInput, complaint: string): Prompt.RawInput =>
+  Prompt.concat(Prompt.make(prompt), complaint);
 
 /**
  * A conversation open for a run: the chat holds what the model sees, the
@@ -356,6 +370,7 @@ export class Runner extends Context.Service<
     Runner,
     Effect.gen(function* () {
       const registry = yield* ToolRegistry;
+      const agents = yield* AgentRegistry;
       const models = yield* ModelRegistry;
       const conversations = yield* ConversationStore;
       const bus = yield* RunEventBus;
@@ -363,6 +378,7 @@ export class Runner extends Context.Service<
       const notices = yield* Notices;
       const schedules = yield* ScheduledTasks;
       const retention = yield* cacheRetention;
+      const systemContext = yield* SystemContext;
 
       /**
        * The conversation's chat, restored from the store when it has one. A
@@ -372,10 +388,14 @@ export class Runner extends Context.Service<
       const openChat = Effect.fn("Runner.openChat")(function* (
         conversationId: string,
         agent: AgentDefinition,
+        startedAt: DateTime.Utc,
       ) {
+        // The agent's prompt, then what the harness says of the workspace.
+        const context = yield* systemContext(startedAt);
+        const system = context === "" ? agent.prompt : `${agent.prompt}\n\n${context}`;
         const saved = yield* conversations.history(conversationId);
         if (Option.isNone(saved)) {
-          const chat = yield* Chat.fromPrompt(Prompt.empty.pipe(Prompt.setSystem(agent.prompt)));
+          const chat = yield* Chat.fromPrompt(Prompt.empty.pipe(Prompt.setSystem(system)));
           const opened: Opened = {
             chat,
             archived: yield* Ref.make<ReadonlyArray<Prompt.Message>>([]),
@@ -383,9 +403,9 @@ export class Runner extends Context.Service<
           return opened;
         }
         const chat = yield* Chat.fromJson(saved.value);
-        const { archived, context } = partition(forModel(yield* Ref.get(chat.history)));
+        const { archived, context: kept } = partition(forModel(yield* Ref.get(chat.history)));
         // The agent's prompt as it is now, not as it was when the conversation began.
-        yield* Ref.set(chat.history, Prompt.setSystem(context, agent.prompt));
+        yield* Ref.set(chat.history, Prompt.setSystem(kept, system));
         const opened: Opened = { chat, archived: yield* Ref.make(archived) };
         return opened;
       });
@@ -565,374 +585,501 @@ export class Runner extends Context.Service<
               yield* emit({ _tag: "RunStarted", runId, conversationId });
             }
             const lock = yield* lockFor(conversationId);
-            yield* lock.withPermits(1)(
-              Effect.gen(function* () {
-                const existing = yield* conversations.get(conversationId);
-                // A conversation that is not the principal's is not theirs to wake.
-                if (
-                  turn.kind === "wake" &&
-                  Option.isSome(existing) &&
-                  existing.value.principal !== principal
-                ) {
-                  return;
-                }
-                // What the harness had to say since the last run goes before
-                // the input; for a wake-up it is the input, and a run that got
-                // here first and took it leaves nothing to do.
-                const waiting = yield* notices.take(conversationId);
-                // A schedule that came due is taken here and nowhere else:
-                // inside the lock, before the first model call, so it becomes
-                // a turn of its own rather than more context for a turn
-                // already under way. Notices are taken again after every model
-                // response; a scheduled input never is.
-                const due =
-                  turn.kind === "wake"
-                    ? yield* schedules.takeQueued(conversationId)
-                    : Option.none<ScheduledInboxRow>();
-                if (turn.kind === "wake" && waiting.length === 0 && Option.isNone(due)) {
-                  return;
-                }
-                const steers = Option.isSome(openedEarly)
-                  ? openedEarly.value
-                  : yield* steering.open(runId, principal);
-                if (turn.kind === "wake") {
-                  yield* emit({ _tag: "RunStarted", runId, conversationId });
-                }
-                if (waiting.length > 0) {
-                  yield* emit({ _tag: "Notified", notices: waiting });
-                }
-                const opening = withNotices(
-                  waiting,
-                  turn.kind === "input"
-                    ? promptOf(turn.input, yield* fitAttachments(turn.attachments))
-                    : Option.match(due, {
-                        onNone: (): Prompt.RawInput => [],
-                        onSome: (row) => Prompt.fromMessages([scheduledMessage(row.prompt)]),
-                      }),
-                );
-
-                const restored = yield* Effect.result(openChat(conversationId, options.agent));
-                if (restored._tag === "Failure") {
-                  yield* emit({
-                    _tag: "RunFailed",
-                    message: `conversation ${conversationId} cannot be read: ${restored.failure.message}`,
-                  });
-                  return;
-                }
-                const opened = restored.success;
-                const { chat } = opened;
-                const tools = yield* registry.forAgent(options.agent, {
-                  runId,
-                  conversationId,
-                  principal: options.principal,
-                });
-                const finishReason = yield* Ref.make("unknown");
-                const usageSoFar = yield* Ref.make(
-                  Option.flatMap(existing, (info) => Option.fromNullishOr(info.usage)),
-                );
-                const choice = Option.orElse(options.model, () =>
-                  Option.fromNullishOr(options.agent.model),
-                );
-
-                const loop = Effect.gen(function* () {
-                  // Resolved per run so a provider signed in after boot is picked up.
-                  const model = yield* models.languageModel(choice);
-                  const {
-                    limits,
-                    cost,
-                    thinking,
-                    model: modelRef,
-                  } = yield* infoOf(choice, options.reasoning);
-                  /** The call with the thinking configuration in its context, when there is one. */
-                  const withThinking = <A, E, R>(
-                    stream: Stream.Stream<A, E, R>,
-                  ): Stream.Stream<A, E, R> =>
-                    Option.isSome(thinking)
-                      ? Stream.provideContext(stream, thinking.value)
-                      : stream;
-                  // A summary that cannot be written is logged, not a failed run.
-                  const compactIfFull = (held: number) =>
-                    isOverflow(held, limits)
-                      ? Effect.gen(function* () {
-                          yield* emit({ _tag: "CompactionStarted" });
-                          const done = yield* compactOpened(opened, model, keepFor(limits));
-                          yield* emit(done.event);
-                          const summarised = tokenUsage(
-                            done.usage,
-                            cost,
-                            modelRef,
-                            yield* Ref.get(chat.history),
-                            tools.tools,
-                          );
-                          yield* Ref.update(usageSoFar, (previous) =>
-                            Option.some(foldUsage(previous, summarised)),
-                          );
-                          yield* emit(summarised);
-                        }).pipe(
-                          Effect.catchTag("CompactionError", (error) =>
-                            Effect.logWarning(
-                              `conversation ${conversationId} not compacted`,
-                              error,
-                            ),
-                          ),
-                        )
-                      : Effect.void;
-                  let prompt = opening;
-                  // Absent, the agent runs as long as it keeps working; a number is
-                  // the ceiling, and the step it lands on is spent saying where the
-                  // work stands rather than on more of it.
-                  const ceiling = Option.fromNullishOr(options.agent.maxSteps);
-                  /** The toolkit of a closing turn: every tool gone, the handler unused. */
-                  const bare: typeof tools = { ...tools, tools: {} };
-                  /** Whether this step is that closing turn. */
-                  let closing = false;
-                  /** Tool calls the provider threw out so far, over the whole run. */
-                  const corrected = yield* Ref.make(0);
-                  /** Answers cut short and picked up again, over the whole run. */
-                  const resumed = yield* Ref.make(0);
-                  for (let step = 1; ; step++) {
-                    const calledTool = yield* Ref.make(false);
-                    const usage = yield* Ref.make(Option.none<Response.Usage>());
-                    // A call that fails before anything reached the surface is tried
-                    // again from the same history: the chat appends the prompt and
-                    // whatever came back even when the stream fails. One that fails
-                    // after speaking is not, so nothing shows twice; it is picked
-                    // up from what it said instead, below.
-                    const before = yield* Ref.get(chat.history);
-                    const spoke = yield* Ref.make(false);
-                    // Where the call asks Anthropic to read back what it was
-                    // already sent. The history and the input are marked
-                    // together: the moving marker belongs on the last message
-                    // of the call, which is in the input when it carries one.
-                    const cached = withCachePoints(before, prompt, retention);
-                    const attempt = Effect.andThen(
-                      Ref.set(chat.history, cached.history),
-                      chat
-                        .streamText({ prompt: cached.input, toolkit: closing ? bare : tools })
-                        .pipe(
-                          Stream.provideService(LanguageModel.LanguageModel, model),
-                          withThinking,
-                          Stream.runForEach((part) =>
-                            Effect.gen(function* () {
-                              if (part.type === "tool-call") {
-                                yield* Ref.set(calledTool, true);
-                              }
-                              if (part.type === "finish") {
-                                yield* Ref.set(finishReason, part.reason);
-                                yield* Ref.set(usage, Option.some(part.usage));
-                              }
-                              for (const event of toEvents(part)) {
-                                yield* Ref.set(spoke, true);
-                                yield* emit(event);
-                              }
-                            }),
-                          ),
-                        ),
-                    );
-                    const call = yield* Effect.exit(
-                      Effect.retry(
-                        attempt,
-                        retryPolicy({
-                          canRetry: Effect.map(Ref.get(spoke), (yes) => !yes),
-                          onRetry: (retrying) => emit(toRetryEvent(retrying)),
+            yield* lock
+              .withPermits(1)(
+                Effect.gen(function* () {
+                  const existing = yield* conversations.get(conversationId);
+                  // A conversation that is not the principal's is not theirs to wake.
+                  if (
+                    turn.kind === "wake" &&
+                    Option.isSome(existing) &&
+                    existing.value.principal !== principal
+                  ) {
+                    return yield* Effect.annotateCurrentSpan(OUTCOME, "idle");
+                  }
+                  // What the harness had to say since the last run goes before
+                  // the input; for a wake-up it is the input, and a run that got
+                  // here first and took it leaves nothing to do.
+                  const waiting = yield* notices.take(conversationId);
+                  // A schedule that came due is taken here and nowhere else:
+                  // inside the lock, before the first model call, so it becomes
+                  // a turn of its own rather than more context for a turn
+                  // already under way. Notices are taken again after every model
+                  // response; a scheduled input never is.
+                  const due =
+                    turn.kind === "wake"
+                      ? yield* schedules.takeQueued(conversationId)
+                      : Option.none<ScheduledInboxRow>();
+                  if (turn.kind === "wake" && waiting.length === 0 && Option.isNone(due)) {
+                    return yield* Effect.annotateCurrentSpan(OUTCOME, "idle");
+                  }
+                  const steers = Option.isSome(openedEarly)
+                    ? openedEarly.value
+                    : yield* steering.open(runId, principal);
+                  if (turn.kind === "wake") {
+                    yield* emit({ _tag: "RunStarted", runId, conversationId });
+                  }
+                  if (waiting.length > 0) {
+                    yield* emit({ _tag: "Notified", notices: waiting });
+                  }
+                  const opening = withNotices(
+                    waiting,
+                    turn.kind === "input"
+                      ? promptOf(turn.input, yield* fitAttachments(turn.attachments))
+                      : Option.match(due, {
+                          onNone: (): Prompt.RawInput => [],
+                          onSome: (row) => Prompt.fromMessages([scheduledMessage(row.prompt)]),
                         }),
-                      ),
-                    );
-                    if (call._tag === "Failure") {
-                      const rejected = rejectedToolCall(call.cause);
-                      const corrections = yield* Ref.get(corrected);
-                      if (Option.isNone(rejected) || corrections >= MAX_CORRECTIONS) {
-                        // A call that died after the model began answering cannot
-                        // be tried again, but what it said is in the history, so
-                        // the run picks the answer up in another call rather than
-                        // ending on half of one. Not when a tool call was among
-                        // what arrived: one left without its result would fail
-                        // every call after it.
-                        const resumes = yield* Ref.get(resumed);
-                        const began = yield* Ref.get(spoke);
-                        const ranTool = yield* Ref.get(calledTool);
-                        const cut =
-                          began && !ranTool && resumes < MAX_RESUMES
-                            ? Option.filter(modelFailure(call.cause), shouldRetry)
-                            : Option.none<AiError.AiError>();
-                        if (Option.isNone(cut)) {
-                          return yield* call;
-                        }
-                        yield* Ref.set(resumed, resumes + 1);
-                        const delay = yield* resumeDelay(resumes + 1, cut.value);
-                        yield* emit(
-                          toRetryEvent({
-                            attempt: resumes + 1,
-                            limit: MAX_RESUMES,
-                            error: cut.value,
-                            delay,
-                          }),
-                        );
-                        yield* Effect.sleep(delay);
-                        // The prompt went out with the call that failed, and the
-                        // chat kept it; this one carries the history alone.
-                        prompt = [];
-                        continue;
-                      }
-                      // Nothing of a response that died on a bad tool call is in the
-                      // history, so the model hears what the call got wrong and takes
-                      // the step again rather than the run ending on it.
-                      yield* Ref.set(chat.history, before);
-                      yield* Ref.update(corrected, (n) => n + 1);
-                      yield* emit({
-                        _tag: "Retrying",
-                        attempt: corrections + 1,
-                        limit: MAX_CORRECTIONS,
-                        message: rejected.value.message,
-                        delayMs: 0,
-                      });
-                      prompt = correctionPrompt(prompt, rejected.value);
-                      continue;
-                    }
-                    // Once the call is in the history, so the estimate matches what was counted.
-                    const reported = yield* Ref.get(usage);
-                    if (Option.isSome(reported)) {
-                      const event = tokenUsage(
-                        reported.value,
+                  );
+
+                  // Tools still arriving since boot, such as an MCP server's, are
+                  // waited for here rather than before the gateway served. The
+                  // agent is read again if they were: a server's notes join its
+                  // prompt when its tools do.
+                  const definition = (yield* registry.settle)
+                    ? yield* agents
+                        .get(options.agent.name)
+                        .pipe(Effect.orElseSucceed(() => options.agent))
+                    : options.agent;
+                  const startedAt = Option.isSome(existing)
+                    ? existing.value.createdAt
+                    : yield* DateTime.now;
+                  const restored = yield* Effect.result(
+                    openChat(conversationId, definition, startedAt),
+                  );
+                  if (restored._tag === "Failure") {
+                    yield* Effect.annotateCurrentSpan(OUTCOME, "failed");
+                    yield* emit({
+                      _tag: "RunFailed",
+                      message: `conversation ${conversationId} cannot be read: ${restored.failure.message}`,
+                    });
+                    return;
+                  }
+                  const opened = restored.success;
+                  const { chat } = opened;
+                  const tools = yield* registry.forAgent(definition, {
+                    runId,
+                    conversationId,
+                    principal: options.principal,
+                  });
+                  const finishReason = yield* Ref.make("unknown");
+                  const usageSoFar = yield* Ref.make(
+                    Option.flatMap(existing, (info) => Option.fromNullishOr(info.usage)),
+                  );
+                  const choice = Option.orElse(options.model, () =>
+                    Option.fromNullishOr(definition.model),
+                  );
+
+                  const loop = Effect.gen(function* () {
+                    // Resolved per run so a provider signed in after boot is picked up.
+                    const model = yield* models.languageModel(choice);
+                    const {
+                      limits,
+                      cost,
+                      thinking,
+                      model: modelRef,
+                    } = yield* infoOf(choice, options.reasoning);
+                    /** The call with the thinking configuration in its context, when there is one. */
+                    const withThinking = <A, E, R>(
+                      stream: Stream.Stream<A, E, R>,
+                    ): Stream.Stream<A, E, R> =>
+                      Option.isSome(thinking)
+                        ? Stream.provideContext(stream, thinking.value)
+                        : stream;
+                    // A summary that cannot be written is logged, not a failed run;
+                    // whether one was written is what comes back.
+                    const compactNow = Effect.gen(function* () {
+                      yield* emit({ _tag: "CompactionStarted" });
+                      const done = yield* compactOpened(opened, model, keepFor(limits));
+                      yield* emit(done.event);
+                      const summarised = tokenUsage(
+                        done.usage,
                         cost,
                         modelRef,
                         yield* Ref.get(chat.history),
                         tools.tools,
                       );
                       yield* Ref.update(usageSoFar, (previous) =>
-                        Option.some(foldUsage(previous, event)),
+                        Option.some(foldUsage(previous, summarised)),
                       );
-                      yield* emit(event);
-                      yield* compactIfFull(event.inputTokens + event.outputTokens);
-                    }
-                    // The account of the work is the last thing a run over its
-                    // ceiling does, whatever the model made of the notice asking
-                    // for it.
-                    if (closing) {
-                      yield* Ref.set(finishReason, STEP_LIMIT_REASON);
-                      return;
-                    }
-                    const calledTools = yield* Ref.get(calledTool);
-                    if (calledTools && Option.isSome(ceiling) && step >= ceiling.value) {
-                      // The tool results are in the history; the next input picks up from them.
-                      yield* Effect.logWarning(
-                        `run ${runId} reached ${agent}'s step limit of ${ceiling.value} model calls`,
+                      yield* emit(summarised);
+                      return true;
+                    }).pipe(
+                      Effect.catchTag("CompactionError", (error) =>
+                        Effect.as(
+                          Effect.logWarning(`conversation ${conversationId} not compacted`, error),
+                          false,
+                        ),
+                      ),
+                    );
+                    const compactIfFull = (held: number) =>
+                      isOverflow(held, limits) ? Effect.asVoid(compactNow) : Effect.void;
+                    let prompt = opening;
+                    // Absent, the agent runs as long as it keeps working; a number is
+                    // the ceiling, and the step it lands on is spent saying where the
+                    // work stands rather than on more of it.
+                    const ceiling = Option.fromNullishOr(definition.maxSteps);
+                    /** The toolkit of a closing turn: every tool gone, the handler unused. */
+                    const bare: typeof tools = { ...tools, tools: {} };
+                    /** Whether this step is that closing turn. */
+                    let closing = false;
+                    /** Tool calls the provider threw out so far, over the whole run. */
+                    const corrected = yield* Ref.make(0);
+                    /** Answers cut short and picked up again, over the whole run. */
+                    const resumed = yield* Ref.make(0);
+                    /** Whether a prompt over the window was compacted and sent again; once a run. */
+                    const refitted = yield* Ref.make(false);
+                    for (let step = 1; ; step++) {
+                      const calledTool = yield* Ref.make(false);
+                      const usage = yield* Ref.make(Option.none<Response.Usage>());
+                      /** When the model began to answer, for the call's span. */
+                      const firstOutput = yield* Ref.make(Option.none<number>());
+                      // A call that fails before anything reached the surface is tried
+                      // again from the same history: the chat appends the prompt and
+                      // whatever came back even when the stream fails. One that fails
+                      // after speaking is not, so nothing shows twice; it is picked
+                      // up from what it said instead, below.
+                      const before = yield* Ref.get(chat.history);
+                      const spoke = yield* Ref.make(false);
+                      // Where the call asks Anthropic to read back what it was
+                      // already sent. The history and the input are marked
+                      // together: the moving marker belongs on the last message
+                      // of the call, which is in the input when it carries one.
+                      const cached = withCachePoints(before, prompt, retention);
+                      const attempt = Effect.andThen(
+                        Ref.set(chat.history, cached.history),
+                        chat
+                          .streamText({ prompt: cached.input, toolkit: closing ? bare : tools })
+                          .pipe(
+                            Stream.provideService(LanguageModel.LanguageModel, model),
+                            withThinking,
+                            Stream.runForEach((part) =>
+                              Effect.gen(function* () {
+                                if (
+                                  OUTPUT_PARTS.has(part.type) &&
+                                  Option.isNone(yield* Ref.get(firstOutput))
+                                ) {
+                                  yield* Ref.set(
+                                    firstOutput,
+                                    Option.some(yield* Clock.currentTimeMillis),
+                                  );
+                                }
+                                if (part.type === "tool-call") {
+                                  yield* Ref.set(calledTool, true);
+                                }
+                                if (part.type === "finish") {
+                                  yield* Ref.set(finishReason, part.reason);
+                                  yield* Ref.set(usage, Option.some(part.usage));
+                                }
+                                for (const event of toEvents(part)) {
+                                  yield* Ref.set(spoke, true);
+                                  yield* emit(event);
+                                }
+                              }),
+                            ),
+                          ),
                       );
-                      closing = true;
-                      prompt = withNotices([STEP_LIMIT_NOTICE], []);
-                      continue;
-                    }
-                    // What was steered in meanwhile, and what the harness has to say,
-                    // go to the model before it speaks again; the notices first, as
-                    // they came before the person's reply to them. A run that has
-                    // answered and has neither ends, closed to steering in the same
-                    // step so nothing arrives too late; a notice that lands after
-                    // the check wakes the conversation when a surface follows it,
-                    // and waits for the next run otherwise.
-                    const noticed = yield* notices.take(conversationId);
-                    const steered = yield* calledTools || noticed.length > 0
-                      ? steers.take
-                      : steers.takeOrClose;
-                    if (noticed.length > 0) {
-                      yield* emit({ _tag: "Notified", notices: noticed });
-                    }
-                    if (steered.length > 0) {
-                      yield* emit({ _tag: "Steered", inputs: steered.map((s) => s.input) });
-                      prompt = withNotices(noticed, yield* steeredPrompt(steered));
-                    } else if (noticed.length > 0) {
-                      prompt = withNotices(noticed, []);
-                    } else if (calledTools) {
-                      // The tool results are already in the history; ask the model to continue.
-                      prompt = [];
-                    } else {
-                      return;
-                    }
-                  }
-                });
-
-                // Keep whatever history we got, even after a failure, so the person can retry.
-                const save = Effect.gen(function* () {
-                  const now = yield* DateTime.now;
-                  const context = yield* Ref.get(chat.history);
-                  const resolved = yield* models.resolve(choice).pipe(Effect.option);
-                  const model = Option.map(resolved, (r) => r.ref);
-                  const usage = yield* Ref.get(usageSoFar);
-                  const info = new Conversation({
-                    id: conversationId,
-                    agent,
-                    principal,
-                    title: Option.match(existing, {
-                      // A wake-up never starts a conversation; the notice names it should one slip through.
-                      onNone: () => titleOf(turn.kind === "input" ? turn.input : waiting.join(" ")),
-                      onSome: (before) => before.title,
-                    }),
-                    model: Option.getOrUndefined(model),
-                    directory: Option.match(existing, {
-                      onNone: () => Option.getOrUndefined(options.directory),
-                      onSome: (before) => before.directory,
-                    }),
-                    createdAt: Option.match(existing, {
-                      onNone: () => now,
-                      onSome: (before) => before.createdAt,
-                    }),
-                    updatedAt: now,
-                    messages: context.content.length,
-                    usage: Option.getOrUndefined(usage),
-                  });
-                  yield* conversations.save(info, yield* exportHistory(opened));
-                }).pipe(
-                  Effect.catchCause((cause) =>
-                    Effect.logWarning(`conversation ${conversationId} not saved`, cause),
-                  ),
-                );
-
-                // A surface that stops the run interrupts this fiber, and an
-                // interrupted fiber runs nothing past the loop but its finalizers.
-                // The turn is saved all the same, with what the model said so far,
-                // so the next input follows it rather than a history in which the
-                // stopped input was never sent. A run that fails mid-turn is saved
-                // the same way: a tool call left open would fail every call after.
-                // What this turn cost goes back to the schedule that asked for
-                // it, whether the turn finished, failed, or was stopped: a
-                // task left in `running` would never arm its next slot.
-                const settleSchedule = Option.match(due, {
-                  onNone: () => Effect.void,
-                  onSome: (row) =>
-                    Effect.gen(function* () {
-                      const spent = yield* Ref.get(usageSoFar);
-                      yield* schedules.settle(conversationId, row.taskId, {
-                        inputTokens: Option.match(spent, {
-                          onNone: () => 0,
-                          onSome: (usage) => usage.totalInputTokens,
-                        }),
-                        outputTokens: Option.match(spent, {
-                          onNone: () => 0,
-                          onSome: (usage) => usage.totalOutputTokens,
-                        }),
+                      // One span a call, retries and the tools it ran inside it,
+                      // saying what the provider counted once the call is done.
+                      const describeCall = Effect.fnUntraced(function* (began: number) {
+                        const first = yield* Ref.get(firstOutput);
+                        if (Option.isSome(first)) {
+                          yield* Effect.annotateCurrentSpan(
+                            "magentic.first_output_ms",
+                            first.value - began,
+                          );
+                        }
+                        const reported = yield* Ref.get(usage);
+                        if (Option.isNone(reported)) {
+                          return;
+                        }
+                        const { inputTokens, outputTokens } = reported.value;
+                        yield* Effect.annotateCurrentSpan("gen_ai.response.finish_reasons", [
+                          yield* Ref.get(finishReason),
+                        ]);
+                        yield* Effect.annotateCurrentSpan(
+                          "gen_ai.usage.input_tokens",
+                          inputTokens.total ?? 0,
+                        );
+                        yield* Effect.annotateCurrentSpan(
+                          "gen_ai.usage.output_tokens",
+                          outputTokens.total ?? 0,
+                        );
+                        const counts = [
+                          ["magentic.usage.cache_read_tokens", inputTokens.cacheRead],
+                          ["magentic.usage.cache_write_tokens", inputTokens.cacheWrite],
+                          ["magentic.usage.reasoning_tokens", outputTokens.reasoning],
+                          [
+                            "magentic.cost_usd",
+                            Option.isSome(cost) ? costOf(cost.value, reported.value) : undefined,
+                          ],
+                        ] as const;
+                        for (const [key, value] of counts) {
+                          if (value !== undefined) {
+                            yield* Effect.annotateCurrentSpan(key, value);
+                          }
+                        }
                       });
-                    }),
-                });
-                const outcome = yield* Effect.exit(loop).pipe(
-                  Effect.onInterrupt(() =>
-                    Effect.gen(function* () {
-                      yield* Ref.update(chat.history, settleUnfinished);
-                      yield* save;
-                      yield* settleSchedule;
-                      yield* emit({ _tag: "RunFinished", reason: INTERRUPTED_REASON });
-                      yield* Queue.end(queue);
-                    }),
-                  ),
-                );
-                yield* Ref.update(chat.history, settleUnfinished);
-                yield* save;
-                yield* settleSchedule;
-                if (outcome._tag === "Failure") {
-                  yield* emit({ _tag: "RunFailed", message: describeCause(outcome.cause) });
-                } else {
-                  yield* emit({ _tag: "RunFinished", reason: yield* Ref.get(finishReason) });
-                }
-              }),
-            );
+                      const call = yield* Effect.exit(
+                        Effect.gen(function* () {
+                          const began = yield* Clock.currentTimeMillis;
+                          yield* Effect.retry(
+                            attempt,
+                            retryPolicy({
+                              canRetry: Effect.map(Ref.get(spoke), (yes) => !yes),
+                              onRetry: (retrying) =>
+                                Effect.andThen(
+                                  Effect.annotateCurrentSpan("magentic.retries", retrying.attempt),
+                                  emit(toRetryEvent(retrying)),
+                                ),
+                            }),
+                          );
+                          yield* describeCall(began);
+                        }).pipe(
+                          Effect.withSpan(`chat ${Option.getOrElse(modelRef, () => "model")}`, {
+                            attributes: {
+                              [TRACE_KIND]: "model",
+                              [TRACE_RUN]: runId,
+                              "gen_ai.operation.name": "chat",
+                              "gen_ai.request.model": Option.getOrUndefined(modelRef),
+                              "magentic.step": step,
+                            },
+                          }),
+                        ),
+                      );
+                      if (call._tag === "Failure") {
+                        // A prompt the provider says is over the model's window,
+                        // when the catalog did not know the window or one step
+                        // added more than the reserve, is folded into a summary
+                        // and the step taken again, as pi and opencode do. Once:
+                        // a prompt still too big after that will not fit.
+                        const overflowed = Option.exists(
+                          modelFailure(call.cause),
+                          isContextOverflow,
+                        );
+                        if (overflowed && !(yield* Ref.get(refitted))) {
+                          yield* Ref.set(refitted, true);
+                          yield* Ref.set(chat.history, before);
+                          if (yield* compactNow) {
+                            continue;
+                          }
+                        }
+                        const rejected = rejectedToolCall(
+                          call.cause,
+                          Object.keys((closing ? bare : tools).tools),
+                        );
+                        const corrections = yield* Ref.get(corrected);
+                        if (Option.isNone(rejected) || corrections >= MAX_CORRECTIONS) {
+                          // A call that died after the model began answering cannot
+                          // be tried again, but what it said is in the history, so
+                          // the run picks the answer up in another call rather than
+                          // ending on half of one. Not when a tool call was among
+                          // what arrived: one left without its result would fail
+                          // every call after it.
+                          const resumes = yield* Ref.get(resumed);
+                          const began = yield* Ref.get(spoke);
+                          const ranTool = yield* Ref.get(calledTool);
+                          const cut =
+                            began && !ranTool && resumes < MAX_RESUMES
+                              ? Option.filter(modelFailure(call.cause), shouldRetry)
+                              : Option.none<AiError.AiError>();
+                          if (Option.isNone(cut)) {
+                            return yield* call;
+                          }
+                          yield* Ref.set(resumed, resumes + 1);
+                          const delay = yield* resumeDelay(resumes + 1, cut.value);
+                          yield* emit(
+                            toRetryEvent({
+                              attempt: resumes + 1,
+                              limit: MAX_RESUMES,
+                              error: cut.value,
+                              delay,
+                            }),
+                          );
+                          yield* Effect.sleep(delay);
+                          // The prompt went out with the call that failed, and the
+                          // chat kept it; this one carries the history alone.
+                          prompt = [];
+                          continue;
+                        }
+                        // Nothing of a response that died on a bad tool call is in the
+                        // history, so the model hears what the call got wrong and takes
+                        // the step again rather than the run ending on it.
+                        yield* Ref.set(chat.history, before);
+                        yield* Ref.update(corrected, (n) => n + 1);
+                        yield* emit({
+                          _tag: "Retrying",
+                          attempt: corrections + 1,
+                          limit: MAX_CORRECTIONS,
+                          message: rejected.value.message,
+                          delayMs: 0,
+                        });
+                        prompt = correctionPrompt(prompt, rejected.value.complaint);
+                        continue;
+                      }
+                      // Once the call is in the history, so the estimate matches what was counted.
+                      const reported = yield* Ref.get(usage);
+                      if (Option.isSome(reported)) {
+                        const event = tokenUsage(
+                          reported.value,
+                          cost,
+                          modelRef,
+                          yield* Ref.get(chat.history),
+                          tools.tools,
+                        );
+                        yield* Ref.update(usageSoFar, (previous) =>
+                          Option.some(foldUsage(previous, event)),
+                        );
+                        yield* emit(event);
+                        yield* compactIfFull(event.inputTokens + event.outputTokens);
+                      }
+                      // The account of the work is the last thing a run over its
+                      // ceiling does, whatever the model made of the notice asking
+                      // for it.
+                      if (closing) {
+                        yield* Ref.set(finishReason, STEP_LIMIT_REASON);
+                        return;
+                      }
+                      const calledTools = yield* Ref.get(calledTool);
+                      if (calledTools && Option.isSome(ceiling) && step >= ceiling.value) {
+                        // The tool results are in the history; the next input picks up from them.
+                        yield* Effect.logWarning(
+                          `run ${runId} reached ${agent}'s step limit of ${ceiling.value} model calls`,
+                        );
+                        closing = true;
+                        prompt = withNotices([STEP_LIMIT_NOTICE], []);
+                        continue;
+                      }
+                      // What was steered in meanwhile, and what the harness has to say,
+                      // go to the model before it speaks again; the notices first, as
+                      // they came before the person's reply to them. A run that has
+                      // answered and has neither ends, closed to steering in the same
+                      // step so nothing arrives too late; a notice that lands after
+                      // the check wakes the conversation when a surface follows it,
+                      // and waits for the next run otherwise.
+                      const noticed = yield* notices.take(conversationId);
+                      const steered = yield* calledTools || noticed.length > 0
+                        ? steers.take
+                        : steers.takeOrClose;
+                      if (noticed.length > 0) {
+                        yield* emit({ _tag: "Notified", notices: noticed });
+                      }
+                      if (steered.length > 0) {
+                        yield* emit({ _tag: "Steered", inputs: steered.map((s) => s.input) });
+                        prompt = withNotices(noticed, yield* steeredPrompt(steered));
+                      } else if (noticed.length > 0) {
+                        prompt = withNotices(noticed, []);
+                      } else if (calledTools) {
+                        // The tool results are already in the history; ask the model to continue.
+                        prompt = [];
+                      } else {
+                        return;
+                      }
+                    }
+                  });
+
+                  // Keep whatever history we got, even after a failure, so the person can retry.
+                  const save = Effect.gen(function* () {
+                    const now = yield* DateTime.now;
+                    const context = yield* Ref.get(chat.history);
+                    const resolved = yield* models.resolve(choice).pipe(Effect.option);
+                    const model = Option.map(resolved, (r) => r.ref);
+                    const usage = yield* Ref.get(usageSoFar);
+                    const info = new Conversation({
+                      id: conversationId,
+                      agent,
+                      principal,
+                      title: Option.match(existing, {
+                        // A wake-up never starts a conversation; the notice names it should one slip through.
+                        onNone: () =>
+                          titleOf(turn.kind === "input" ? turn.input : waiting.join(" ")),
+                        onSome: (before) => before.title,
+                      }),
+                      model: Option.getOrUndefined(model),
+                      directory: Option.match(existing, {
+                        onNone: () => Option.getOrUndefined(options.directory),
+                        onSome: (before) => before.directory,
+                      }),
+                      createdAt: Option.match(existing, {
+                        onNone: () => now,
+                        onSome: (before) => before.createdAt,
+                      }),
+                      updatedAt: now,
+                      messages: context.content.length,
+                      usage: Option.getOrUndefined(usage),
+                    });
+                    yield* conversations.save(info, yield* exportHistory(opened));
+                  }).pipe(
+                    Effect.catchCause((cause) =>
+                      Effect.logWarning(`conversation ${conversationId} not saved`, cause),
+                    ),
+                  );
+
+                  // A surface that stops the run interrupts this fiber, and an
+                  // interrupted fiber runs nothing past the loop but its finalizers.
+                  // The turn is saved all the same, with what the model said so far,
+                  // so the next input follows it rather than a history in which the
+                  // stopped input was never sent. A run that fails mid-turn is saved
+                  // the same way: a tool call left open would fail every call after.
+                  // What this turn cost goes back to the schedule that asked for
+                  // it, whether the turn finished, failed, or was stopped: a
+                  // task left in `running` would never arm its next slot.
+                  const settleSchedule = Option.match(due, {
+                    onNone: () => Effect.void,
+                    onSome: (row) =>
+                      Effect.gen(function* () {
+                        const spent = yield* Ref.get(usageSoFar);
+                        yield* schedules.settle(conversationId, row.taskId, {
+                          inputTokens: Option.match(spent, {
+                            onNone: () => 0,
+                            onSome: (usage) => usage.totalInputTokens,
+                          }),
+                          outputTokens: Option.match(spent, {
+                            onNone: () => 0,
+                            onSome: (usage) => usage.totalOutputTokens,
+                          }),
+                        });
+                      }),
+                  });
+                  const outcome = yield* Effect.exit(loop).pipe(
+                    Effect.onInterrupt(() =>
+                      Effect.gen(function* () {
+                        yield* Ref.update(chat.history, settleUnfinished);
+                        yield* save;
+                        yield* settleSchedule;
+                        yield* emit({ _tag: "RunFinished", reason: INTERRUPTED_REASON });
+                        yield* Queue.end(queue);
+                      }),
+                    ),
+                  );
+                  yield* Ref.update(chat.history, settleUnfinished);
+                  yield* save;
+                  yield* settleSchedule;
+                  if (outcome._tag === "Failure") {
+                    yield* Effect.annotateCurrentSpan(OUTCOME, "failed");
+                    yield* emit({ _tag: "RunFailed", message: describeCause(outcome.cause) });
+                  } else {
+                    const reason = yield* Ref.get(finishReason);
+                    yield* Effect.annotateCurrentSpan(OUTCOME, reason);
+                    yield* emit({ _tag: "RunFinished", reason });
+                  }
+                }),
+              )
+              .pipe(
+                // Each run is a trace of its own, the conversation's name on it
+                // for every span below to be kept by.
+                Effect.withSpan(`invoke_agent ${agent}`, {
+                  root: true,
+                  attributes: {
+                    [TRACE_KIND]: "run",
+                    [TRACE_CONVERSATION]: conversationId,
+                    [TRACE_RUN]: runId,
+                    "gen_ai.operation.name": "invoke_agent",
+                    "gen_ai.agent.name": agent,
+                    "magentic.turn": turn.kind,
+                  },
+                }),
+              );
             yield* Queue.end(queue);
           }),
         );
@@ -972,7 +1119,11 @@ export class Runner extends Context.Service<
               (error) => new CompactionError({ reason: "model", message: error.message }),
             ),
           );
-        const opened = yield* openChat(options.conversationId, options.agent).pipe(
+        const opened = yield* openChat(
+          options.conversationId,
+          options.agent,
+          existing.value.createdAt,
+        ).pipe(
           Effect.mapError(
             (error) =>
               new CompactionError({

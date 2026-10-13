@@ -15,5 +15,6 @@ tools:
     task_stop,
     task_list,
     http_fetch,
+    session_trace,
     "mcp:*",
   ]

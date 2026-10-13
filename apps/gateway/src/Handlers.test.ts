@@ -9,6 +9,7 @@ import {
   ScheduledTaskStore,
   ScheduledTasks,
   Steering,
+  TraceStore,
 } from "@magentic/core";
 import { Identity } from "@magentic/identity";
 import { mcpPlugin, McpServers } from "@magentic/mcp";
@@ -197,6 +198,7 @@ const handlersWith = (policy: Layer.Layer<Policy>) => {
       ),
     ),
     Layer.provideMerge(Notices.layer),
+    Layer.provideMerge(TraceStore.layerMemory),
   );
   return RpcHandlers.pipe(Layer.provideMerge(ServicesLayer), Layer.provideMerge(PlatformLayer));
 };

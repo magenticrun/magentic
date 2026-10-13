@@ -426,21 +426,22 @@ layer(host([echoPlugin("echo")], ["echo"]))("PluginHost with a disabled plugin",
 });
 
 /** A plugin contributing the `/hello` command. */
-const commandPlugin = (id: string) =>
+const commandPlugin = (id: string, aliases: ReadonlyArray<string> = [], name: string = "hello") =>
   define({
     id,
     description: "greets",
     setup: (ctx) =>
       Effect.asVoid(
         ctx.command.register({
-          name: "hello",
+          name,
+          aliases,
           description: "Say hello",
           run: ({ ui }) => ui.notify(`hello from ${id}`),
         }),
       ),
   });
 
-layer(host([commandPlugin("greeter"), commandPlugin("greeter-again")]))(
+layer(host([commandPlugin("greeter", ["hi"]), commandPlugin("greeter-again")]))(
   "PluginHost commands",
   (it) => {
     it.effect("are listed once per name; a second plugin claiming it fails", () =>
@@ -450,6 +451,7 @@ layer(host([commandPlugin("greeter"), commandPlugin("greeter-again")]))(
           (yield* commands.list).map((c) => c.name),
           ["hello"],
         );
+        assert.strictEqual(Option.getOrUndefined(yield* commands.get("hi"))?.name, "hello");
         const plugins = yield* (yield* PluginHost).plugins;
         assert.deepStrictEqual(
           plugins.map((p) => [p.id, p.status, p.error, [...p.commands]]),
@@ -462,6 +464,22 @@ layer(host([commandPlugin("greeter"), commandPlugin("greeter-again")]))(
               [],
             ],
           ],
+        );
+      }),
+    );
+  },
+);
+
+layer(host([commandPlugin("greeter", ["hi"]), commandPlugin("alias-taker", [], "hi")]))(
+  "PluginHost command aliases",
+  (it) => {
+    it.effect("cannot be claimed as another command's name", () =>
+      Effect.gen(function* () {
+        const plugins = yield* (yield* PluginHost).plugins;
+        assert.strictEqual(plugins[1]?.status, "failed");
+        assert.strictEqual(
+          plugins[1]?.error,
+          "command /hi is already registered by another plugin",
         );
       }),
     );

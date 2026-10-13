@@ -278,58 +278,60 @@ const applyEvent = (state: ProgressState, event: RunEvent): ProgressState => {
  * answer. Each edit is a content-creating request against the host's
  * secondary limit, which is why edits are throttled and not per event.
  */
-export const trackProgress = <E, E2>(
+export const trackProgress: <E, E2>(
   events: Stream.Stream<RunEvent, E2>,
   options: ProgressOptions<E>,
-): Effect.Effect<ProgressOutcome, E | E2> =>
-  Effect.gen(function* () {
-    const state = yield* Ref.make(emptyProgress);
-    const messageId = yield* Ref.make(Option.none<string>());
-    const dirty = yield* Ref.make(false);
-    // The ticker and the stream both flush. Without a turn each, a tick
-    // landing while the first `create` is still in flight sees no message id
-    // yet and posts a second one.
-    const turn = yield* Semaphore.make(1);
+) => Effect.Effect<ProgressOutcome, E | E2> = Effect.fn("Bridge.trackProgress")(function* <E, E2>(
+  events: Stream.Stream<RunEvent, E2>,
+  options: ProgressOptions<E>,
+) {
+  const state = yield* Ref.make(emptyProgress);
+  const messageId = yield* Ref.make(Option.none<string>());
+  const dirty = yield* Ref.make(false);
+  // The ticker and the stream both flush. Without a turn each, a tick
+  // landing while the first `create` is still in flight sees no message id
+  // yet and posts a second one.
+  const turn = yield* Semaphore.make(1);
 
-    /** Post or edit with the current state, when something changed since the last time. */
-    const flush = turn.withPermit(
+  /** Post or edit with the current state, when something changed since the last time. */
+  const flush = turn.withPermit(
+    Effect.gen(function* () {
+      if (!(yield* Ref.getAndSet(dirty, false))) {
+        return;
+      }
+      const current = yield* Ref.get(state);
+      const id = yield* Ref.get(messageId);
+      const text = options.render(current);
+      if (Option.isSome(id)) {
+        yield* options.sink.edit(id.value, text);
+      } else if (current.tools.length > 0) {
+        yield* Ref.set(messageId, Option.some(yield* options.sink.create(text)));
+      }
+    }),
+  );
+
+  const ticker = yield* Effect.sleep(options.interval).pipe(
+    Effect.andThen(flush),
+    Effect.forever,
+    Effect.forkChild,
+  );
+  yield* events.pipe(
+    Stream.runForEach((event) =>
       Effect.gen(function* () {
-        if (!(yield* Ref.getAndSet(dirty, false))) {
-          return;
+        yield* Ref.update(state, (current) => applyEvent(current, event));
+        if (event._tag === "ToolCall" || event._tag === "ToolResult") {
+          yield* Ref.set(dirty, true);
         }
-        const current = yield* Ref.get(state);
-        const id = yield* Ref.get(messageId);
-        const text = options.render(current);
-        if (Option.isSome(id)) {
-          yield* options.sink.edit(id.value, text);
-        } else if (current.tools.length > 0) {
-          yield* Ref.set(messageId, Option.some(yield* options.sink.create(text)));
+        // The first tool call posts the message at once; only the edits after it are throttled.
+        if (event._tag === "ToolCall" && Option.isNone(yield* Ref.get(messageId))) {
+          yield* flush;
         }
       }),
-    );
-
-    const ticker = yield* Effect.sleep(options.interval).pipe(
-      Effect.andThen(flush),
-      Effect.forever,
-      Effect.forkChild,
-    );
-    yield* events.pipe(
-      Stream.runForEach((event) =>
-        Effect.gen(function* () {
-          yield* Ref.update(state, (current) => applyEvent(current, event));
-          if (event._tag === "ToolCall" || event._tag === "ToolResult") {
-            yield* Ref.set(dirty, true);
-          }
-          // The first tool call posts the message at once; only the edits after it are throttled.
-          if (event._tag === "ToolCall" && Option.isNone(yield* Ref.get(messageId))) {
-            yield* flush;
-          }
-        }),
-      ),
-      Effect.ensuring(Fiber.interrupt(ticker)),
-    );
-    return { messageId: yield* Ref.get(messageId), state: yield* Ref.get(state) };
-  });
+    ),
+    Effect.ensuring(Fiber.interrupt(ticker)),
+  );
+  return { messageId: yield* Ref.get(messageId), state: yield* Ref.get(state) };
+});
 
 /** Ten seconds between edits; see `trackProgress`. */
 export const PROGRESS_INTERVAL = Duration.seconds(10);

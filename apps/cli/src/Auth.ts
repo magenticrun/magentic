@@ -56,7 +56,7 @@ const credentialDirs = Effect.fn("Auth.credentialDirs")(function* () {
 const login = Command.make(
   "login",
   { provider: providerFlag, method: methodFlag },
-  Effect.fn(function* ({ provider, method }) {
+  Effect.fn("Cli.auth.login")(function* ({ provider, method }) {
     yield* Prompt.intro("Add credential");
     const ui = yield* promptUi;
     const providers = yield* (yield* ModelRegistry).list;
@@ -80,7 +80,7 @@ const login = Command.make(
 const list = Command.make(
   "list",
   {},
-  Effect.fn(function* () {
+  Effect.fn("Cli.auth.list")(function* () {
     yield* Prompt.intro(`Credentials ${Prompt.dim(yield* credentialDirs())}`);
     const found = yield* credentials();
     for (const { provider, summary } of found) {
@@ -102,7 +102,7 @@ const matches = (wanted: string) => (credential: Credential) =>
 const logout = Command.make(
   "logout",
   { provider: providerArgument },
-  Effect.fn(function* ({ provider: wanted }) {
+  Effect.fn("Cli.auth.logout")(function* ({ provider: wanted }) {
     yield* Prompt.intro("Remove credential");
     const found = yield* credentials();
     if (found.length === 0) {

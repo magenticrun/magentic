@@ -38,6 +38,7 @@ function App() {
   });
   const program = Effect.gen(function* () {
     const client = yield* RpcClient.make(Api);
+    const context = yield* Effect.context<never>();
     const refresh = Effect.gen(function* () {
       yield* session;
       const all = yield* client.listConversations({});
@@ -58,7 +59,7 @@ function App() {
       }
     });
     const runUi = (task: Effect.Effect<void, Error>) => {
-      void Effect.runPromise(task, { signal: lifetime.signal }).catch(fail);
+      void Effect.runPromiseWith(context)(task, { signal: lifetime.signal }).catch(fail);
     };
     setAgents(yield* client.listAgents());
     setAgent(agents()[0]?.name ?? "assistant");
@@ -136,7 +137,7 @@ function App() {
             ),
           );
       }).pipe(Effect.ensuring(Effect.sync(() => setRunning(false))));
-      void Effect.runPromise(task, { signal: requestController.signal }).then(
+      void Effect.runPromiseWith(context)(task, { signal: requestController.signal }).then(
         () => runUi(refresh),
         (cause: Error) => {
           if (requestController.signal.aborted) {
@@ -151,10 +152,9 @@ function App() {
     return yield* Effect.forever(
       Effect.sleep("3 seconds").pipe(
         Effect.andThen(refresh),
-        Effect.catch((cause) =>
-          cause._tag === "DeviceUnpaired"
-            ? Effect.fail(cause)
-            : Effect.sync(() => setStatus("Gateway unreachable. Reconnecting…")),
+        Effect.catchIf(
+          (cause) => cause._tag !== "DeviceUnpaired",
+          () => Effect.sync(() => setStatus("Gateway unreachable. Reconnecting…")),
         ),
       ),
     );

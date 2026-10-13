@@ -31,6 +31,7 @@ import {
 } from "@magentic/protocol";
 import {
   Context,
+  Deferred,
   Effect,
   Exit,
   Layer,
@@ -121,6 +122,9 @@ export class PluginHost extends Context.Service<
     Layer.effectContext(
       Effect.gen(function* () {
         const hostScope = yield* Scope.Scope;
+        /** What plugins said is still on its way at boot, and when all of it has come. */
+        const arrivals: Array<Effect.Effect<void>> = [];
+        const settled = yield* Deferred.make<void>();
         const guard = yield* ToolCallGuard;
         const bus = yield* RunEventBus.make;
         const backend = yield* BridgeBackend.make;
@@ -221,128 +225,141 @@ export class PluginHost extends Context.Service<
           return handle;
         });
 
-        const registerRoute = <R>(
+        const registerRoute: <R>(
           ref: PluginRef,
           method: HttpRouteMethod,
           path: string,
           handler: HttpRouteHandler<R>,
-        ): Effect.Effect<Registration, PluginSetupError, Scope.Scope | R> =>
-          Effect.gen(function* () {
-            if (!ROUTE_PATH.test(path)) {
-              return yield* new PluginSetupError({
-                plugin: ref.id,
-                message: `route path ${JSON.stringify(path)} must be segments of lower-case letters, digits, _ and -, without a leading slash`,
-              });
-            }
-            const taken = (yield* routes.values).some(
-              (route) => route.plugin === ref.id && route.method === method && route.path === path,
-            );
-            if (taken) {
-              return yield* new PluginSetupError({
-                plugin: ref.id,
-                message: `route ${method} ${path} is already registered`,
-              });
-            }
-            // Captured now so a request later runs with the plugin's own services.
-            const services = yield* Effect.context<R>();
-            return yield* routes.register(ref, {
+        ) => Effect.Effect<Registration, PluginSetupError, Scope.Scope | R> = Effect.fn(
+          "PluginHost.registerRoute",
+        )(function* <R>(
+          ref: PluginRef,
+          method: HttpRouteMethod,
+          path: string,
+          handler: HttpRouteHandler<R>,
+        ) {
+          if (!ROUTE_PATH.test(path)) {
+            return yield* new PluginSetupError({
               plugin: ref.id,
-              method,
-              path,
-              handle: (request) => handler(request).pipe(Effect.provideContext(services)),
+              message: `route path ${JSON.stringify(path)} must be segments of lower-case letters, digits, _ and -, without a leading slash`,
             });
+          }
+          const taken = (yield* routes.values).some(
+            (route) => route.plugin === ref.id && route.method === method && route.path === path,
+          );
+          if (taken) {
+            return yield* new PluginSetupError({
+              plugin: ref.id,
+              message: `route ${method} ${path} is already registered`,
+            });
+          }
+          // Captured now so a request later runs with the plugin's own services.
+          const services = yield* Effect.context<R>();
+          return yield* routes.register(ref, {
+            plugin: ref.id,
+            method,
+            path,
+            handle: (request) => handler(request).pipe(Effect.provideContext(services)),
           });
+        });
 
         const registerCommand = Effect.fn("PluginHost.registerCommand")(function* (
           ref: PluginRef,
           command: CommandRegistration,
         ) {
-          if ((yield* commands.values).some((c) => c.name === command.name)) {
+          const registered = yield* commands.values;
+          const claimed = new Set(
+            registered.flatMap((candidate) => [candidate.name].concat(candidate.aliases ?? [])),
+          );
+          const names = [command.name, ...(command.aliases ?? [])];
+          const duplicate = names.find(
+            (name, index) => claimed.has(name) || names.indexOf(name) !== index,
+          );
+          if (duplicate !== undefined) {
             return yield* new PluginSetupError({
               plugin: ref.id,
-              message: `command /${command.name} is already registered by another plugin`,
+              message: `command /${duplicate} is already registered by another plugin`,
             });
           }
           return yield* commands.register(ref, command);
         });
 
-        const registerToolkit = <Tools extends Record<string, Tool.Any>>(
+        const registerToolkit: <Tools extends Record<string, Tool.Any>>(
           ref: PluginRef,
           toolkit: Toolkit.WithHandler<Tools>,
-        ): Effect.Effect<
+        ) => Effect.Effect<
           Registration,
           PluginSetupError,
           Scope.Scope | Exclude<ToolServices<Tools>, ToolCallContext>
-        > =>
-          Effect.gen(function* () {
-            // Captured now so a call later runs with the plugin's own services.
-            const services = yield* Effect.context<Exclude<ToolServices<Tools>, ToolCallContext>>();
-            const taken = new Set((yield* tools.values).map((entry) => entry.tool.name));
-            // Every tool is checked before any is registered: a toolkit lands whole or not at all.
-            const checked: Array<{
-              readonly name: string;
-              readonly tool: Tool.Any;
-              readonly capability: Capability;
-            }> = [];
-            for (const [name, tool] of Object.entries(toolkit.tools)) {
-              const capability = capabilityOf(tool);
-              if (capability === "none") {
-                return yield* new PluginSetupError({
-                  plugin: ref.id,
-                  message: `tool ${name} declares no capability`,
-                });
-              }
-              if (taken.has(name)) {
-                return yield* new PluginSetupError({
-                  plugin: ref.id,
-                  message: `tool ${name} is already registered by another plugin`,
-                });
-              }
-              // Providers take an object schema for a tool's parameters and
-              // nothing else; an empty Schema.Struct({}) renders as anyOf
-              // object or array and would fail every run of every agent
-              // offered the tool, so it is refused here, by name.
-              if (Tool.getJsonSchema(tool).type !== "object") {
-                return yield* new PluginSetupError({
-                  plugin: ref.id,
-                  message: `tool ${name}'s parameters are not an object schema; give it at least one, optional, parameter`,
-                });
-              }
-              taken.add(name);
-              checked.push({ name, tool, capability });
+        > = Effect.fn("PluginHost.registerToolkit")(function* <
+          Tools extends Record<string, Tool.Any>,
+        >(ref: PluginRef, toolkit: Toolkit.WithHandler<Tools>) {
+          // Captured now so a call later runs with the plugin's own services.
+          const services = yield* Effect.context<Exclude<ToolServices<Tools>, ToolCallContext>>();
+          const taken = new Set((yield* tools.values).map((entry) => entry.tool.name));
+          // Every tool is checked before any is registered: a toolkit lands whole or not at all.
+          const checked: Array<{
+            readonly name: string;
+            readonly tool: Tool.Any;
+            readonly capability: Capability;
+          }> = [];
+          for (const [name, tool] of Object.entries(toolkit.tools)) {
+            const capability = capabilityOf(tool);
+            if (capability === "none") {
+              return yield* new PluginSetupError({
+                plugin: ref.id,
+                message: `tool ${name} declares no capability`,
+              });
             }
-            const registrations: Array<Registration> = [];
-            for (const { name, tool, capability } of checked) {
-              // SAFETY: `name` came from the keys of `toolkit.tools`.
-              const key = name as keyof Tools;
-              const bound = (params: Schema.Json, callId: string) => {
-                // SAFETY: the params are the JSON the model sent for this very tool.
-                const encoded = params as Tool.ParametersEncoded<Tools[keyof Tools]>;
-                // The toolkit forks the handler inside this effect, so the services go here.
-                return toolkit
-                  .handle(key, encoded, callId)
-                  .pipe(
-                    Effect.provideContext(services),
-                    Effect.map(Stream.provideContext(services)),
-                  );
-              };
-              // SAFETY: the captured context covers every handler service except ToolCallContext,
-              // which the registry provides on each call.
-              const handle = bound as ToolEntry["handle"];
-              registrations.push(
-                yield* tools.register(ref, { plugin: ref.id, tool, capability, handle }),
-              );
+            if (taken.has(name)) {
+              return yield* new PluginSetupError({
+                plugin: ref.id,
+                message: `tool ${name} is already registered by another plugin`,
+              });
             }
-            return {
-              dispose: Effect.forEach(registrations, (r) => r.dispose, { discard: true }),
+            // Providers take an object schema for a tool's parameters and
+            // nothing else; an empty Schema.Struct({}) renders as anyOf
+            // object or array and would fail every run of every agent
+            // offered the tool, so it is refused here, by name.
+            if (Tool.getJsonSchema(tool).type !== "object") {
+              return yield* new PluginSetupError({
+                plugin: ref.id,
+                message: `tool ${name}'s parameters are not an object schema; give it at least one, optional, parameter`,
+              });
+            }
+            taken.add(name);
+            checked.push({ name, tool, capability });
+          }
+          const registrations: Array<Registration> = [];
+          for (const { name, tool, capability } of checked) {
+            // SAFETY: `name` came from the keys of `toolkit.tools`.
+            const key = name as keyof Tools;
+            const bound = (params: Schema.Json, callId: string) => {
+              // SAFETY: the params are the JSON the model sent for this very tool.
+              const encoded = params as Tool.ParametersEncoded<Tools[keyof Tools]>;
+              // The toolkit forks the handler inside this effect, so the services go here.
+              return toolkit
+                .handle(key, encoded, callId)
+                .pipe(Effect.provideContext(services), Effect.map(Stream.provideContext(services)));
             };
-          });
+            // SAFETY: the captured context covers every handler service except ToolCallContext,
+            // which the registry provides on each call.
+            const handle = bound as ToolEntry["handle"];
+            registrations.push(
+              yield* tools.register(ref, { plugin: ref.id, tool, capability, handle }),
+            );
+          }
+          return {
+            dispose: Effect.forEach(registrations, (r) => r.dispose, { discard: true }),
+          };
+        });
 
         const contextFor = (ref: PluginRef, loaded: LoadedPlugin<any>): PluginContext => ({
           options: loaded.options ?? {},
           paths: options.paths,
           tool: {
             registerToolkit: (toolkit) => registerToolkit(ref, toolkit),
+            arriving: (arrived) => Effect.sync(() => arrivals.push(arrived)),
             hook: <Name extends keyof ToolHooks>(
               name: Name,
               handler: (event: ToolHooks[Name]) => Effect.Effect<void>,
@@ -404,21 +421,38 @@ export class PluginHost extends Context.Service<
         yield* rebuild;
 
         // A tool an agent names that no plugin registered is a typo, a failed
-        // plugin, or a server that did not connect; say so once, here.
-        const registered = (yield* tools.values).map((entry) => ({
-          name: entry.tool.name,
-          capability: entry.capability,
-        }));
-        const hidden = new Set(options.disabledTools ?? []);
-        for (const agent of (yield* Ref.get(agents)).values()) {
-          for (const pattern of agent.tools) {
-            const matched = registered.some((tool) => toolMatches(pattern, tool));
-            if (!matched && !hidden.has(pattern)) {
-              yield* Effect.logWarning(
-                `agent ${agent.name} lists tool ${pattern}, which no plugin registered`,
-              );
+        // plugin, or a server that did not connect; say so once, when every
+        // plugin's tools have arrived or stopped being waited for.
+        const warnUnregistered = Effect.gen(function* () {
+          const registered = (yield* tools.values).map((entry) => ({
+            name: entry.tool.name,
+            capability: entry.capability,
+          }));
+          const hidden = new Set(options.disabledTools ?? []);
+          for (const agent of (yield* Ref.get(agents)).values()) {
+            for (const pattern of agent.tools) {
+              const matched = registered.some((tool) => toolMatches(pattern, tool));
+              if (!matched && !hidden.has(pattern)) {
+                yield* Effect.logWarning(
+                  `agent ${agent.name} lists tool ${pattern}, which no plugin registered`,
+                );
+              }
             }
           }
+        });
+        const settle = Effect.forEach(arrivals, (arrived) => arrived, {
+          concurrency: "unbounded",
+          discard: true,
+        }).pipe(
+          Effect.andThen(warnUnregistered),
+          Effect.andThen(Deferred.succeed(settled, undefined)),
+        );
+        // With nothing on its way this is said at boot; otherwise once it has
+        // come, while the gateway already serves.
+        if (arrivals.length === 0) {
+          yield* settle;
+        } else {
+          yield* Effect.forkIn(settle, hostScope);
         }
 
         const runtimeRef: PluginRef = { id: "runtime", order: options.plugins.length };
@@ -483,6 +517,7 @@ export class PluginHost extends Context.Service<
               hooks: toolHooks.values,
               disabled: new Set(options.disabledTools ?? []),
               guard,
+              settled,
             }),
           ),
           Context.add(ModelRegistry, models),

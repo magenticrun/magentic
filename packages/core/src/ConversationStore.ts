@@ -98,10 +98,10 @@ export class ConversationStore extends Context.Service<
           // one shared staging file would read the other's bytes, and the
           // second rename would fail on a file the first had already moved.
           const staging = `${file}.${crypto.randomUUID().slice(0, 8)}.tmp`;
-          yield* fs
-            .writeFileString(staging, text, { mode: 0o600 })
-            .pipe(Effect.andThen(fs.rename(staging, file)))
-            .pipe(Effect.onError(() => fs.remove(staging).pipe(Effect.ignore)));
+          yield* fs.writeFileString(staging, text, { mode: 0o600 }).pipe(
+            Effect.andThen(fs.rename(staging, file)),
+            Effect.onError(() => fs.remove(staging).pipe(Effect.ignore)),
+          );
         });
 
         /** The wire schema already refuses these; the store refuses them again because it owns the disk. */

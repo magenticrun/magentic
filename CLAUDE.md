@@ -11,10 +11,10 @@ Bun workspace, Effect-native. Use `bun`, never npm/pnpm/yarn. Packages import ea
 
 ## Effect
 
-This codebase targets Effect 4 (currently `4.0.0-rc.112`, pinned exactly in the root catalog). Effect 4 differs from Effect 3 in ways that matter, so do not write from memory.
+This codebase targets Effect 4 (currently `4.0.0-rc.117`, pinned exactly in the root catalog). Effect 4 differs from Effect 3 in ways that matter, so do not write from memory.
 
 - The reference checkout is at `~/references/effect`. Start with `LLMS.md`, then the worked examples under `ai-docs/src`, then `migration/v3-to-v4.md` when something you expect from v3 is missing.
-- The checkout tracks `main` and can be ahead of the installed rc. When a name from the checkout fails to typecheck, look in `node_modules/effect/dist/*.d.ts` for the installed spelling (for example `Config.port` is lowercase in rc.112).
+- The checkout tracks `main` and can be ahead of the installed rc. When a name from the checkout fails to typecheck, look in `node_modules/effect/dist/*.d.ts` for the installed spelling (for example `Config.port` was lowercase in rc.112 and is `Config.Port` now).
 - Services: `class X extends Context.Service<X, { ... }>()("magentic/<pkg>/X")` with static layers on the class (`layer`, `layerMemory`, `layerNoDeps`). Service ids are `magentic/<package>/<Name>`.
 - Errors: `Schema.TaggedError`. Use a `reason` union when one service has many failure modes. Never throw.
 - Validation and domain models: `Schema.Class`, never hand-rolled parsing. Runtime checks come from `Predicate`.

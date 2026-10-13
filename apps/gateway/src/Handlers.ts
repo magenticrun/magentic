@@ -3,6 +3,7 @@ import {
   type AgentDefinition,
   AgentRegistry,
   ConversationStore,
+  type ConversationStoreError,
   describeInterval,
   MAX_INTERVAL_MILLIS,
   MIN_INTERVAL_MILLIS,
@@ -12,6 +13,7 @@ import {
   Runner,
   ScheduledTasks,
   Steering,
+  TraceStore,
   transcriptFromJson,
 } from "@magentic/core";
 import { Identity } from "@magentic/identity";
@@ -24,6 +26,7 @@ import {
   CompactionFailed,
   Conversation,
   ConversationNotFound,
+  ConversationWriteFailed,
   type FollowRequest,
   RunDenied,
   RunNotFound,
@@ -43,12 +46,25 @@ import { Wakeups } from "./Wakeups.ts";
 /** Until sessions exist, the OS user is the caller. */
 const localSubject = Config.String("USER").pipe(Config.withDefault("local"));
 
-/** Who is calling, resolved the way every handler does it for now. */
+/**
+ * Who is calling, resolved the way every handler does it for now.
+ *
+ * Both failures are defects on purpose, since neither can happen as wired.
+ * The subject comes from the environment, which is always readable, and a
+ * string with a default has nothing to fail to decode. `Identity.layerLocal`,
+ * the only identity the gateway wires, trusts every subject. An identity that
+ * can refuse a caller belongs in RPC middleware with a wire error of its own,
+ * not declared on every RPC here.
+ */
 const callerVia = (identity: Identity["Service"]) =>
   localSubject.pipe(
     Effect.orDie,
     Effect.flatMap((subject) => identity.resolve(subject).pipe(Effect.orDie)),
   );
+
+/** A write to the store, as the surface hears of it. */
+const writeFailed = (error: ConversationStoreError) =>
+  new ConversationWriteFailed({ id: error.id, message: error.message });
 
 /** The caller's conversation with this id; anyone else's is not found. */
 const owned = Effect.fn("Gateway.ownedConversation")(function* (
@@ -63,7 +79,7 @@ const owned = Effect.fn("Gateway.ownedConversation")(function* (
   return found.value;
 });
 
-/** Every RPC the gateway answers. Needs the runner and the wake-ups, the registries, the background tasks, the MCP standings, and identity, policy, and audit. */
+/** Every RPC the gateway answers. Needs the runner and the wake-ups, the registries, the background tasks, the traces, the MCP standings, and identity, policy, and audit. */
 export const RpcHandlers = Api.toLayer(
   Effect.gen(function* () {
     const host = yield* PluginHost;
@@ -79,6 +95,7 @@ export const RpcHandlers = Api.toLayer(
     const wakeups = yield* Wakeups;
     const tasks = yield* BackgroundTasks;
     const schedules = yield* ScheduledTasks;
+    const traces = yield* TraceStore;
 
     /** What a surface may know, with the model the agent would run on today. */
     const toInfo = Effect.fn("Gateway.toInfo")(function* (agent: AgentDefinition) {
@@ -223,14 +240,14 @@ export const RpcHandlers = Api.toLayer(
       const principal = yield* caller;
       const info = yield* owned(store, principal.id, id);
       const renamed = new Conversation({ ...info, title });
-      yield* store.update(renamed).pipe(Effect.orDie);
+      yield* store.update(renamed).pipe(Effect.mapError(writeFailed));
       return renamed;
     });
 
     const remove = Effect.fn("Gateway.conversations.remove")(function* (id: string) {
       const principal = yield* caller;
       yield* owned(store, principal.id, id);
-      yield* store.remove(id).pipe(Effect.orDie);
+      yield* store.remove(id).pipe(Effect.mapError(writeFailed));
     });
 
     /** The summary is written by the model the conversation last ran on. */
@@ -268,7 +285,7 @@ export const RpcHandlers = Api.toLayer(
         updatedAt: now,
         messages: 0,
       });
-      yield* store.update(info).pipe(Effect.orDie);
+      yield* store.update(info).pipe(Effect.mapError(writeFailed));
       return info;
     });
 
@@ -364,6 +381,12 @@ export const RpcHandlers = Api.toLayer(
       }
     });
 
+    const trace = Effect.fn("Gateway.trace")(function* (id: string) {
+      const principal = yield* caller;
+      yield* owned(store, principal.id, id);
+      return yield* traces.spans(id);
+    });
+
     return Api.of({
       health: () => Effect.void,
       listAgents: () => registry.list.pipe(Effect.flatMap(Effect.forEach(toInfo))),
@@ -380,6 +403,7 @@ export const RpcHandlers = Api.toLayer(
       rename: ({ id, title }) => rename(id, title),
       removeConversation: ({ id }) => remove(id),
       compact: ({ id }) => compact(id),
+      trace: ({ id }) => trace(id),
       listPlugins: () => host.plugins,
       listMcpServers: () => mcp.list,
       openConversation: ({ agent, directory }) => openConversation(agent, directory),

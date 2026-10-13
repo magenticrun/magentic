@@ -35,7 +35,7 @@ const DEFAULT_TIMEOUT = Duration.minutes(15);
 const loginFailed = (message: string) => new CodexAuthError({ reason: "LoginFailed", message });
 
 const decodeJson = <S extends Schema.Constraint>(schema: S, what: string) =>
-  Effect.fn(function* (response: HttpClientResponse.HttpClientResponse) {
+  Effect.fn("CodexLogin.decodeJson")(function* (response: HttpClientResponse.HttpClientResponse) {
     return yield* HttpClientResponse.schemaBodyJson(schema)(response).pipe(
       Effect.mapError((error) => loginFailed(`unexpected ${what} response: ${error.message}`)),
     );

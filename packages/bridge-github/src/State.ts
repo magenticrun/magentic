@@ -44,7 +44,7 @@ export class BridgeState extends Context.Service<
         return empty;
       }
       const text = yield* fs.readFileString(file);
-      return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Persisted))(text);
+      return yield* Schema.decodeEffect(Schema.fromJsonString(Persisted))(text);
     }).pipe(
       Effect.catch((error) =>
         Effect.logWarning(
@@ -63,10 +63,10 @@ export class BridgeState extends Context.Service<
         // a write cut short by a restart would read as no state at all, and
         // the bridge would forget which deliveries it has already answered.
         const staging = `${file}.${crypto.randomUUID().slice(0, 8)}.tmp`;
-        yield* fs
-          .writeFileString(staging, JSON.stringify(current, null, 2), { mode: 0o600 })
-          .pipe(Effect.andThen(fs.rename(staging, file)))
-          .pipe(Effect.onError(() => fs.remove(staging).pipe(Effect.ignore)));
+        yield* fs.writeFileString(staging, JSON.stringify(current, null, 2), { mode: 0o600 }).pipe(
+          Effect.andThen(fs.rename(staging, file)),
+          Effect.onError(() => fs.remove(staging).pipe(Effect.ignore)),
+        );
       }).pipe(
         Effect.catch((error) =>
           Effect.logWarning(`github bridge: cannot write ${file}: ${messageOf(error)}`),

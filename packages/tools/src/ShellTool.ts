@@ -3,7 +3,12 @@ import { Tool, Toolkit } from "effect/unstable/ai";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { CapabilityAnnotation, ToolCallContext } from "@magentic/plugin";
 import { BackgroundTask, type Principal } from "@magentic/protocol";
-import { BackgroundTasks, MAX_TASKS } from "./BackgroundTasks.ts";
+import {
+  BackgroundTasks,
+  MAX_TASKS,
+  signalOf,
+  type TaskStatus as BackgroundTaskStatus,
+} from "./BackgroundTasks.ts";
 import { EMPTY, OUTPUT_LIMIT, push, render, ToolOutputDir, whole } from "./ToolOutput.ts";
 import { resolveWithin, WorkspaceRoot } from "./WorkspaceRoot.ts";
 
@@ -37,36 +42,71 @@ const FORCE_KILL_AFTER = "2 seconds";
  * the environment are blanked, so a model that runs `gh pr create` is not
  * the person who started the gateway. A helper that answered `git
  * credential fill` would put a token on the model's screen, so no askpass
- * either; a bridge's tools push with their own token, in process.
+ * either; a bridge's tools push with their own token, in process. Git's
+ * editor is one that returns at once: `git rebase --continue` keeps the
+ * message it has and `git commit` without `-m` stops for want of one,
+ * rather than either waiting forever on an editor nobody sees.
+ * The gateway's own secrets are blanked for every child, whoever runs it:
+ * no command needs the GitHub App's key, its webhook secret, or the relay
+ * token, and each would let a model act as the gateway.
  */
 const CHILD_ENV = {
   NO_COLOR: "1",
+  FORCE_COLOR: "0",
   TERM: "dumb",
   PAGER: "cat",
   GIT_PAGER: "cat",
   GIT_TERMINAL_PROMPT: "0",
+  GIT_EDITOR: "true",
+  GIT_SEQUENCE_EDITOR: "true",
   GH_TOKEN: "",
   GITHUB_TOKEN: "",
   GH_ENTERPRISE_TOKEN: "",
   GITHUB_ENTERPRISE_TOKEN: "",
   GIT_ASKPASS: "",
+  GITHUB_APP_PRIVATE_KEY: "",
+  GITHUB_WEBHOOK_SECRET: "",
+  MAGENTIC_RELAY_TOKEN: "",
 };
+
+/** Names that say a variable holds a credential. */
+const SECRET_NAME = /_(?:API_KEY|TOKEN|SECRET|PRIVATE_KEY|PASSWORD)$/i;
+
+/**
+ * The names of the variables a child inherits. The spawner copies the
+ * gateway's process environment into every child (`extendEnv`), so that
+ * environment, not `Config`, is what has to be read to know what a child
+ * would see. This is the one place the tools read it, and only for names.
+ */
+const inheritedNames = (): ReadonlyArray<string> => Object.keys(globalThis.process.env);
 
 /**
  * The environment for one call. A machine principal acting for a person, a
  * bridge run, does not see the operator's `gh` login either: its config
- * directory is pointed at one that holds no account. A person at the CLI
- * keeps theirs, since their own shell has it already.
+ * directory is pointed at one that holds no account. Nor does it see any
+ * other credential the gateway was started with, the model providers' API
+ * keys and whatever else is named like a secret, since the person it acts
+ * for is not the operator. A person at the CLI keeps theirs, since their
+ * own shell has them already.
  */
-const envFor = (principal: Principal, outputDir: string): Record<string, string> =>
-  principal.onBehalfOf === undefined
-    ? CHILD_ENV
-    : { ...CHILD_ENV, GH_CONFIG_DIR: `${outputDir}/gh-config-isolated` };
+const envFor = (principal: Principal, outputDir: string) => {
+  if (principal.onBehalfOf === undefined) {
+    return CHILD_ENV;
+  }
+  const blanked = Object.fromEntries(
+    inheritedNames()
+      .filter((name) => SECRET_NAME.test(name))
+      .map((name) => [name, ""]),
+  );
+  return { ...blanked, ...CHILD_ENV, GH_CONFIG_DIR: `${outputDir}/gh-config-isolated` };
+};
 
 /** A command that ran to its end, or was killed for running too long. */
 const Finished = Schema.Struct({
   /** Null when the command did not exit on its own: killed for running too long, or by a signal. */
   exitCode: Schema.NullOr(Schema.Int),
+  /** The signal that ended the command, such as SIGKILL; present only when one did. */
+  signal: Schema.optional(Schema.String),
   stdout: Schema.String,
   stderr: Schema.String,
   truncated: Schema.Boolean,
@@ -75,6 +115,8 @@ const Finished = Schema.Struct({
   /** Where the whole stderr was saved; present only when stderr was cut. */
   stderrFile: Schema.optional(Schema.String),
   timedOut: Schema.Boolean,
+  /** What to do about a timeout; present only when the command timed out. */
+  message: Schema.optional(Schema.String),
   durationMs: Schema.Int,
 });
 
@@ -91,29 +133,37 @@ const Started = Schema.Struct({
 /** The same shape a surface gets from `listTasks`, so the two never drift. */
 const TaskStatus = BackgroundTask;
 
+/** The signal that ended a task, such as SIGKILL; the tools report it, `listTasks` does not. */
+const TaskSignal = Schema.optional(Schema.String);
+
 /** A task as `task_stop` and `task_list` report it: without the output files, which `task_output` names. */
 const TaskSummary = Schema.Struct({
   taskId: BackgroundTask.fields.taskId,
   command: BackgroundTask.fields.command,
   running: BackgroundTask.fields.running,
   exitCode: BackgroundTask.fields.exitCode,
+  signal: TaskSignal,
   timedOut: BackgroundTask.fields.timedOut,
   stopped: BackgroundTask.fields.stopped,
   durationMs: BackgroundTask.fields.durationMs,
 });
 
-const summarise = (status: typeof TaskStatus.Type): typeof TaskSummary.Type => ({
-  taskId: status.taskId,
-  command: status.command,
-  running: status.running,
-  exitCode: status.exitCode,
-  timedOut: status.timedOut,
-  stopped: status.stopped,
-  durationMs: status.durationMs,
-});
+const summarise = (status: BackgroundTaskStatus): typeof TaskSummary.Type => {
+  const summary: typeof TaskSummary.Type = {
+    taskId: status.taskId,
+    command: status.command,
+    running: status.running,
+    exitCode: status.exitCode,
+    timedOut: status.timedOut,
+    stopped: status.stopped,
+    durationMs: status.durationMs,
+  };
+  return status.signal === undefined ? summary : { ...summary, signal: status.signal };
+};
 
 const TaskOutputResult = Schema.Struct({
   ...TaskStatus.fields,
+  signal: TaskSignal,
   /** What arrived since the last task_output call for this task. */
   stdout: Schema.String,
   stderr: Schema.String,
@@ -129,6 +179,7 @@ export const Shell = Tool.make("shell", {
     `A command is killed after ${DEFAULT_TIMEOUT_MS} ms unless timeout says otherwise, ${MAX_TIMEOUT_MS} ms at most, and comes back with timedOut set. ` +
     "Set workdir to run in a subdirectory instead of cd. " +
     `stdout and stderr are each cut in the middle past ${OUTPUT_LIMIT} characters and marked truncated; the whole of a cut stream is saved to the file stdoutFile or stderrFile names, outside the workspace, for grep, sed -n, or tail through this tool. ` +
+    "Do not pipe a command through tail or head to shorten its output: that hides its exit code, and the cut already keeps the start and the end. " +
     "Chain dependent commands with && in one call; run independent commands as separate, parallel calls. " +
     "Set background to true for a command that should keep running while you work, a dev server or a long test run: " +
     "the call returns at once with a taskId, task_output reads what it has printed since and can wait for it to end, and task_stop ends it. " +
@@ -233,6 +284,24 @@ const clampTimeout = (requested: number | undefined): number =>
   requested === undefined || requested <= 0
     ? DEFAULT_TIMEOUT_MS
     : Math.min(requested, MAX_TIMEOUT_MS);
+
+/**
+ * What a timed-out call is told, so the next one is not the same call timing
+ * out again: a longer timeout while there is room under the cap, the
+ * background past it. A timeout asked for above the cap is said to have been
+ * cut, since the model believes it gave the command longer than it had.
+ */
+const timeoutAdvice = (requested: number | undefined, limit: number): string => {
+  const killed =
+    requested !== undefined && requested > MAX_TIMEOUT_MS
+      ? `Killed after ${limit} ms: the timeout of ${requested} ms asked for is over the cap and was clamped to ${MAX_TIMEOUT_MS} ms.`
+      : `Killed after ${limit} ms.`;
+  const next =
+    limit < MAX_TIMEOUT_MS
+      ? `If it needs longer, raise timeout, up to ${MAX_TIMEOUT_MS} ms, or run it with background: true.`
+      : "If it needs longer, run it with background: true, which has no timeout unless you give one.";
+  return `${killed} ${next}`;
+};
 
 const clampWait = (requested: number | undefined): number =>
   requested === undefined || requested <= 0 ? DEFAULT_WAIT_MS : Math.min(requested, MAX_WAIT_MS);
@@ -355,44 +424,43 @@ export const shellToolHandlers = Effect.gen(function* () {
       // Drain both pipes while the command runs, or a chatty one blocks on a full pipe.
       // Each chunk lands in a Ref, so what was read survives interrupting the reader.
       // Once a stream passes the limit, all of it goes to a file too, from the start.
-      const collect = (
+      const collect = Effect.fn("ShellTool.collect")(function* (
         stream: Stream.Stream<Uint8Array, { readonly message: string }>,
         name: "stdout" | "stderr",
-      ) =>
-        Effect.gen(function* () {
-          const buffer = yield* Ref.make(EMPTY);
-          const file = path.join(outputDir, `${callId}.${name}.log`);
-          const saved = yield* Ref.make(false);
-          // A file that cannot be written loses nothing the model would have seen.
-          const save = (text: string, flag: "w" | "a") =>
-            Effect.gen(function* () {
-              if (flag === "w") {
-                yield* fs.makeDirectory(outputDir, { recursive: true, mode: 0o700 });
-              }
-              yield* fs.writeFileString(file, text, { flag, mode: 0o600 });
-              yield* Ref.set(saved, true);
-            }).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning(`shell: output of ${callId} not saved to ${file}`, cause),
-              ),
-            );
-          const reader = yield* Effect.forkChild(
-            stream.pipe(
-              Stream.decodeText(),
-              Stream.runForEach((chunk) =>
-                Effect.gen(function* () {
-                  const before = yield* Ref.getAndUpdate(buffer, (b) => push(b, chunk));
-                  if (whole(push(before, chunk))) {
-                    return;
-                  }
-                  yield* whole(before) ? save(before.head + chunk, "w") : save(chunk, "a");
-                }),
-              ),
-              Effect.mapError(spawnFailed),
+      ) {
+        const buffer = yield* Ref.make(EMPTY);
+        const file = path.join(outputDir, `${callId}.${name}.log`);
+        const saved = yield* Ref.make(false);
+        // A file that cannot be written loses nothing the model would have seen.
+        const save = Effect.fnUntraced(
+          function* (text: string, flag: "w" | "a") {
+            if (flag === "w") {
+              yield* fs.makeDirectory(outputDir, { recursive: true, mode: 0o700 });
+            }
+            yield* fs.writeFileString(file, text, { flag, mode: 0o600 });
+            yield* Ref.set(saved, true);
+          },
+          Effect.catchCause((cause) =>
+            Effect.logWarning(`shell: output of ${callId} not saved to ${file}`, cause),
+          ),
+        );
+        const reader = yield* Effect.forkChild(
+          stream.pipe(
+            Stream.decodeText(),
+            Stream.runForEach((chunk) =>
+              Effect.gen(function* () {
+                const before = yield* Ref.getAndUpdate(buffer, (b) => push(b, chunk));
+                if (whole(push(before, chunk))) {
+                  return;
+                }
+                yield* whole(before) ? save(before.head + chunk, "w") : save(chunk, "a");
+              }),
             ),
-          );
-          return { buffer, reader, file, saved };
-        });
+            Effect.mapError(spawnFailed),
+          ),
+        );
+        return { buffer, reader, file, saved };
+      });
       const stdout = yield* collect(handle.stdout, "stdout");
       const stderr = yield* collect(handle.stderr, "stderr");
       // A child a signal killed has no exit code, which the spawner reports
@@ -408,20 +476,23 @@ export const shellToolHandlers = Effect.gen(function* () {
         yield* handle.kill({ forceKillAfter: FORCE_KILL_AFTER }).pipe(Effect.ignore);
       }
       /** Wait for a reader to finish; past the grace period take what it has and stop it. */
-      const settle = (collector: typeof stdout) =>
-        Effect.gen(function* () {
-          const done = yield* Fiber.join(collector.reader).pipe(
-            Effect.ignore,
-            Effect.timeoutOption(COLLECT_GRACE),
-          );
-          if (Option.isNone(done)) {
-            yield* Fiber.interrupt(collector.reader);
-          }
-          const savedAs = (yield* Ref.get(collector.saved)) ? collector.file : undefined;
-          return { ...render(yield* Ref.get(collector.buffer), savedAs), savedAs };
-        });
+      const settle = Effect.fn("ShellTool.settle")(function* (collector: typeof stdout) {
+        const done = yield* Fiber.join(collector.reader).pipe(
+          Effect.ignore,
+          Effect.timeoutOption(COLLECT_GRACE),
+        );
+        if (Option.isNone(done)) {
+          yield* Fiber.interrupt(collector.reader);
+        }
+        const savedAs = (yield* Ref.get(collector.saved)) ? collector.file : undefined;
+        return { ...render(yield* Ref.get(collector.buffer), savedAs), savedAs };
+      });
       const [out, err] = yield* Effect.all([settle(stdout), settle(stderr)], { concurrency: 2 });
       const finished = yield* Clock.currentTimeMillis;
+      const signal =
+        Option.isSome(exit) && exit.value._tag === "Failure"
+          ? signalOf(exit.value.failure)
+          : undefined;
       const result: typeof Finished.Type = {
         exitCode:
           Option.isSome(exit) && exit.value._tag === "Success" ? Number(exit.value.success) : null,
@@ -431,8 +502,12 @@ export const shellToolHandlers = Effect.gen(function* () {
         timedOut: Option.isNone(exit),
         durationMs: finished - started,
       };
+      const withSignal = signal === undefined ? result : { ...result, signal };
+      const withAdvice = Option.isSome(exit)
+        ? withSignal
+        : { ...withSignal, message: timeoutAdvice(timeout, limit) };
       const withStdout =
-        out.savedAs === undefined ? result : { ...result, stdoutFile: out.savedAs };
+        out.savedAs === undefined ? withAdvice : { ...withAdvice, stdoutFile: out.savedAs };
       return err.savedAs === undefined ? withStdout : { ...withStdout, stderrFile: err.savedAs };
     }).pipe(Effect.scoped);
   });

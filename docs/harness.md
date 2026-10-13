@@ -102,7 +102,17 @@ Each is a `Context.Service` with static layers. Ids are `magentic/core/<Name>`.
   `list_dir`, `glob`, `grep`, `shell`, `http_fetch`, `load_skill`, `remember`, `recall`. The
   file tools stay inside the `WorkspaceRoot`; `glob` and `grep` walk the tree themselves,
   skipping `node_modules`, `.git`, and hidden directories, so nothing depends on ripgrep. Each declares `capability` and `risk` through
-  `Tool.make(...).annotate(...)`. `shell` with `background: true` leaves the command
+  `Tool.make(...).annotate(...)`. `edit_file` matches exactly first and then, after
+  opencode's replacer chain, whole lines that differ only in trailing whitespace, in
+  indentation, or in both, taking a tolerant match only when it is unique and re-indenting
+  the replacement to fit (`EditMatch.ts`); it matches CRLF files and a byte-order mark as
+  LF text and writes both back. Writes to one file take turns, since a response's tool
+  calls run together. `write_file` refuses to replace a file the model has not read, or
+  one that changed since it was read or written, as Hermes does. `read_file` refuses
+  binary files and a directory, cuts lines at 2000 characters, says when an offset is past
+  the end, and names similar files when the one asked for is missing. The registry
+  tells the model, in the tool result, when it has made the same call with the same result
+  three times in a run. `shell` with `background: true` leaves the command
   running and returns a task id at once; `task_output` reads what it printed since the last
   read, waiting for it to end when asked, `task_stop` kills it, and `task_list` names the
   conversation's tasks, running or ended, for a model that lost an id, after a compaction
@@ -169,12 +179,23 @@ Each is a `Context.Service` with static layers. Ids are `magentic/core/<Name>`.
   (`Retry.ts`, after opencode). The chat appends the prompt even when the stream fails, so
   the history is put back before each try; each try emits `Retrying` with the wait. A call
   that fails after it spoke is not retried, so nothing shows twice.
+  A call the provider refuses as over the model's window (matched on the provider's text,
+  after opencode's list) is compacted and taken again, once a run. A call to a tool the
+  model was not offered, which Effect's decoder turns into a retryable invalid output,
+  is not retried blind: the model is told which tools it has, the same correction a tool
+  call with bad arguments gets.
   The summary is a user message marked in its
   `options.magentic`; the model sees the system prompt, the latest summary, and what
   follows it, while `history.json` keeps everything before as well, so transcripts still
   show it. The `compact` RPC is the manual route. Compaction is core, not a
   plugin: a plugin command runs in the surface and only reaches the gateway through the
   protocol, so it cannot read the history or call the model.
+- **SystemContext** (`ProjectContext.ts`): what the runner appends to every agent's own
+  prompt. The gateway gives it the workspace root, whether a git repository holds it,
+  the platform, and the day the conversation began (not today, so the prompt stays
+  cached), then the project's `AGENTS.md`, or `CLAUDE.md` when a directory has none, from
+  the root of the repository down to the workspace, each cut at 20k characters. Read on
+  every run, so an edit counts from the next one. Empty in tests.
 - **ModelProvider** (`@magentic/model`): picks the `LanguageModel` layer from
   `magentic.yaml`. Decision: Effect AI (`effect/unstable/ai`) is the model interface, not the
   Vercel AI SDK. The runner, `Toolkit`, `Chat`, `McpServer`, and the policy wrapper all sit

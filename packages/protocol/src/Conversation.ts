@@ -79,3 +79,9 @@ export class CompactionFailed extends Schema.TaggedError<CompactionFailed>()("Co
   id: Schema.String,
   message: Schema.String,
 }) {}
+
+/** The gateway could not write the conversation down: saving what it is, or deleting it. Nothing changed. */
+export class ConversationWriteFailed extends Schema.TaggedError<ConversationWriteFailed>()(
+  "ConversationWriteFailed",
+  { id: Schema.String, message: Schema.String },
+) {}
