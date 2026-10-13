@@ -131,16 +131,17 @@ export const layerFake = (script: FakeScript): Layer.Layer<LanguageModel.Languag
     LanguageModel.LanguageModel,
     Effect.gen(function* () {
       const calls = yield* Ref.make(0);
-      const next = (options: LanguageModel.ProviderOptions) =>
-        Effect.gen(function* () {
-          const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
-          const reasoning = yield* FakeReasoning;
-          const turn = script({ index, options, reasoning });
-          if (turn instanceof AiError.AiError) {
-            return yield* turn;
-          }
-          return Predicate.hasProperty(turn, "cutBy") ? turn : { parts: turn, cutBy: undefined };
-        });
+      const next = Effect.fn("FakeLanguageModel.next")(function* (
+        options: LanguageModel.ProviderOptions,
+      ) {
+        const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
+        const reasoning = yield* FakeReasoning;
+        const turn = script({ index, options, reasoning });
+        if (turn instanceof AiError.AiError) {
+          return yield* turn;
+        }
+        return Predicate.hasProperty(turn, "cutBy") ? turn : { parts: turn, cutBy: undefined };
+      });
       return yield* LanguageModel.make({
         generateText: (options) =>
           next(options).pipe(

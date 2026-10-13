@@ -99,8 +99,8 @@ const FIRST_SWEEP_WINDOW = "1 day";
  * attempts are asked for again, so a delivery that keeps failing does not
  * loop.
  */
-export const redeliverFailed = (api: GitHubApi["Service"], state: BridgeState["Service"]) =>
-  Effect.gen(function* () {
+export const redeliverFailed = Effect.fn("githubBridge.redeliverFailed")(
+  function* (api: GitHubApi["Service"], state: BridgeState["Service"]) {
     const now = yield* DateTime.now;
     const since = Option.getOrElse(yield* state.lastSweepAt, () =>
       DateTime.formatIso(DateTime.subtractDuration(now, FIRST_SWEEP_WINDOW)),
@@ -110,7 +110,7 @@ export const redeliverFailed = (api: GitHubApi["Service"], state: BridgeState["S
       raw: true,
       schema: Schema.String,
     });
-    const deliveries = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(HookDeliveries))(
+    const deliveries = yield* Schema.decodeEffect(Schema.fromJsonString(HookDeliveries))(
       quoteIds(listed.body),
     ).pipe(
       Effect.mapError(
@@ -146,8 +146,8 @@ export const redeliverFailed = (api: GitHubApi["Service"], state: BridgeState["S
         );
     }
     yield* state.setLastSweep(DateTime.formatIso(now));
-  }).pipe(
-    Effect.catch((error) =>
-      Effect.logWarning(`github bridge: cannot list webhook deliveries: ${error.message}`),
-    ),
-  );
+  },
+  Effect.catch((error) =>
+    Effect.logWarning(`github bridge: cannot list webhook deliveries: ${error.message}`),
+  ),
+);

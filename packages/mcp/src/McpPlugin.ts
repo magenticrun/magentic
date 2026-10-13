@@ -7,7 +7,18 @@ import {
   toolMatches,
 } from "@magentic/plugin";
 import { McpServerInfo, type McpServerStatus } from "@magentic/protocol";
-import { Duration, Effect, Fiber, Option, type Path, Queue, Ref, Schema, type Scope } from "effect";
+import {
+  Deferred,
+  Duration,
+  Effect,
+  Fiber,
+  Option,
+  type Path,
+  Queue,
+  Ref,
+  Schema,
+  type Scope,
+} from "effect";
 import { McpServerConfig } from "./McpConfig.ts";
 import { connect, type ConnectionEvent, type McpConnection } from "./McpConnection.ts";
 import { McpServers } from "./McpServers.ts";
@@ -19,11 +30,10 @@ const Servers = Schema.Record(Schema.String, Schema.Json);
 const REPUBLISH_DELAY = Duration.millis(250);
 
 /**
- * How long startup waits for the servers to connect. One slower than this
+ * How long a run waits for the servers to connect. One slower than this
  * keeps connecting and publishes its tools when it arrives, the way a server
  * that adds tools later does; a server that accepts and never answers would
- * otherwise cost every start of the gateway its whole connect timeout, thirty
- * seconds by default, before anything is served.
+ * otherwise cost a run its whole connect timeout, thirty seconds by default.
  */
 const STARTUP_BUDGET = Duration.seconds(10);
 
@@ -71,11 +81,16 @@ const logAt = (event: Extract<ConnectionEvent, { readonly _tag: "Log" }>, server
 const targetOf = (config: McpServerConfig): string =>
   config.type === "local" ? config.command.join(" ") : config.url;
 
-/** One server: connect, publish its tools, and follow it until it goes away. */
+/**
+ * One server: connect, publish its tools, and follow it until it goes away.
+ * `listed` completes once the server has a row in `/mcp`, before anything
+ * goes on the network.
+ */
 const serve = Effect.fn("mcpPlugin.serve")(function* (
   ctx: PluginContext,
   server: string,
   raw: Schema.Json,
+  listed: Deferred.Deferred<void>,
 ) {
   const servers = yield* McpServers;
   const decoded = yield* Effect.result(Schema.decodeUnknownEffect(McpServerConfig)(raw));
@@ -102,6 +117,8 @@ const serve = Effect.fn("mcpPlugin.serve")(function* (
     yield* report("disabled", []);
     return;
   }
+  yield* report("connecting", []);
+  yield* Deferred.succeed(listed, undefined);
   const connected = yield* Effect.result(connect(server, config, ctx.paths.workspace));
   if (connected._tag === "Failure") {
     yield* Effect.logWarning(`mcp server ${server} is unavailable: ${connected.failure.message}`);
@@ -250,16 +267,27 @@ export const mcpPlugin = define<Path.Path | McpServers>({
       ),
     );
     const starting = yield* Effect.forEach(Object.entries(servers), ([server, raw]) =>
-      Effect.forkScoped(
-        serve(ctx, server, raw).pipe(
-          // One server is one server: a failure here is reported and skipped,
-          // rather than taking the plugin and every other server with it.
-          Effect.catchCause((cause) => Effect.logError(`mcp server ${server} failed`, cause)),
-        ),
-      ),
+      Effect.gen(function* () {
+        const listed = yield* Deferred.make<void>();
+        const fiber = yield* Effect.forkScoped(
+          serve(ctx, server, raw, listed).pipe(
+            // One server is one server: a failure here is reported and skipped,
+            // rather than taking the plugin and every other server with it.
+            Effect.catchCause((cause) => Effect.logError(`mcp server ${server} failed`, cause)),
+            Effect.ensuring(Deferred.succeed(listed, undefined)),
+          ),
+        );
+        return { fiber, listed };
+      }),
     );
-    yield* Effect.forEach(starting, Fiber.join, { concurrency: "unbounded", discard: true }).pipe(
-      Effect.timeoutOption(STARTUP_BUDGET),
-    );
+    // Every server is in `/mcp` when setup returns: disabled, invalid, or connecting.
+    yield* Effect.forEach(starting, ({ listed }) => Deferred.await(listed), { discard: true });
+    // Waited for by the first runs, not by setup: the gateway serves, and
+    // the chat draws, while the servers are still on the network.
+    const connected = yield* Effect.forEach(starting, ({ fiber }) => Fiber.join(fiber), {
+      concurrency: "unbounded",
+      discard: true,
+    }).pipe(Effect.timeoutOption(STARTUP_BUDGET), Effect.asVoid, Effect.forkScoped);
+    yield* ctx.tool.arriving(Fiber.join(connected));
   }),
 });

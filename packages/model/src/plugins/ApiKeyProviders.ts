@@ -8,10 +8,10 @@ import {
   ModelProviderError,
   type Plugin,
 } from "@magentic/plugin";
-import { Effect, Layer, Option, type Redacted } from "effect";
+import { Effect, Layer, Option, Predicate, type Redacted, Schema } from "effect";
 import { reasoningContext } from "../Reasoning.ts";
 import { LanguageModel } from "effect/unstable/ai";
-import { HttpClient } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest } from "effect/unstable/http";
 import { apiKeyHint, type ApiKeyProvider, ApiKeyStore } from "../ApiKeys.ts";
 import * as Clients from "../Clients.ts";
 import {
@@ -52,19 +52,69 @@ interface ApiKeyPluginOptions {
 
 const hidden = (model: CatalogModel) => model.status === "deprecated" || model.status === "alpha";
 
-/** The client for the route's protocol is loaded when the layer is first built. */
+const ENCRYPTED_REASONING = "reasoning.encrypted_content";
+
+const parseJson = Schema.decodeOption(Schema.fromJsonString(Schema.Json));
+
+const isJsonObject = (value: Schema.Json | undefined): value is Schema.JsonObject =>
+  Predicate.isObject(value) && !Array.isArray(value);
+
+/**
+ * A Responses request body that asks for the encrypted reasoning back.
+ * Effect adds the include itself only for the model ids it knows reason (o1,
+ * o3, gpt-5 and a few more) and drops any `include` set in the config, so a
+ * newer reasoning model, such as gpt-6, would get none: its reasoning would
+ * come back without the encrypted content and, with nothing stored, a later
+ * turn that replays it by id would be refused. A body that is not a JSON
+ * object goes out as it is.
+ */
+const withEncryptedReasoning = (
+  request: HttpClientRequest.HttpClientRequest,
+): HttpClientRequest.HttpClientRequest => {
+  const body = request.body;
+  if (body._tag !== "Uint8Array") {
+    return request;
+  }
+  const json = Option.getOrUndefined(parseJson(body.text ?? new TextDecoder().decode(body.body)));
+  if (!isJsonObject(json)) {
+    return request;
+  }
+  const include = Array.isArray(json["include"]) ? json["include"] : [];
+  return include.includes(ENCRYPTED_REASONING)
+    ? request
+    : HttpClientRequest.bodyText(
+        request,
+        JSON.stringify({ ...json, include: [...include, ENCRYPTED_REASONING] }),
+        body.contentType,
+      );
+};
+
+/**
+ * The client for the route's protocol is loaded when the layer is first
+ * built. What the catalog says of the model shapes the request: Anthropic's
+ * client picks `max_tokens` from its own table of model ids, 128000 for one
+ * it does not know, and Anthropic refuses more than the model's output
+ * limit, so a model the catalog gives a limit asks for that instead. The
+ * Responses route never has OpenAI store what it generates: reasoning is
+ * carried from turn to turn as encrypted content, the way the Codex route
+ * already does it, rather than as ids of items kept on OpenAI's side.
+ */
 const layerFor = (
   route: ModelRoute,
-  model: string,
+  model: CatalogModel,
   apiKey: Redacted.Redacted<string>,
   http: HttpClient.HttpClient,
 ): Layer.Layer<LanguageModel.LanguageModel> => {
   const withHttp = Layer.succeed(HttpClient.HttpClient, http);
+  const output = model.limit?.output ?? 0;
   switch (route.protocol) {
     case "anthropic":
       return Layer.unwrap(
         Effect.map(Clients.anthropic, ({ AnthropicClient, AnthropicLanguageModel }) =>
-          AnthropicLanguageModel.layer({ model }).pipe(
+          AnthropicLanguageModel.layer({
+            model: model.id,
+            config: output > 0 ? { max_tokens: output } : undefined,
+          }).pipe(
             Layer.provide(
               AnthropicClient.layer({
                 apiKey,
@@ -78,9 +128,16 @@ const layerFor = (
     case "openai-responses":
       return Layer.unwrap(
         Effect.map(Clients.openai, ({ OpenAiClient, OpenAiLanguageModel }) =>
-          OpenAiLanguageModel.layer({ model }).pipe(
+          OpenAiLanguageModel.layer({ model: model.id, config: { store: false } }).pipe(
             Layer.provide(
-              OpenAiClient.layer({ apiKey, apiUrl: route.url }).pipe(Layer.provide(withHttp)),
+              OpenAiClient.layer({
+                apiKey,
+                apiUrl: route.url,
+                transformClient:
+                  model.reasoning === true
+                    ? (client) => HttpClient.mapRequest(client, withEncryptedReasoning)
+                    : undefined,
+              }).pipe(Layer.provide(withHttp)),
             ),
           ),
         ),
@@ -88,7 +145,7 @@ const layerFor = (
     case "openai-compat":
       return Layer.unwrap(
         Effect.map(Clients.openaiCompat, ({ OpenAiClient, OpenAiLanguageModel }) =>
-          OpenAiLanguageModel.layer({ model }).pipe(
+          OpenAiLanguageModel.layer({ model: model.id }).pipe(
             Layer.provide(
               OpenAiClient.layer({ apiKey, apiUrl: route.url }).pipe(Layer.provide(withHttp)),
             ),
@@ -146,13 +203,16 @@ const apiKeyPlugin = (
         }),
       );
 
+      /** The catalog's entry for a model and its route. */
       const routeFor = (modelId: string) =>
         Effect.map(routed, (all) => {
           const listed = all.find((entry) => entry.model.id === modelId);
+          if (listed !== undefined) {
+            return { model: listed.model, route: Option.some(listed.route) };
+          }
           // A model the catalog does not know yet still gets the provider's usual route.
-          return listed === undefined
-            ? options.route({ id: modelId, name: modelId })
-            : Option.some(listed.route);
+          const unlisted: CatalogModel = { id: modelId, name: modelId };
+          return { model: unlisted, route: options.route(unlisted) };
         });
 
       /** The request configuration for a thinking level, in the protocol the model's route speaks. */
@@ -176,26 +236,25 @@ const apiKeyPlugin = (
         logout: store.remove(options.provider).pipe(Effect.mapError(failed)),
         models: Effect.map(routed, (all) => all.map(({ model }) => ModelInfo.fromCatalog(model))),
         defaultModel: options.defaultModel,
-        model: (modelId) =>
-          Effect.gen(function* () {
-            const k = yield* key;
-            if (Option.isNone(k)) {
-              return Option.none();
-            }
-            const route = yield* routeFor(modelId);
-            if (Option.isNone(route)) {
-              return Option.some(
-                Layer.effect(
-                  LanguageModel.LanguageModel,
-                  new ModelProviderError({
-                    provider: id,
-                    message: `${options.name} lists "${modelId}" but magentic has no client for its protocol`,
-                  }),
-                ),
-              );
-            }
-            return Option.some(layerFor(route.value, modelId, k.value, http));
-          }),
+        model: Effect.fn(`${id}.model`)(function* (modelId: string) {
+          const k = yield* key;
+          if (Option.isNone(k)) {
+            return Option.none();
+          }
+          const { model, route } = yield* routeFor(modelId);
+          if (Option.isNone(route)) {
+            return Option.some(
+              Layer.effect(
+                LanguageModel.LanguageModel,
+                new ModelProviderError({
+                  provider: id,
+                  message: `${options.name} lists "${modelId}" but magentic has no client for its protocol`,
+                }),
+              ),
+            );
+          }
+          return Option.some(layerFor(route.value, model, k.value, http));
+        }),
         reasoning,
       });
     }),

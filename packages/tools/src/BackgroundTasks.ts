@@ -10,6 +10,7 @@ import {
   Option,
   Path,
   type PlatformError,
+  Predicate,
   Ref,
   Schema,
   Scope,
@@ -55,6 +56,8 @@ export interface TaskStatus {
   readonly running: boolean;
   /** Null while running, and when it did not exit on its own: stopped, timed out, or killed by a signal. */
   readonly exitCode: number | null;
+  /** The signal that ended it, such as SIGKILL; present only when one did. */
+  readonly signal?: string;
   readonly timedOut: boolean;
   /** Whether `task_stop` ended it. */
   readonly stopped: boolean;
@@ -74,6 +77,7 @@ export interface TaskRead extends TaskStatus {
 
 interface Ended {
   readonly exitCode: number | null;
+  readonly signal: string | undefined;
   readonly timedOut: boolean;
   readonly at: number;
 }
@@ -110,6 +114,19 @@ interface Task {
   readonly stopped: Ref.Ref<boolean>;
 }
 
+/** How the spawner words an exit without a code; the signal is only in its message. */
+const SIGNALLED = /signal: '(SIG[A-Z0-9]+)'/;
+
+/**
+ * The signal that ended a child, from the failure the spawner gives for an
+ * exit without a code. It carries the signal only in the message of the
+ * error it wraps, so that is where it is read; undefined when it is not there.
+ */
+export const signalOf = (error: PlatformError.PlatformError): string | undefined => {
+  const cause = error.reason.cause;
+  return Predicate.isError(cause) ? SIGNALLED.exec(cause.message)?.[1] : undefined;
+};
+
 const seconds = (ms: number): string => `${Math.max(1, Math.round(ms / 1000))}s`;
 
 const describeEnd = (status: TaskStatus, timeout: Option.Option<number>): string => {
@@ -119,9 +136,10 @@ const describeEnd = (status: TaskStatus, timeout: Option.Option<number>): string
   if (status.timedOut) {
     return `was killed after its timeout of ${seconds(Option.getOrElse(timeout, () => 0))}`;
   }
-  return status.exitCode === null
-    ? "was killed by a signal"
-    : `exited with code ${status.exitCode}`;
+  if (status.exitCode !== null) {
+    return `exited with code ${status.exitCode}`;
+  }
+  return status.signal === undefined ? "was killed by a signal" : `was killed by ${status.signal}`;
 };
 
 /**
@@ -179,6 +197,7 @@ export class BackgroundTasks extends Context.Service<
     const statusOf = Effect.fnUntraced(function* (task: Task) {
       const { ended } = yield* Ref.get(task.state);
       const now = yield* Clock.currentTimeMillis;
+      const signal = Option.match(ended, { onNone: () => undefined, onSome: (e) => e.signal });
       const status: TaskStatus = {
         taskId: task.id,
         command: task.command,
@@ -191,7 +210,7 @@ export class BackgroundTasks extends Context.Service<
         stdoutFile: task.stdoutFile,
         stderrFile: task.stderrFile,
       };
-      return status;
+      return signal === undefined ? status : { ...status, signal };
     });
 
     /** The principal's task by id; none for another's, which is as good as no task. */
@@ -259,13 +278,12 @@ export class BackgroundTasks extends Context.Service<
       );
 
     /** Wait for a reader to finish; past the grace period take what it has and stop it. */
-    const settle = (reader: Fiber.Fiber<void>) =>
-      Effect.gen(function* () {
-        const done = yield* Fiber.join(reader).pipe(Effect.timeoutOption(COLLECT_GRACE));
-        if (Option.isNone(done)) {
-          yield* Fiber.interrupt(reader);
-        }
-      });
+    const settle = Effect.fn("BackgroundTasks.settle")(function* (reader: Fiber.Fiber<void>) {
+      const done = yield* Fiber.join(reader).pipe(Effect.timeoutOption(COLLECT_GRACE));
+      if (Option.isNone(done)) {
+        yield* Fiber.interrupt(reader);
+      }
+    });
 
     const noticeFor = Effect.fnUntraced(function* (task: Task, timeout: Option.Option<number>) {
       const status = yield* statusOf(task);
@@ -283,8 +301,8 @@ export class BackgroundTasks extends Context.Service<
     });
 
     /** The task's life: spawn, drain, wait, and tell the conversation, unless someone was waiting. */
-    const run = (task: Task, options: TaskStartOptions) =>
-      Effect.gen(function* () {
+    const run = Effect.fn("BackgroundTasks.run")(
+      function* (task: Task, options: TaskStartOptions) {
         const spawned = yield* spawner
           .spawn(
             ChildProcess.make(task.command, {
@@ -326,6 +344,10 @@ export class BackgroundTasks extends Context.Service<
             Option.isSome(exit) && exit.value._tag === "Success"
               ? Number(exit.value.success)
               : null,
+          signal:
+            Option.isSome(exit) && exit.value._tag === "Failure"
+              ? signalOf(exit.value.failure)
+              : undefined,
           timedOut: Option.isNone(exit),
           at,
         };
@@ -337,12 +359,13 @@ export class BackgroundTasks extends Context.Service<
         if (waiting === 0 && !(yield* Ref.get(task.stopped))) {
           yield* notices.post(task.owner.conversationId, yield* noticeFor(task, options.timeout));
         }
-      }).pipe(
-        Effect.scoped,
-        Effect.catchCause((cause) =>
+      },
+      Effect.scoped,
+      (effect, task) =>
+        Effect.catchCause(effect, (cause) =>
           Effect.logWarning(`background task ${task.id} did not end cleanly`, cause),
         ),
-      );
+    );
 
     const start = Effect.fn("BackgroundTasks.start")(function* (options: TaskStartOptions) {
       const started = yield* starting.withPermits(1)(

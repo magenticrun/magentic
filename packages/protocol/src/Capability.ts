@@ -6,15 +6,19 @@ import { Schema } from "effect";
  * tool an MCP server contributes: the gateway cannot tell what such a tool does.
  * `forge:read` and `forge:write` are the tools a bridge brings for the code
  * host it knows (GitHub, GitLab): reading an issue or a pull request, and
- * commenting, pushing, and opening pull requests as the bot.
+ * commenting, pushing, and opening pull requests as the bot. `trace:read` is
+ * reading how the calling conversation's own runs spent their time.
  */
 export const Capability = Schema.Literals([
   "fs:read",
   "fs:write",
   "shell",
   "http:egress",
+  "browser:control",
+  "browser:script",
   "mcp",
   "forge:read",
   "forge:write",
+  "trace:read",
 ]);
 export type Capability = typeof Capability.Type;

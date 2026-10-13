@@ -17,5 +17,11 @@ export const commandRegistryOver = (
   CommandRegistry.of({
     list: commands,
     get: (name) =>
-      Effect.map(commands, (all) => Option.fromNullishOr(all.find((c) => c.name === name))),
+      Effect.map(commands, (all) =>
+        Option.fromNullishOr(
+          all.find((command) =>
+            command.name === name ? true : (command.aliases?.includes(name) ?? false),
+          ),
+        ),
+      ),
   });

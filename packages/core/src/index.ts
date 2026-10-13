@@ -24,4 +24,8 @@ export * from "./ScheduledTaskStore.ts";
 export * from "./ScheduledTasks.ts";
 export * from "./Steering.ts";
 export * from "./Transcript.ts";
+export * from "./TracePlugin.ts";
+export * from "./TraceReport.ts";
+export * from "./TraceStore.ts";
 export * from "./RelayConfig.ts";
+export * from "./ProjectContext.ts";

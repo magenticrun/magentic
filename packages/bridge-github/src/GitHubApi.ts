@@ -337,23 +337,24 @@ export class GitHubApi extends Context.Service<
           if (wait > 60_000) return yield* error;
           yield* Effect.sleep(wait);
         });
-        const retried = <A>(operation: Effect.Effect<A, GitHubApiError>) =>
-          Effect.gen(function* () {
-            let transients = 0;
-            let rateAttempted = false;
-            while (true) {
-              const result = yield* Effect.result(operation);
-              if (result._tag === "Success") return result.success;
-              const error = result.failure;
-              if ((error.reason === "Server" || error.reason === "Transport") && transients < 3) {
-                yield* Effect.sleep(500 * 2 ** transients * (0.5 + (yield* Random.next)));
-                transients += 1;
-              } else if (error.reason === "RateLimited" && !rateAttempted) {
-                rateAttempted = true;
-                yield* waitForRateLimit(error);
-              } else return yield* error;
-            }
-          });
+        const retried = Effect.fn("GitHubApi.retried")(function* <A>(
+          operation: Effect.Effect<A, GitHubApiError>,
+        ) {
+          let transients = 0;
+          let rateAttempted = false;
+          while (true) {
+            const result = yield* Effect.result(operation);
+            if (result._tag === "Success") return result.success;
+            const error = result.failure;
+            if ((error.reason === "Server" || error.reason === "Transport") && transients < 3) {
+              yield* Effect.sleep(500 * 2 ** transients * (0.5 + (yield* Random.next)));
+              transients += 1;
+            } else if (error.reason === "RateLimited" && !rateAttempted) {
+              rateAttempted = true;
+              yield* waitForRateLimit(error);
+            } else return yield* error;
+          }
+        });
         const appRequest = <A>(method: Method, path: string, opts: RequestOptions<A>) =>
           retried(
             Effect.flatMap(currentJwt(`${method} ${path}`), (bearer) =>

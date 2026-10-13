@@ -175,16 +175,13 @@ const COMPOSER_KEYS: NonNullable<TextareaOptions["keyBindings"]> = [
   { name: "kpenter", shift: true, action: "newline" },
 ];
 
-/** `842`, `3.2k`, `12k`, `1M`: two or three figures, whatever the size. */
+/** `842`, `3.25k`, `12.37k`, `1.05M`: up to two decimals, trailing zeros dropped. */
 const formatTokens = (count: number): string => {
   // What would round up to 1000k is 1M.
-  if (count >= 1_000_000 || Math.round(count / 1000) >= 1000) {
-    return `${Number((count / 1_000_000).toFixed(1))}M`;
+  if (count >= 1_000_000 || Number((count / 1000).toFixed(2)) >= 1000) {
+    return `${Number((count / 1_000_000).toFixed(2))}M`;
   }
-  if (count >= 10_000) {
-    return `${Math.round(count / 1000)}k`;
-  }
-  return count >= 1000 ? `${Number((count / 1000).toFixed(1))}k` : `${count}`;
+  return count >= 1000 ? `${Number((count / 1000).toFixed(2))}k` : `${count}`;
 };
 
 const isEnter = (name: string) => name === "return" || name === "kpenter" || name === "linefeed";
@@ -356,6 +353,7 @@ const summaryFor = (line: SummaryLine): string =>
 /** What the slash-command popover lists. */
 export interface CommandInfo {
   readonly name: string;
+  readonly aliases: ReadonlyArray<string>;
   readonly description: string;
 }
 
@@ -1452,7 +1450,11 @@ export const createChatTui = (options: {
       }
       const prefix = text.slice(1);
       return options.commands
-        .filter((command) => command.name.startsWith(prefix))
+        .filter(
+          (command) =>
+            command.name.startsWith(prefix) ||
+            command.aliases.some((alias) => alias.startsWith(prefix)),
+        )
         .map((command): ComposerSuggestion => ({ kind: "command", command }));
     });
     const fileMention = createMemo(() => mentionAt(draft(), cursor()));
@@ -1519,7 +1521,7 @@ export const createChatTui = (options: {
           model: Option.getOrElse(parsed.model, () => "default"),
         };
       });
-    /** `3% of 1M context`, or the bare count when the window is unknown; nothing before the first reply. */
+    /** `12.37k/1.05M context`, or the bare count when the window is unknown; nothing before the first reply. */
     const contextInfo = () => {
       const used = state.contextTokens;
       if (used === 0) {
@@ -1528,8 +1530,7 @@ export const createChatTui = (options: {
       if (state.contextWindow === 0) {
         return `${formatTokens(used)} tokens in context`;
       }
-      const share = (used / state.contextWindow) * 100;
-      return `${share < 1 ? "<1" : Math.round(share)}% of ${formatTokens(state.contextWindow)} context`;
+      return `${formatTokens(used)}/${formatTokens(state.contextWindow)} context`;
     };
     const onDraft = () => {
       fitRows();
@@ -1801,7 +1802,7 @@ export const createChatTui = (options: {
                             />
                             <Show when={responseInfo(text())}>
                               {(info) => (
-                                <text fg={palette().muted} wrapMode="none" truncate>
+                                <text fg={palette().muted} wrapMode="none" truncate marginTop={1}>
                                   {info().model} · {formatTokensPerSecond(info().tokensPerSecond)}{" "}
                                   tokens/s
                                 </text>
@@ -2061,8 +2062,11 @@ export const createChatTui = (options: {
     reset: () =>
       setState({ lines: [], contextTokens: 0, cost: Option.none(), status: "", tasks: 0 }),
     interrupted: () => {
-      // No event follows a stop, so a thought in progress is folded here.
+      // No event follows a stop, so what `RunFinished` would have done is done
+      // here: the thought in progress is folded, and the status cleared so the
+      // spinner stops rather than counting on past the interrupt.
       finishThinking();
+      setState("status", "");
       push({ kind: "error", text: "Interrupted" });
     },
     setRemote: (status) => setState("remote", status),

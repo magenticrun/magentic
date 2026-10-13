@@ -1,4 +1,3 @@
-import { messageOf } from "./Errors.ts";
 import {
   Clock,
   Config,
@@ -136,11 +135,10 @@ const feed = Effect.fn("ModelCatalog.feed")(function* (input: Schema.Json) {
   return { provider, all } satisfies Feed;
 });
 
+const decodeJson = Schema.decodeEffect(Schema.fromJsonString(Schema.Json));
+
 const parseJson = (text: string) =>
-  Effect.try({
-    try: (): Schema.Json => JSON.parse(text),
-    catch: (error) => new CatalogError({ message: messageOf(error) }),
-  });
+  decodeJson(text).pipe(Effect.mapError((error) => new CatalogError({ message: error.message })));
 
 /** Where the live catalog comes from. */
 export const modelsUrl = Config.String("MAGENTIC_MODELS_URL").pipe(

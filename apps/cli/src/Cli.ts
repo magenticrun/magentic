@@ -9,6 +9,7 @@ import { ensureGateway } from "./Gateway.ts";
 import { LocalHost } from "./Host.ts";
 import { composeMessage } from "./Attachments.ts";
 import { print, type OutputMode } from "./Print.ts";
+import { renderTrace, type TraceFormat } from "./commands/Trace.ts";
 import { Reported } from "./Reported.ts";
 import { VERSION } from "./Version.ts";
 
@@ -93,7 +94,7 @@ const magentic = Command.make("magentic", {
 }).pipe(
   Command.withSharedFlags({ gateway }),
   Command.withHandler(
-    Effect.fn(function* (options) {
+    Effect.fn("Cli.magentic")(function* (options) {
       const message = yield* composeMessage(options.message).pipe(
         Effect.catchTag("FileUnreadable", (error) =>
           Console.error(`cannot read ${error.path}: ${error.message}`).pipe(
@@ -143,7 +144,7 @@ const clientFor = Effect.fn("Cli.clientFor")(function* (baseUrl: string) {
 const agents = Command.make(
   "agents",
   {},
-  Effect.fn(function* () {
+  Effect.fn("Cli.agents")(function* () {
     const root = yield* magentic;
     const client = yield* clientFor(root.gateway);
     const list = yield* client.listAgents();
@@ -159,7 +160,7 @@ const agents = Command.make(
 const pluginList = Command.make(
   "list",
   {},
-  Effect.fn(function* () {
+  Effect.fn("Cli.plugin.list")(function* () {
     const root = yield* magentic;
     const client = yield* clientFor(root.gateway);
     const plugins = yield* client.listPlugins();
@@ -186,7 +187,7 @@ const plugin = Command.make("plugin").pipe(
 const rc = Command.make(
   "rc",
   { action: Argument.String("action").pipe(Argument.optional) },
-  Effect.fn(function* ({ action }) {
+  Effect.fn("Cli.rc")(function* ({ action }) {
     const root = yield* magentic;
     yield* ensureGateway(root.gateway);
     const client = yield* remoteClient(root.gateway);
@@ -194,7 +195,7 @@ const rc = Command.make(
       yield* remoteCommand(
         client,
         Option.getOrElse(action, () => ""),
-        Effect.succeed(Option.none()),
+        Effect.succeedNone,
       ).pipe(
         Effect.catchTag("CommandError", (error) =>
           Console.error(error.message).pipe(
@@ -206,20 +207,96 @@ const rc = Command.make(
   }, Effect.scoped),
 ).pipe(Command.withDescription("Pair a browser or check remote-control status"));
 
+const traceCommand = Command.make(
+  "trace",
+  {
+    conversation: Argument.String("conversation").pipe(
+      Argument.withDescription(
+        "The conversation, by id; the latest one started in this directory when omitted",
+      ),
+      Argument.optional,
+    ),
+    format: Flag.ChoiceWithValue("format", [
+      ["summary", "summary"],
+      ["otlp", "otlp"],
+      ["chrome", "chrome"],
+    ] as const).pipe(
+      Flag.withAlias("f"),
+      Flag.withDescription(
+        "summary for a readout of the runs; otlp for a collector or Jaeger, chrome for Perfetto or speedscope",
+      ),
+      Flag.withDefault<TraceFormat>("summary"),
+    ),
+    runs: Flag.Int("runs").pipe(
+      Flag.withDescription("How many of the latest runs a summary covers"),
+      Flag.withDefault(1),
+    ),
+  },
+  Effect.fn("Cli.trace")(function* ({ conversation, format, runs }) {
+    const root = yield* magentic;
+    const client = yield* clientFor(root.gateway);
+    const chosen = Option.isSome(conversation)
+      ? Option.some(conversation.value)
+      : Option.map(
+          Option.fromNullishOr(
+            (yield* client.listConversations({ directory: process.cwd() }))[0] ??
+              (yield* client.listConversations({}))[0],
+          ),
+          (found) => found.id,
+        );
+    if (Option.isNone(chosen)) {
+      const message = "No conversations yet.";
+      return yield* Console.error(message).pipe(Effect.andThen(new Reported({ message })));
+    }
+    const spans = yield* client.trace({ id: chosen.value }).pipe(
+      Effect.catchTag("ConversationNotFound", (error) => {
+        const message = `No conversation ${error.id}.`;
+        return Console.error(message).pipe(Effect.andThen(new Reported({ message })));
+      }),
+    );
+    yield* Console.log(renderTrace(spans, format, runs));
+  }, Effect.scoped),
+).pipe(
+  Command.withDescription(
+    "Show how a conversation's runs spent their time, or print their spans for a collector or a flame graph",
+  ),
+);
+
 const gatewayStop = Command.make(
   "stop",
   {},
-  Effect.fn(function* () {
+  Effect.fn("Cli.gateway.stop")(function* () {
     const root = yield* magentic;
     const client = yield* remoteClient(root.gateway);
-    yield* client.stopGateway();
-    yield* Console.log("Gateway stopping. Remote access and background tasks stop with it.");
+    // Nothing listening is the state stop is asked for, not a failure: a
+    // restart that stops first should carry on, and a transport trace read
+    // as the gateway refusing to go is the worst way to say "already down".
+    const stopping = yield* client.stopGateway().pipe(
+      Effect.as(true),
+      Effect.catch((error): Effect.Effect<boolean, Reported> => {
+        const http = error.reason._tag === "HttpError" ? error.reason : undefined;
+        if (http?.kind === "TransportError") return Effect.succeed(false);
+        const message =
+          http?.kind === "StatusCodeError"
+            ? `The gateway at ${root.gateway} predates this command. Quit the magentic session that started it.`
+            : `Could not stop the gateway at ${root.gateway}: ${String(http?.cause ?? error.message)}`;
+        return Console.error(message).pipe(Effect.andThen(new Reported({ message })));
+      }),
+    );
+    yield* Console.log(
+      stopping
+        ? "Gateway stopping. Remote access and background tasks stop with it."
+        : `No gateway is answering at ${root.gateway}; nothing to stop.`,
+    );
   }, Effect.scoped),
+).pipe(Command.withDescription("Stop the gateway running in the background"));
+const gatewayCommands = Command.make("gateway").pipe(
+  Command.withDescription("Manage the gateway serving this computer"),
+  Command.withSubcommands([gatewayStop]),
 );
-const gatewayCommands = Command.make("gateway").pipe(Command.withSubcommands([gatewayStop]));
 
 magentic.pipe(
-  Command.withSubcommands([agents, plugin, auth, rc, relaySetup, gatewayCommands]),
+  Command.withSubcommands([agents, plugin, auth, rc, relaySetup, gatewayCommands, traceCommand]),
   Command.run({ version: VERSION }),
   Effect.provide([BunServices.layer, FetchHttpClient.layer]),
   BunRuntime.runMain,

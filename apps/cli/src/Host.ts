@@ -11,6 +11,7 @@ import { conversationCommandsPlugin } from "./commands/Conversations.ts";
 import { loopCommandPlugin } from "./commands/Loop.ts";
 import { remoteCommandPlugin } from "./commands/Remote.ts";
 import { mcpCommandPlugin } from "./commands/Mcp.ts";
+import { traceCommandPlugin } from "./commands/Trace.ts";
 
 /**
  * The plugins that run beside the CLI itself: the providers, for signing in
@@ -32,6 +33,7 @@ export const LocalHost = Layer.unwrap(
         builtin(mcpCommandPlugin),
         builtin(remoteCommandPlugin),
         builtin(loopCommandPlugin),
+        builtin(traceCommandPlugin),
       ],
       paths: { config, workspace: process.cwd(), data },
     });

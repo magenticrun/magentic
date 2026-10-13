@@ -1,11 +1,18 @@
 import { Schema } from "effect";
 
 /**
- * Where a server stands. `failed` covers an entry that does not decode and a
- * handshake that did not complete; `closed` is a server that connected and
- * then went away, its tools withdrawn.
+ * Where a server stands. `connecting` is a handshake still under way, as it
+ * is while the gateway starts; `failed` covers an entry that does not decode
+ * and a handshake that did not complete; `closed` is a server that connected
+ * and then went away, its tools withdrawn.
  */
-export const McpServerStatus = Schema.Literals(["connected", "failed", "disabled", "closed"]);
+export const McpServerStatus = Schema.Literals([
+  "connecting",
+  "connected",
+  "failed",
+  "disabled",
+  "closed",
+]);
 export type McpServerStatus = typeof McpServerStatus.Type;
 
 /** What `/mcp` shows: one row per server named under `mcp:` in `magentic.yaml`. */

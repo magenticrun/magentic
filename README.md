@@ -215,27 +215,65 @@ performed as the GitHub App.
 See the [plugin guide](docs/plugins.md) for setup. External plugins run with the
 gateway's privileges; only load code you trust.
 
+## Tracing
+
+The gateway traces every run: each model call with its latency, time to first
+output, tokens, cache hits, cost, and retries, and each tool call with its
+duration and outcome. Spans are saved as `trace.jsonl` beside the conversation,
+so they survive restarts and are removed with the conversation.
+
+In the chat, `/trace` summarizes the latest run and `/trace 3` the latest three.
+Each summary starts with findings, such as a prompt cache that stopped hitting,
+a slow first output, retries, a tool that keeps failing, or time lost to
+compaction. The export commands write the whole trace next to the chat:
+
+| Command         | Writes                                                                |
+| --------------- | --------------------------------------------------------------------- |
+| `/trace flame`  | A Chrome trace for [Perfetto](https://ui.perfetto.dev) or speedscope. |
+| `/trace export` | OTLP JSON for a collector's `/v1/traces` or a Jaeger upload.          |
+
+Each export command accepts a file name. From a shell, `magentic trace` prints the
+same output for the latest conversation in the current directory, or for a
+conversation ID you give it:
+
+```sh
+bun apps/cli/src/main.ts trace --runs 3
+bun apps/cli/src/main.ts trace <conversation-id> --format chrome > run.json
+```
+
+Agents can read their own traces through the `session_trace` tool, which covers
+only the calling conversation. The built-in `assistant` has it; add it to an
+agent's `tools` to grant it.
+
+To send spans to a collector as they happen, set `OTEL_EXPORTER_OTLP_ENDPOINT`,
+for example `http://localhost:4318`. The standard `OTEL_*` variables, such as
+headers and timeouts, apply. Spans carry OpenTelemetry's `gen_ai.*` attributes,
+never message content. A failed tool call keeps the first 300 characters of its
+error. HTTP headers are dropped from all spans.
+
 ## Environment
 
 Bun loads `.env` from the working directory. Keep credentials out of version control.
 
-| Variable                   | Default                              | Purpose                                                                |
-| -------------------------- | ------------------------------------ | ---------------------------------------------------------------------- |
-| `PORT`                     | `4321`                               | Gateway port.                                                          |
-| `MAGENTIC_HOST`            | `127.0.0.1`                          | Listen address.                                                        |
-| `IDENTITY_LOCAL`           | `false`                              | Permit a non-loopback bind with local identity.                        |
-| `MAGENTIC_HOME`            | `./magentic`                         | Configuration directory.                                               |
-| `MAGENTIC_DATA_DIR`        | `$HOME/.config/magentic`             | Conversations, CLI state, gateway logs, and saved tool output.         |
-| `MAGENTIC_WORKSPACE`       | Current directory                    | Working directory for file and shell tools.                            |
-| `MAGENTIC_API_KEYS_FILE`   | `$MAGENTIC_DATA_DIR/api-keys.json`   | Stored provider API keys.                                              |
-| `MAGENTIC_CODEX_AUTH_FILE` | `$MAGENTIC_DATA_DIR/codex-auth.json` | Stored ChatGPT/Codex login.                                            |
-| `CODEX_HOME`               | `$HOME/.codex`                       | Codex CLI directory when importing a login.                            |
-| `MAGENTIC_MODELS_URL`      | `https://models.dev/api.json`        | Model catalog source.                                                  |
-| `MAGENTIC_MODELS_CACHE`    | `$HOME/.cache/magentic/models.json`  | Model catalog cache.                                                   |
-| `MAGENTIC_MODELS_OFFLINE`  | `false`                              | Use only the cached or bundled catalog.                                |
-| `USER`                     | `local`                              | Subject assigned by local identity.                                    |
-| `GITHUB_APP_PRIVATE_KEY`   | Unset                                | GitHub App private key. Literal `\n` sequences become newlines.        |
-| `GITHUB_WEBHOOK_SECRET`    | Unset                                | Webhook signing secret. Without it, the bridge rejects all deliveries. |
+| Variable                        | Default                              | Purpose                                                                |
+| ------------------------------- | ------------------------------------ | ---------------------------------------------------------------------- |
+| `PORT`                          | `4321`                               | Gateway port.                                                          |
+| `MAGENTIC_HOST`                 | `127.0.0.1`                          | Listen address.                                                        |
+| `IDENTITY_LOCAL`                | `false`                              | Permit a non-loopback bind with local identity.                        |
+| `MAGENTIC_HOME`                 | `./magentic`                         | Configuration directory.                                               |
+| `MAGENTIC_DATA_DIR`             | `$HOME/.config/magentic`             | Conversations, CLI state, gateway logs, and saved tool output.         |
+| `MAGENTIC_WORKSPACE`            | Current directory                    | Working directory for file and shell tools.                            |
+| `MAGENTIC_API_KEYS_FILE`        | `$MAGENTIC_DATA_DIR/api-keys.json`   | Stored provider API keys.                                              |
+| `MAGENTIC_CODEX_AUTH_FILE`      | `$MAGENTIC_DATA_DIR/codex-auth.json` | Stored ChatGPT/Codex login.                                            |
+| `CODEX_HOME`                    | `$HOME/.codex`                       | Codex CLI directory when importing a login.                            |
+| `MAGENTIC_CODEX_CLIENT_VERSION` | `0.157.0`                            | Codex version the model list asks as; raise it to see newer models.    |
+| `MAGENTIC_MODELS_URL`           | `https://models.dev/api.json`        | Model catalog source.                                                  |
+| `MAGENTIC_MODELS_CACHE`         | `$HOME/.cache/magentic/models.json`  | Model catalog cache.                                                   |
+| `MAGENTIC_MODELS_OFFLINE`       | `false`                              | Use only the cached or bundled catalog.                                |
+| `USER`                          | `local`                              | Subject assigned by local identity.                                    |
+| `GITHUB_APP_PRIVATE_KEY`        | Unset                                | GitHub App private key. Literal `\n` sequences become newlines.        |
+| `GITHUB_WEBHOOK_SECRET`         | Unset                                | Webhook signing secret. Without it, the bridge rejects all deliveries. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`   | Unset                                | OTLP collector that also receives the gateway's traces.                |
 
 ## Security
 

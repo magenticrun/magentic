@@ -103,41 +103,121 @@ const clampTimeout = (requested: number | undefined): number =>
     ? FETCH_DEFAULT_TIMEOUT_MS
     : Math.min(requested, FETCH_MAX_TIMEOUT_MS);
 
+/** An address's brackets and zone dropped: `[fe80::1%en0]` is `fe80::1`. */
+const bareHost = (address: string): string => address.replace(/^\[|\]$/g, "").split("%")[0] ?? "";
+
+/** The four octets of a dotted IPv4 address; undefined when it is not one. */
+const ipv4Octets = (text: string): ReadonlyArray<number> | undefined => {
+  const parts = text.split(".");
+  return parts.length === 4 && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+    ? parts.map(Number)
+    : undefined;
+};
+
+/**
+ * The eight 16-bit groups of an IPv6 address, with `::` expanded and a
+ * dotted IPv4 tail read as the last two; undefined when it is not one.
+ */
+const ipv6Groups = (text: string): ReadonlyArray<number> | undefined => {
+  const lastColon = text.lastIndexOf(":");
+  const dotted = text.includes(".") ? ipv4Octets(text.slice(lastColon + 1)) : undefined;
+  if (text.includes(".") && dotted === undefined) {
+    return undefined;
+  }
+  const [a = 0, b = 0, c = 0, d = 0] = dotted ?? [];
+  const tail = dotted === undefined ? [] : [(a << 8) | b, (c << 8) | d];
+  // Without its dotted tail the address keeps a `::` that ended in it, and drops a lone `:`.
+  const upToTail = text.slice(0, lastColon + 1);
+  const hex =
+    dotted === undefined ? text : upToTail.endsWith("::") ? upToTail : upToTail.slice(0, -1);
+  const halves = hex.split("::");
+  if (halves.length > 2) {
+    return undefined;
+  }
+  const groupsOf = (half: string | undefined): ReadonlyArray<string> =>
+    half === undefined || half === "" ? [] : half.split(":");
+  const before = groupsOf(halves[0]);
+  const after = groupsOf(halves[1]);
+  if ([...before, ...after].some((group) => !/^[0-9a-f]{1,4}$/i.test(group))) {
+    return undefined;
+  }
+  const given = before.length + after.length + tail.length;
+  const missing = 8 - given;
+  if (halves.length === 1 ? missing !== 0 : missing < 1) {
+    return undefined;
+  }
+  return [
+    ...before.map((group) => Number.parseInt(group, 16)),
+    ...Array.from({ length: halves.length === 1 ? 0 : missing }, () => 0),
+    ...after.map((group) => Number.parseInt(group, 16)),
+    ...tail,
+  ];
+};
+
+const isBlockedIpv4 = ([a = 0, b = 0]: ReadonlyArray<number>): boolean =>
+  a === 0 || // This network.
+  a === 10 || // Private.
+  a === 127 || // Loopback.
+  (a === 169 && b === 254) || // Link-local, and the cloud metadata services on it.
+  (a === 172 && b >= 16 && b <= 31) || // Private.
+  (a === 192 && b === 168) || // Private.
+  (a === 100 && b >= 64 && b <= 127) || // Shared address space.
+  (a === 198 && (b === 18 || b === 19)) || // Benchmarking.
+  a >= 224; // Multicast and reserved.
+
+/** The IPv4 address two 16-bit groups carry. */
+const octetsOf = (high: number, low: number): ReadonlyArray<number> => [
+  high >> 8,
+  high & 0xff,
+  low >> 8,
+  low & 0xff,
+];
+
+/**
+ * The IPv4 address an IPv6 one stands for, where it is a way of reaching an
+ * IPv4 host: IPv4-compatible and IPv4-mapped (`::a.b.c.d`, `::ffff:a.b.c.d`),
+ * IPv4-translated (`::ffff:0:a.b.c.d`), NAT64 (`64:ff9b::/96`), and 6to4
+ * (`2002::/16`, the address in the 32 bits after the prefix).
+ */
+const embeddedIpv4 = (groups: ReadonlyArray<number>): ReadonlyArray<number> | undefined => {
+  const [g0 = 0, g1 = 0, g2 = 0, g3 = 0, g4 = 0, g5 = 0, g6 = 0, g7 = 0] = groups;
+  const zeroThrough3 = g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0;
+  if (zeroThrough3 && g4 === 0 && (g5 === 0 || g5 === 0xff_ff)) {
+    return octetsOf(g6, g7);
+  }
+  if (zeroThrough3 && g4 === 0xff_ff && g5 === 0) {
+    return octetsOf(g6, g7);
+  }
+  if (g0 === 0x64 && g1 === 0xff_9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
+    return octetsOf(g6, g7);
+  }
+  return g0 === 0x20_02 ? octetsOf(g1, g2) : undefined;
+};
+
 /** Whether a resolved address is not the public internet: transports, not names, are trusted. */
 const isBlockedAddress = (address: string): boolean => {
-  const host = address.replace(/^\[|\]$/g, "").split("%")[0];
-  if (host === undefined || host === "") {
+  const host = bareHost(address);
+  if (host === "") {
     return true;
   }
-  // An IPv4-mapped IPv6 address is the IPv4 address it carries.
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(host)?.[1];
-  const v4 = mapped ?? host;
-  if (!v4.includes(":")) {
-    const parts = v4.split(".");
-    if (parts.length !== 4 || parts.some((part) => !/^\d+$/.test(part) || Number(part) > 255)) {
-      return true;
-    }
-    const [a = 0, b = 0] = parts.map(Number);
-    return (
-      a === 0 || // This network.
-      a === 10 || // Private.
-      a === 127 || // Loopback.
-      (a === 169 && b === 254) || // Link-local, and the cloud metadata services on it.
-      (a === 172 && b >= 16 && b <= 31) || // Private.
-      (a === 192 && b === 168) || // Private.
-      (a === 100 && b >= 64 && b <= 127) || // Shared address space.
-      (a === 198 && (b === 18 || b === 19)) || // Benchmarking.
-      a >= 224 // Multicast and reserved.
-    );
+  if (!host.includes(":")) {
+    const octets = ipv4Octets(host);
+    return octets === undefined || isBlockedIpv4(octets);
   }
-  const lower = host.toLowerCase();
-  return (
-    lower === "::1" || // Loopback.
-    lower === "::" || // Unspecified.
-    lower.startsWith("fe80:") || // Link-local.
-    lower.startsWith("fc") || // Unique-local.
-    lower.startsWith("fd") // Unique-local.
-  );
+  const groups = ipv6Groups(host);
+  if (groups === undefined) {
+    return true;
+  }
+  // An IPv6 address that reaches an IPv4 host is judged as that host, or
+  // `[64:ff9b::7f00:1]` would be loopback by another name.
+  const embedded = embeddedIpv4(groups);
+  if (embedded !== undefined) {
+    return isBlockedIpv4(embedded);
+  }
+  // The public IPv6 internet is 2000::/3. Everything else is not: link-local
+  // fe80::/10, site-local fec0::/10, unique-local fc00::/7, multicast
+  // ff00::/8, local-use NAT64 in 64:ff9b:1::/48, and the reserved rest.
+  return ((groups[0] ?? 0) & 0xe0_00) !== 0x20_00;
 };
 
 /** Content the tool hands the model as text; anything else is a download, not a page. */
@@ -345,6 +425,26 @@ const collectPrefix = (response: HttpClientResponse.HttpClientResponse, cap: num
     Effect.map(joined),
   );
 
+/** Bytes looked at to tell a body with no content type from text. */
+const SNIFF_BYTES = 8_192;
+
+/**
+ * Whether a body that did not say what it is is binary: text has no NUL in
+ * it, and an archive or an image nearly always does within its first few KB.
+ */
+const looksBinary = (bytes: Uint8Array): boolean => bytes.subarray(0, SNIFF_BYTES).includes(0);
+
+/**
+ * What the request says it takes. Markdown first, since a site that can
+ * serve its pages as markdown hands over what the reader view would have
+ * made of the HTML, without the chrome; HTML only when the call asked for
+ * the markup.
+ */
+const acceptFor = (format: Format): string =>
+  format === "html"
+    ? "text/html,application/xhtml+xml,application/json,text/*;q=0.9,*/*;q=0.5"
+    : "text/markdown,text/html;q=0.9,application/xhtml+xml;q=0.9,application/json;q=0.9,text/*;q=0.8,*/*;q=0.5";
+
 const redirectOf = (status: number): boolean =>
   status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 
@@ -404,8 +504,11 @@ export const httpFetchHandlers = Effect.gen(function* () {
 
   /** Resolve the host and refuse it when any address is not the public internet. */
   const checkUrl = Effect.fn("HttpFetch.checkUrl")(function* (parsed: URL, raw: string) {
+    // `hostname` keeps the brackets of an IPv6 literal, which no resolver
+    // knows as a name; without them the literal resolves to itself.
+    const host = bareHost(parsed.hostname);
     const addresses = yield* Effect.tryPromise({
-      try: () => lookup(parsed.hostname, { all: true }),
+      try: () => lookup(host, { all: true }),
       catch: (error) =>
         new HttpFetchError({
           reason: "HttpError",
@@ -433,13 +536,10 @@ export const httpFetchHandlers = Effect.gen(function* () {
 
   // The fetch client follows redirects on its own; manual mode keeps every hop
   // visible, so each one is checked before it is followed.
-  const send = (target: URL, raw: string, userAgent: string) => {
+  const send = (target: URL, raw: string, userAgent: string, format: Format) => {
     const request = HttpClientRequest.get(target.href).pipe(
       HttpClientRequest.setHeader("user-agent", userAgent),
-      HttpClientRequest.setHeader(
-        "accept",
-        "text/html,application/xhtml+xml,application/json,text/*;q=0.9,*/*;q=0.5",
-      ),
+      HttpClientRequest.setHeader("accept", acceptFor(format)),
       HttpClientRequest.setHeader("accept-language", "en-US,en;q=0.9"),
     );
     return client.execute(request).pipe(
@@ -456,12 +556,16 @@ export const httpFetchHandlers = Effect.gen(function* () {
   };
 
   /** Fetch as a browser would; when Cloudflare challenges that, say who we are and try once more. */
-  const execute = Effect.fn("HttpFetch.execute")(function* (target: URL, raw: string) {
-    const response = yield* send(target, raw, BROWSER_USER_AGENT);
+  const execute = Effect.fn("HttpFetch.execute")(function* (
+    target: URL,
+    raw: string,
+    format: Format,
+  ) {
+    const response = yield* send(target, raw, BROWSER_USER_AGENT, format);
     const challenged =
       response.status === 403 &&
       Option.getOrUndefined(Headers.get(response.headers, "cf-mitigated")) === "challenge";
-    return challenged ? yield* send(target, raw, HONEST_USER_AGENT) : response;
+    return challenged ? yield* send(target, raw, HONEST_USER_AGENT, format) : response;
   });
 
   /** The start of an error response's body, as text, so the model sees what the server said. */
@@ -475,6 +579,9 @@ export const httpFetchHandlers = Effect.gen(function* () {
     const bytes = yield* collectPrefix(response, ERROR_SNIPPET_WIRE_CAP).pipe(
       Effect.orElseSucceed(() => new Uint8Array()),
     );
+    if (contentType === undefined && looksBinary(bytes)) {
+      return "";
+    }
     const text = convert(decodeBytes(bytes, charsetOf(response.headers)), contentType, "text", "")
       .replace(/\s+/g, " ")
       .trim();
@@ -528,7 +635,18 @@ export const httpFetchHandlers = Effect.gen(function* () {
             }),
       ),
     );
-    const decoded = decodeBytes(joined(collected), charsetOf(response.headers));
+    const bytes = joined(collected);
+    if (contentType === undefined && looksBinary(bytes)) {
+      return yield* new HttpFetchError({
+        reason: "HttpError",
+        url: raw,
+        status: response.status,
+        message:
+          `${finalUrl} gives no content type and its body is binary, which http_fetch does not read; ` +
+          "only HTML, JSON, XML, and text come back",
+      });
+    }
+    const decoded = decodeBytes(bytes, charsetOf(response.headers));
     const text = convert(decoded, contentType, format, finalUrl);
     const buffer = push(EMPTY, text);
     const result: FetchResult = { url: finalUrl, status: response.status, content: text };
@@ -562,7 +680,7 @@ export const httpFetchHandlers = Effect.gen(function* () {
   const fetchUrl = Effect.fn("HttpFetch.fetch")(function* (raw: string, format: Format) {
     let current = yield* checkUrl(yield* parseUrl(raw), raw);
     for (let redirects = 0; ; redirects += 1) {
-      const response = yield* execute(current, raw);
+      const response = yield* execute(current, raw, format);
       if (!redirectOf(response.status)) {
         if (response.status < 200 || response.status >= 300) {
           const said = yield* errorSnippet(response);

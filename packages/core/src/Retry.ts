@@ -33,7 +33,20 @@ export interface Retrying {
  * context overflow, or a content policy refusal, would only fail again.
  */
 export const shouldRetry = (error: AiError.AiError): boolean =>
-  error.isRetryable && !asksToWaitTooLong(error);
+  error.isRetryable && !asksToWaitTooLong(error) && !isUnofferedToolCall(error);
+
+/**
+ * Whether the response held a part no schema of the call accepts, which in
+ * practice is a call to a tool the model was not offered: Effect decodes a
+ * tool call against the offered names, so a made-up or misspelt one fails
+ * as the whole part (`at [n]`, with no key under it) rather than a field of
+ * it. Effect marks the failure retryable, but the same request would most
+ * likely make the same call, and the error does not carry the name, so the
+ * model is told what it can call instead of being asked again blind.
+ */
+export const isUnofferedToolCall = (error: AiError.AiError): boolean =>
+  error.reason._tag === "InvalidOutputError" &&
+  /^Expected [\s\S]*\n\s*at \[\d+\]$/.test(error.reason.description);
 
 /** Whether the provider's `retry-after` is beyond what a run waits out. */
 export const asksToWaitTooLong = (error: AiError.AiError): boolean =>
@@ -103,18 +116,39 @@ export const modelFailure = (cause: Cause.Cause<unknown>): Option.Option<AiError
   );
 
 /**
- * The tool call the provider threw out before it ran, when that is what failed
- * the model call. An endpoint that does not hold the model to the tool schema
- * lets a parameter of the wrong type through; the response then dies with
- * nothing of it in the history, so the model can be told what was wrong and
- * call the tool again.
+ * The tool call thrown out before it ran, when that is what failed the model
+ * call, with what to tell the model. An endpoint that does not hold the model
+ * to the tool schema lets a parameter of the wrong type through, and a model
+ * can name a tool it was never offered; the response then dies with nothing
+ * of it in the history, so the model can be told what was wrong and call the
+ * tool again. `offered` names the tools the call had.
  */
 export const rejectedToolCall = (
   cause: Cause.Cause<unknown>,
-): Option.Option<AiError.ToolParameterValidationError> =>
-  Option.flatMap(modelFailure(cause), ({ reason }) =>
-    reason._tag === "ToolParameterValidationError" ? Option.some(reason) : Option.none(),
-  );
+  offered: ReadonlyArray<string>,
+): Option.Option<{ readonly message: string; readonly complaint: string }> =>
+  Option.flatMap(modelFailure(cause), (error) => {
+    const { reason } = error;
+    if (reason._tag === "ToolParameterValidationError") {
+      return Option.some({
+        message: reason.message,
+        complaint:
+          `Your ${reason.toolName} call did not run because its arguments do not match the tool's ` +
+          `schema. ${reason.description}. Call it again with arguments the schema allows.`,
+      });
+    }
+    if (isUnofferedToolCall(error)) {
+      return Option.some({
+        message: "the model called a tool it was not offered",
+        complaint:
+          offered.length === 0
+            ? "Your last response called a tool, but no tools are available for this turn, so nothing ran. Answer in text."
+            : "Your last response called a tool that is not available to you, so nothing ran. " +
+              `The tools you can call are: ${offered.join(", ")}. Use one of those names exactly, or answer without a tool.`,
+      });
+    }
+    return Option.none();
+  });
 
 /**
  * A call the model had already begun answering when it failed: a stream cut
@@ -143,3 +177,52 @@ export const toRetryEvent = (retrying: Retrying): RunEvent => ({
   message: retrying.error.message,
   delayMs: Duration.toMillis(retrying.delay),
 });
+
+/**
+ * What providers say when the prompt is over the model's window, after
+ * opencode's list. Effect has no reason of its own for it; it arrives as an
+ * invalid request whose text is all there is to go on.
+ */
+const OVERFLOW_PATTERNS = [
+  /prompt is too long/i,
+  /request_too_large/i,
+  /input is too long for requested model/i,
+  /exceeds the context window/i,
+  /exceeds (?:the )?(?:model'?s )?maximum context length/i,
+  /input token count.*exceeds the maximum/i,
+  /tokens in request more than max tokens allowed/i,
+  /maximum prompt length is \d+/i,
+  /reduce the length of the messages/i,
+  /maximum context length is \d+ tokens/i,
+  /exceeds (?:the )?maximum allowed input length/i,
+  /is longer than the model'?s context length/i,
+  /exceeds the available context size/i,
+  /greater than the context length/i,
+  /context window exceeds limit/i,
+  /exceeded model token limit/i,
+  /context[_ ]length[_ ]exceeded/i,
+  /request entity too large/i,
+  /context length is only \d+ tokens/i,
+  /input length.*exceeds.*context length/i,
+  /prompt too long; exceeded (?:max )?context length/i,
+  /too large for model with \d+ maximum context length/i,
+  /but the configured context size is/i,
+  /model_context_window_exceeded/i,
+];
+
+/** Messages that look like an overflow and are a rate limit instead. */
+const NOT_OVERFLOW = [
+  /rate limit/i,
+  /too many requests/i,
+  /^(throttling error|service unavailable):/i,
+];
+
+/**
+ * Whether the provider refused the call because the prompt is over the
+ * model's window: something a compaction fixes, where a retry of the same
+ * prompt never would.
+ */
+export const isContextOverflow = (error: AiError.AiError): boolean =>
+  !error.isRetryable &&
+  !NOT_OVERFLOW.some((pattern) => pattern.test(error.message)) &&
+  OVERFLOW_PATTERNS.some((pattern) => pattern.test(error.message));

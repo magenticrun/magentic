@@ -1,6 +1,7 @@
-import { Effect, FileSystem, Option, Path, Schema } from "effect";
+import { Effect, FileSystem, Option, Path, Schema, Semaphore } from "effect";
 import { Tool, Toolkit } from "effect/unstable/ai";
 import { CapabilityAnnotation, messageOf } from "@magentic/plugin";
+import { applySpans, locate, missHint, normalize } from "./EditMatch.ts";
 import { resolveWithin, WorkspaceRoot } from "./WorkspaceRoot.ts";
 
 /**
@@ -12,6 +13,10 @@ export class FileToolError extends Schema.TaggedError<FileToolError>()("FileTool
     "OutsideWorkspace",
     "NotFound",
     "NotADirectory",
+    "NotAFile",
+    "Binary",
+    "NotRead",
+    "Stale",
     "InvalidPattern",
     "NoMatch",
     "Ambiguous",
@@ -35,6 +40,10 @@ const GREP_FILE_LIMIT = 10_000;
 export const READ_LINE_LIMIT = 2000;
 /** Characters `read_file` returns at most in one call: fewer lines when they are long. */
 export const READ_MAX_CHARS = 50_000;
+/** A line `read_file` returns is cut here, so one minified line cannot take the whole page. */
+export const READ_LINE_MAX_CHARS = 2000;
+/** Bytes looked at to tell a binary file from text. */
+const BINARY_SAMPLE_BYTES = 8192;
 /** Files bigger than this are not read at all: a bundle or a dump, for grep or the shell. */
 export const READ_FILE_MAX_BYTES = 16 * 1_048_576;
 /** Files bigger than this are not searched: a bundle or a data dump, not code. */
@@ -74,7 +83,8 @@ export const ReadFile = Tool.make("read_file", {
     "Read a UTF-8 text file from the workspace, whole when it is small. " +
     `A read stops after ${READ_LINE_LIMIT} lines or ${READ_MAX_CHARS} characters, whichever comes first, and comes back with truncated set and lines.from, lines.to, and lines.total; ` +
     "call again with offset = lines.to + 1 to go on, or use grep to find the part you need. " +
-    `A file over ${READ_FILE_MAX_BYTES} bytes is not read: search it with grep or the shell.`,
+    `A line longer than ${READ_LINE_MAX_CHARS} characters is cut short. ` +
+    `A binary file, or one over ${READ_FILE_MAX_BYTES} bytes, is not read: search it with grep or the shell.`,
   parameters: Schema.Struct({
     path: PathParam,
     offset: Schema.optionalKey(
@@ -104,7 +114,9 @@ export const ReadFile = Tool.make("read_file", {
 
 export const WriteFile = Tool.make("write_file", {
   description:
-    "Write a UTF-8 text file in the workspace, creating parent directories and replacing any existing content.",
+    "Write a UTF-8 text file in the workspace, creating parent directories and replacing any existing content. " +
+    "An existing file must have been read with read_file first, and not changed since, or the write is refused; " +
+    "prefer edit_file for changing part of one.",
   parameters: Schema.Struct({
     path: PathParam,
     content: Schema.String.annotate({ description: "The full new file content" }),
@@ -118,9 +130,11 @@ export const WriteFile = Tool.make("write_file", {
 
 export const EditFile = Tool.make("edit_file", {
   description:
-    "Replace an exact string in a workspace text file. Fails when oldString is not in the file, " +
-    "or occurs more than once unless replaceAll is set; add surrounding lines to make it unique. " +
-    "Prefer this over write_file for changing an existing file.",
+    "Replace a string in a workspace text file. Copy oldString from the file exactly, whole lines where you can; " +
+    "when it is not there exactly, whole lines that differ only in indentation or surrounding whitespace are matched " +
+    "and newString is re-indented to fit, and matched says so. " +
+    "Fails when oldString is not in the file, or occurs more than once unless replaceAll is set (exact matches only); " +
+    "add surrounding lines to make it unique. Prefer this over write_file for changing an existing file.",
   parameters: Schema.Struct({
     path: PathParam,
     oldString: Schema.String.annotate({ description: "The exact text to replace" }),
@@ -129,7 +143,12 @@ export const EditFile = Tool.make("edit_file", {
       Schema.Boolean.annotate({ description: "Replace every occurrence; default false" }),
     ),
   }),
-  success: Schema.Struct({ path: Schema.String, replacements: Schema.Finite }),
+  success: Schema.Struct({
+    path: Schema.String,
+    replacements: Schema.Finite,
+    /** Present only when the match was not exact: which whitespace was forgiven. */
+    matched: Schema.optional(Schema.Literals(["trailing", "indentation", "trimmed"])),
+  }),
   failure: FileToolError,
   failureMode: "return",
 })
@@ -202,6 +221,15 @@ export const Grep = Tool.make("grep", {
         description: 'Only search files whose name matches this glob, e.g. "*.ts" or "*.{ts,tsx}"',
       }),
     ),
+    ignoreCase: Schema.optionalKey(
+      Schema.Boolean.annotate({ description: "Match regardless of case; default false" }),
+    ),
+    literal: Schema.optionalKey(
+      Schema.Boolean.annotate({
+        description:
+          "Search for the pattern as plain text, not a regular expression; default false",
+      }),
+    ),
   }),
   success: Schema.Struct({ matches: Schema.Array(GrepMatch), truncated: Schema.Boolean }),
   failure: FileToolError,
@@ -233,20 +261,51 @@ const matches = (glob: Bun.Glob, pattern: string, relative: string, name: string
 /** Text with a NUL byte is a binary file, not something to search line by line. */
 const isBinary = (text: string): boolean => text.includes("\u0000");
 
+/**
+ * Whether the start of a file looks binary: a NUL byte, or more than a
+ * tenth of control characters that text does not use.
+ */
+const looksBinary = (bytes: Uint8Array): boolean => {
+  const sample = bytes.subarray(0, BINARY_SAMPLE_BYTES);
+  let odd = 0;
+  for (const byte of sample) {
+    if (byte === 0) {
+      return true;
+    }
+    // Tab, line feed, form feed, carriage return, and escape (ANSI colours) are text.
+    if (
+      (byte < 32 && byte !== 9 && byte !== 10 && byte !== 12 && byte !== 13 && byte !== 27) ||
+      byte === 127
+    ) {
+      odd += 1;
+    }
+  }
+  return sample.length > 0 && odd / sample.length > 0.1;
+};
+
 const cutLine = (line: string): string =>
   line.length <= LINE_MAX_CHARS ? line : `${line.slice(0, LINE_MAX_CHARS)}…`;
 
-const countOccurrences = (text: string, needle: string): number => text.split(needle).length - 1;
+/** A pattern with every regular-expression character escaped, so it matches itself. */
+const escapeRegex = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** What one `read_file` call returns of a file: the whole thing, or a page of its lines. */
+/** What one `read_file` call returns of a file: the whole thing, a page of its lines, or nothing past its end. */
 type Page =
-  | { readonly whole: true }
-  | { readonly whole: false; readonly content: string; readonly lines: typeof ReadLines.Type };
+  | { readonly kind: "whole" }
+  | { readonly kind: "part"; readonly content: string; readonly lines: typeof ReadLines.Type }
+  | { readonly kind: "past"; readonly total: number };
+
+/** A line cut to `READ_LINE_MAX_CHARS`, saying so; the rest is for grep or the shell. */
+const cutReadLine = (line: string): string =>
+  line.length <= READ_LINE_MAX_CHARS
+    ? line
+    : `${line.slice(0, READ_LINE_MAX_CHARS)}… [line cut at ${READ_LINE_MAX_CHARS} of ${line.length} characters]`;
 
 /**
  * The lines from `offset` (one-based) on, at most `limit` of them and at
- * most `READ_MAX_CHARS` characters, never cutting a line short except a
- * first line longer than that on its own. Whole when that is all of the file.
+ * most `READ_MAX_CHARS` characters, each cut to `READ_LINE_MAX_CHARS`.
+ * Whole when that is all of the file, untouched; past when the offset is
+ * beyond the last line.
  */
 export const pageOf = (
   text: string,
@@ -259,28 +318,28 @@ export const pageOf = (
   const all = text.length === 0 ? [] : (trailing ? text.slice(0, -1) : text).split("\n");
   const total = all.length;
   const from = Math.max(1, offset ?? 1);
+  if (from > total && from > 1) {
+    return { kind: "past", total };
+  }
   const want = Math.min(READ_LINE_LIMIT, Math.max(1, limit ?? READ_LINE_LIMIT));
   const kept: Array<string> = [];
   let chars = 0;
+  let cut = false;
   for (const line of all.slice(from - 1, from - 1 + want)) {
-    if (kept.length > 0 && chars + line.length + 1 > READ_MAX_CHARS) {
+    const shown = cutReadLine(line);
+    if (kept.length > 0 && chars + shown.length + 1 > READ_MAX_CHARS) {
       break;
     }
-    kept.push(
-      kept.length === 0 && line.length > READ_MAX_CHARS ? line.slice(0, READ_MAX_CHARS) : line,
-    );
-    chars += line.length + 1;
-    if (chars > READ_MAX_CHARS) {
-      break;
-    }
+    cut ||= shown !== line;
+    kept.push(shown);
+    chars += shown.length + 1;
   }
   const to = from - 1 + kept.length;
-  const wholeLine = kept.length === 0 || kept[0] === all[from - 1];
-  if (from === 1 && to === total && wholeLine) {
-    return { whole: true };
+  if (from === 1 && to === total && !cut) {
+    return { kind: "whole" };
   }
-  const content = kept.join("\n") + (to === total && trailing && wholeLine ? "\n" : "");
-  return { whole: false, content, lines: { from, to, total } };
+  const content = kept.join("\n") + (to === total && trailing ? "\n" : "");
+  return { kind: "part", content, lines: { from, to, total } };
 };
 
 /** Handlers for the file tools. Needs a FileSystem, a Path, and a WorkspaceRoot. */
@@ -324,12 +383,88 @@ export const fileToolHandlers = Effect.gen(function* () {
       );
     });
 
+  /**
+   * Names beside a missing file that it may have meant: the same name in
+   * another case or with another extension, or one containing the other.
+   */
+  const nearby = (absolute: string, requested: string) =>
+    Effect.map(
+      fs.readDirectory(path.dirname(absolute)).pipe(Effect.orElseSucceed(() => [])),
+      (names) => {
+        const wanted = path.basename(absolute).toLowerCase();
+        const stem = wanted.replace(/\.[^.]*$/, "");
+        return names
+          .filter((name) => {
+            const lower = name.toLowerCase();
+            const other = lower.replace(/\.[^.]*$/, "");
+            return (
+              lower === wanted ||
+              other === stem ||
+              (stem.length >= 3 && lower.includes(stem)) ||
+              (other.length >= 3 && wanted.includes(other))
+            );
+          })
+          .toSorted(byName)
+          .slice(0, 3)
+          .map((name) => path.join(path.dirname(requested), name));
+      },
+    );
+
   const notFound = (requested: string) =>
     new FileToolError({
       reason: "NotFound",
       path: requested,
       message: `${requested} does not exist`,
     });
+
+  /** A missing file's error, naming what it may have meant. */
+  const missingFile = Effect.fnUntraced(function* (absolute: string, requested: string) {
+    const similar = yield* nearby(absolute, requested);
+    return yield* similar.length === 0
+      ? notFound(requested)
+      : new FileToolError({
+          reason: "NotFound",
+          path: requested,
+          message: `${requested} does not exist; did you mean ${similar.join(", ")}?`,
+        });
+  });
+
+  /**
+   * What each file looked like when the model last read or wrote it, by
+   * absolute path, so a write never replaces a file nobody has seen or one
+   * that changed since, whether a person, a formatter, or a shell command
+   * changed it.
+   */
+  const seen = new Map<string, string>();
+  const stampOf = (absolute: string) =>
+    Effect.map(fs.stat(absolute).pipe(Effect.option), (info) =>
+      Option.map(
+        info,
+        (stat) =>
+          `${Option.match(stat.mtime, { onNone: () => 0, onSome: (at) => at.getTime() })}:${stat.size}`,
+      ),
+    );
+  const remember = (absolute: string) =>
+    Effect.map(stampOf(absolute), (stamp) => {
+      if (Option.isSome(stamp)) {
+        seen.set(absolute, stamp.value);
+      }
+    });
+
+  /**
+   * One writer per file at a time: the model's tool calls in one response
+   * run together, and two edits of the same file must not both read the old
+   * text and each write back only their own change.
+   */
+  const locks = new Map<string, Semaphore.Semaphore>();
+  const exclusive = <A, E, R>(absolute: string, effect: Effect.Effect<A, E, R>) => {
+    const existing = locks.get(absolute);
+    const lock = existing ?? Semaphore.makeUnsafe(1);
+    if (existing === undefined) {
+      locks.set(absolute, lock);
+    }
+    return lock.withPermits(1)(effect);
+  };
 
   /** The directory a listing or search starts from: the root when none was given. */
   const resolveDirectory = Effect.fn("FileTools.resolveDirectory")(function* (
@@ -432,11 +567,18 @@ export const fileToolHandlers = Effect.gen(function* () {
   return FileTools.of({
     read_file: Effect.fn("FileTools.read_file")(function* ({ path: requested, offset, limit }) {
       const { absolute, relative } = yield* resolveInside(requested);
-      const exists = yield* fs.exists(absolute).pipe(Effect.mapError(ioError(requested)));
-      if (!exists) {
-        return yield* notFound(requested);
+      const found = yield* fs.stat(absolute).pipe(Effect.option);
+      if (Option.isNone(found)) {
+        return yield* missingFile(absolute, requested);
       }
-      const info = yield* fs.stat(absolute).pipe(Effect.mapError(ioError(requested)));
+      const info = found.value;
+      if (info.type === "Directory") {
+        return yield* new FileToolError({
+          reason: "NotAFile",
+          path: requested,
+          message: `${requested} is a directory; list it with list_dir`,
+        });
+      }
       if (Number(info.size) > READ_FILE_MAX_BYTES) {
         return yield* new FileToolError({
           reason: "TooLarge",
@@ -444,20 +586,68 @@ export const fileToolHandlers = Effect.gen(function* () {
           message: `${requested} is ${info.size} bytes, over the ${READ_FILE_MAX_BYTES} the tool reads; search it with grep or the shell`,
         });
       }
-      const text = yield* fs.readFileString(absolute).pipe(Effect.mapError(ioError(requested)));
+      const bytes = yield* fs.readFile(absolute).pipe(Effect.mapError(ioError(requested)));
+      if (looksBinary(bytes)) {
+        return yield* new FileToolError({
+          reason: "Binary",
+          path: requested,
+          message: `${requested} is a binary file of ${info.size} bytes, not text; inspect it with the shell (file, xxd, strings)`,
+        });
+      }
+      const text = new TextDecoder().decode(bytes);
       const page = pageOf(text, offset, limit);
-      return page.whole
+      if (page.kind === "past") {
+        return yield* new FileToolError({
+          reason: "NoMatch",
+          path: requested,
+          message: `offset ${offset} is past the end of ${requested}, which has ${page.total} lines`,
+        });
+      }
+      yield* remember(absolute);
+      return page.kind === "whole"
         ? { path: relative, content: text }
         : { path: relative, content: page.content, truncated: true, lines: page.lines };
     }),
 
     write_file: Effect.fn("FileTools.write_file")(function* ({ path: requested, content }) {
       const { absolute, relative } = yield* resolveInside(requested);
-      yield* fs
-        .makeDirectory(path.dirname(absolute), { recursive: true })
-        .pipe(Effect.mapError(ioError(requested)));
-      yield* fs.writeFileString(absolute, content).pipe(Effect.mapError(ioError(requested)));
-      return { path: relative, bytes: new TextEncoder().encode(content).byteLength };
+      return yield* exclusive(
+        absolute,
+        Effect.gen(function* () {
+          const existing = yield* fs.stat(absolute).pipe(Effect.option);
+          if (Option.isSome(existing)) {
+            if (existing.value.type === "Directory") {
+              return yield* new FileToolError({
+                reason: "NotAFile",
+                path: requested,
+                message: `${requested} is a directory`,
+              });
+            }
+            const last = seen.get(absolute);
+            if (last === undefined) {
+              return yield* new FileToolError({
+                reason: "NotRead",
+                path: requested,
+                message: `${requested} already exists and has not been read; read it first, or change part of it with edit_file`,
+              });
+            }
+            const now = yield* stampOf(absolute);
+            if (Option.isSome(now) && now.value !== last) {
+              return yield* new FileToolError({
+                reason: "Stale",
+                path: requested,
+                message: `${requested} changed since it was last read; read it again before replacing it`,
+              });
+            }
+          }
+          yield* fs
+            .makeDirectory(path.dirname(absolute), { recursive: true })
+            .pipe(Effect.mapError(ioError(requested)));
+          yield* fs.writeFileString(absolute, content).pipe(Effect.mapError(ioError(requested)));
+          yield* remember(absolute);
+          return { path: relative, bytes: new TextEncoder().encode(content).byteLength };
+        }),
+      );
     }),
 
     edit_file: Effect.fn("FileTools.edit_file")(function* ({
@@ -481,33 +671,46 @@ export const fileToolHandlers = Effect.gen(function* () {
           message: "oldString and newString are the same",
         });
       }
-      const exists = yield* fs.exists(absolute).pipe(Effect.mapError(ioError(requested)));
-      if (!exists) {
-        return yield* notFound(requested);
-      }
-      const before = yield* fs.readFileString(absolute).pipe(Effect.mapError(ioError(requested)));
-      const found = countOccurrences(before, oldString);
-      if (found === 0) {
-        return yield* new FileToolError({
-          reason: "NoMatch",
-          path: requested,
-          message: `oldString was not found in ${requested}`,
-        });
-      }
-      if (found > 1 && replaceAll !== true) {
-        return yield* new FileToolError({
-          reason: "Ambiguous",
-          path: requested,
-          message: `oldString occurs ${found} times in ${requested}; add surrounding lines to make it unique, or set replaceAll`,
-        });
-      }
-      // Split and join, so `$` in the replacement is not a pattern.
-      const after =
-        replaceAll === true
-          ? before.split(oldString).join(newString)
-          : `${before.slice(0, before.indexOf(oldString))}${newString}${before.slice(before.indexOf(oldString) + oldString.length)}`;
-      yield* fs.writeFileString(absolute, after).pipe(Effect.mapError(ioError(requested)));
-      return { path: relative, replacements: replaceAll === true ? found : 1 };
+      return yield* exclusive(
+        absolute,
+        Effect.gen(function* () {
+          const exists = yield* fs.exists(absolute).pipe(Effect.mapError(ioError(requested)));
+          if (!exists) {
+            return yield* missingFile(absolute, requested);
+          }
+          const raw = yield* fs.readFileString(absolute).pipe(Effect.mapError(ioError(requested)));
+          // Matched as LF text without a byte-order mark, and written back
+          // with whichever the file had.
+          const file = normalize(raw);
+          const wanted = file.prepare(oldString);
+          const located = locate(file.text, wanted, file.prepare(newString), replaceAll === true);
+          if (located._tag === "Missing") {
+            return yield* new FileToolError({
+              reason: "NoMatch",
+              path: requested,
+              message: `oldString was not found in ${requested}; ${missHint(file.text, wanted, file.prepare(newString))}`,
+            });
+          }
+          if (located._tag === "Ambiguous") {
+            const loosely = located.strategy === "exact" ? "" : " once whitespace is ignored";
+            const advice =
+              located.strategy === "exact"
+                ? "add surrounding lines to make it unique, or set replaceAll"
+                : "add surrounding lines to make it unique";
+            return yield* new FileToolError({
+              reason: "Ambiguous",
+              path: requested,
+              message: `oldString occurs more than once in ${requested}${loosely}, starting at lines ${located.lines.join(", ")}; ${advice}`,
+            });
+          }
+          const after = file.restore(applySpans(file.text, located.spans));
+          yield* fs.writeFileString(absolute, after).pipe(Effect.mapError(ioError(requested)));
+          yield* remember(absolute);
+          return located.strategy === "exact"
+            ? { path: relative, replacements: located.spans.length }
+            : { path: relative, replacements: 1, matched: located.strategy };
+        }),
+      );
     }),
 
     list_dir: Effect.fn("FileTools.list_dir")(function* ({ path: requested }) {
@@ -550,14 +753,24 @@ export const fileToolHandlers = Effect.gen(function* () {
       };
     }),
 
-    grep: Effect.fn("FileTools.grep")(function* ({ pattern, path: requested, include }) {
+    grep: Effect.fn("FileTools.grep")(function* ({
+      pattern,
+      path: requested,
+      include,
+      ignoreCase,
+      literal,
+    }) {
       const regex = yield* Effect.try({
-        try: () => new RegExp(pattern),
+        try: () =>
+          new RegExp(
+            literal === true ? escapeRegex(pattern) : pattern,
+            ignoreCase === true ? "i" : "",
+          ),
         catch: (error) =>
           new FileToolError({
             reason: "InvalidPattern",
             path: pattern,
-            message: messageOf(error),
+            message: `${messageOf(error)}; set literal to search for the text as written`,
           }),
       });
       const filter = include === undefined ? undefined : yield* compileGlob(include);
@@ -570,31 +783,30 @@ export const fileToolHandlers = Effect.gen(function* () {
       );
 
       /** Every matching line of one file, in order; none for what cannot or should not be read. */
-      const search = (file: WalkedFile) =>
-        Effect.gen(function* () {
-          const hits: Array<GrepMatch> = [];
-          if (file.size > GREP_FILE_MAX_BYTES) {
-            return hits;
-          }
-          // A link to somewhere outside the workspace is not searched.
-          if (!(yield* insideReal(path.join(root, file.path)))) {
-            return hits;
-          }
-          // A file that cannot be read as text is skipped, not a failed search.
-          const text = yield* fs.readFileString(path.join(root, file.path)).pipe(Effect.option);
-          if (Option.isNone(text) || isBinary(text.value)) {
-            return hits;
-          }
-          const lines = text.value.split("\n");
-          for (let i = 0; i < lines.length && hits.length <= GREP_LIMIT; i++) {
-            // Without the carriage return of a CRLF file, or `$` would never match.
-            const line = lines[i]?.replace(/\r$/, "");
-            if (line !== undefined && regex.test(line)) {
-              hits.push({ path: file.path, line: i + 1, text: cutLine(line) });
-            }
-          }
+      const search = Effect.fnUntraced(function* (file: WalkedFile) {
+        const hits: Array<GrepMatch> = [];
+        if (file.size > GREP_FILE_MAX_BYTES) {
           return hits;
-        });
+        }
+        // A link to somewhere outside the workspace is not searched.
+        if (!(yield* insideReal(path.join(root, file.path)))) {
+          return hits;
+        }
+        // A file that cannot be read as text is skipped, not a failed search.
+        const text = yield* fs.readFileString(path.join(root, file.path)).pipe(Effect.option);
+        if (Option.isNone(text) || isBinary(text.value)) {
+          return hits;
+        }
+        const lines = text.value.split("\n");
+        for (let i = 0; i < lines.length && hits.length <= GREP_LIMIT; i++) {
+          // Without the carriage return of a CRLF file, or `$` would never match.
+          const line = lines[i]?.replace(/\r$/, "");
+          if (line !== undefined && regex.test(line)) {
+            hits.push({ path: file.path, line: i + 1, text: cutLine(line) });
+          }
+        }
+        return hits;
+      });
 
       // Files are read a few at a time, a batch per round so the result keeps
       // walk order and the search can stop as soon as it has enough.

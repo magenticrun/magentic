@@ -1,4 +1,6 @@
 export * from "./BackgroundTasks.ts";
+export * from "./Browser.ts";
+export * from "./BrowserPlugin.ts";
 export * from "./FileTools.ts";
 export * from "./FileToolsPlugin.ts";
 export * from "./HttpFetch.ts";

@@ -3,6 +3,7 @@ export * from "./CodexAuthStore.ts";
 export * from "./CodexClient.ts";
 export * from "./CodexLanguageModel.ts";
 export * from "./CodexLogin.ts";
+export * from "./CodexModels.ts";
 export * from "./CodexStreamShim.ts";
 export * from "./CodexTokens.ts";
 export * from "./Constants.ts";

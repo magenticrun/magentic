@@ -11,10 +11,8 @@ const count = (n: number): string => n.toLocaleString("en-US");
 const formatCost = (dollars: number): string =>
   dollars > 0 && dollars < 0.01 ? `$${dollars.toFixed(4)}` : `$${dollars.toFixed(2)}`;
 
-const percent = (part: number, whole: number): string => {
-  const share = (part / whole) * 100;
-  return `${share < 1 ? "<1" : Math.round(share)}%`;
-};
+/** `1.13%`: two decimals, so movement shows on a million-token window. */
+const percent = (part: number, whole: number): string => `${((part / whole) * 100).toFixed(2)}%`;
 
 /** Indented label and count columns, `≈` because the counts are estimates. */
 const table = (rows: ReadonlyArray<readonly [string, number]>): ReadonlyArray<string> => {

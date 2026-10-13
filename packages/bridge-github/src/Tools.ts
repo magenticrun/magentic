@@ -59,16 +59,15 @@ const RepositoryRef = Schema.Struct({
   repo: Schema.String,
 });
 
-const parseRepository = (repository: string) =>
-  Effect.gen(function* () {
-    const match = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(repository.trim());
-    if (match === null || match[1] === undefined || match[2] === undefined) {
-      return yield* new ForgeToolError({
-        message: `repository must be owner/name, got ${JSON.stringify(repository)}`,
-      });
-    }
-    return { owner: match[1], repo: match[2] } satisfies typeof RepositoryRef.Type;
-  });
+const parseRepository = Effect.fn("forge.parseRepository")(function* (repository: string) {
+  const match = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(repository.trim());
+  if (match === null || match[1] === undefined || match[2] === undefined) {
+    return yield* new ForgeToolError({
+      message: `repository must be owner/name, got ${JSON.stringify(repository)}`,
+    });
+  }
+  return { owner: match[1], repo: match[2] } satisfies typeof RepositoryRef.Type;
+});
 
 const CommentRecord = Schema.Struct({
   author: Schema.String,
@@ -373,303 +372,300 @@ const withTrailer = (
     onSome: (coAuthoredBy) => ({ ...result, coAuthoredBy }),
   });
 
-export const forgeToolHandlers = (deps: ForgeDeps) =>
-  Effect.gen(function* () {
-    const { api, git, permits } = deps;
+export const forgeToolHandlers = Effect.fn("forge.handlers")(function* (deps: ForgeDeps) {
+  const { api, git, permits } = deps;
 
-    const authFor = (
-      ref: typeof RepositoryRef.Type,
-    ): Extract<GitHubAuth, { _tag: "Repository" }> => ({
-      _tag: "Repository",
-      owner: ref.owner,
-      repo: ref.repo,
-    });
+  const authFor = (
+    ref: typeof RepositoryRef.Type,
+  ): Extract<GitHubAuth, { _tag: "Repository" }> => ({
+    _tag: "Repository",
+    owner: ref.owner,
+    repo: ref.repo,
+  });
 
-    const repoPath = (ref: typeof RepositoryRef.Type) =>
-      `/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}`;
+  const repoPath = (ref: typeof RepositoryRef.Type) =>
+    `/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}`;
 
-    /** The workspace is one repository's checkout; a tool asked about another says so. */
-    const checkWorkspace = Effect.fn("forge.checkWorkspace")(function* (
-      ref: typeof RepositoryRef.Type,
-    ) {
-      const origin = yield* git.run(["remote", "get-url", "origin"]).pipe(
-        Effect.mapError(
-          () =>
-            new ForgeToolError({
-              message: "the workspace is not a git checkout with an origin remote",
-            }),
-        ),
-      );
-      const expected = `${ref.owner}/${ref.repo}`.toLowerCase();
-      const found = origin.toLowerCase().replace(/\.git$/, "");
-      if (!found.endsWith(`/${expected}`) && !found.endsWith(`:${expected}`)) {
-        return yield* new ForgeToolError({
-          message: `the workspace is a checkout of ${origin}, not ${ref.owner}/${ref.repo}; this gateway serves one repository`,
-        });
-      }
-    });
+  /** The workspace is one repository's checkout; a tool asked about another says so. */
+  const checkWorkspace = Effect.fn("forge.checkWorkspace")(function* (
+    ref: typeof RepositoryRef.Type,
+  ) {
+    const origin = yield* git.run(["remote", "get-url", "origin"]).pipe(
+      Effect.mapError(
+        () =>
+          new ForgeToolError({
+            message: "the workspace is not a git checkout with an origin remote",
+          }),
+      ),
+    );
+    const expected = `${ref.owner}/${ref.repo}`.toLowerCase();
+    const found = origin.toLowerCase().replace(/\.git$/, "");
+    if (!found.endsWith(`/${expected}`) && !found.endsWith(`:${expected}`)) {
+      return yield* new ForgeToolError({
+        message: `the workspace is a checkout of ${origin}, not ${ref.owner}/${ref.repo}; this gateway serves one repository`,
+      });
+    }
+  });
 
-    const currentBranch = git
-      .run(["rev-parse", "--abbrev-ref", "HEAD"])
+  const currentBranch = git
+    .run(["rev-parse", "--abbrev-ref", "HEAD"])
+    .pipe(Effect.mapError(apiFailed));
+
+  const cloneUrl = (ref: typeof RepositoryRef.Type) =>
+    `https://${deps.gitHost}/${ref.owner}/${ref.repo}.git`;
+
+  const defaultBranch = (ref: typeof RepositoryRef.Type) =>
+    Effect.map(
+      api.request(authFor(ref), "GET", repoPath(ref), { schema: RepositoryResponse }),
+      (answer) => answer.body.default_branch,
+    );
+
+  const read = Effect.fn("forge.read")(function* (repository: string, number: number) {
+    const ref = yield* parseRepository(repository);
+    const auth = authFor(ref);
+    const issue = yield* api
+      .request(auth, "GET", `${repoPath(ref)}/issues/${number}`, { schema: IssueResponse })
       .pipe(Effect.mapError(apiFailed));
-
-    const cloneUrl = (ref: typeof RepositoryRef.Type) =>
-      `https://${deps.gitHost}/${ref.owner}/${ref.repo}.git`;
-
-    const defaultBranch = (ref: typeof RepositoryRef.Type) =>
-      Effect.map(
-        api.request(authFor(ref), "GET", repoPath(ref), { schema: RepositoryResponse }),
-        (answer) => answer.body.default_branch,
+    const comments = yield* latest(
+      api,
+      auth,
+      `${repoPath(ref)}/issues/${number}/comments`,
+      CommentsResponse,
+      COMMENT_LIMIT,
+    ).pipe(Effect.mapError(apiFailed));
+    const base = {
+      kind: issue.body.pull_request === undefined ? ("issue" as const) : ("pull_request" as const),
+      number: issue.body.number,
+      title: issue.body.title,
+      state: issue.body.state,
+      author: issue.body.user.login,
+      url: issue.body.html_url,
+      body: issue.body.body ?? "",
+      labels: issue.body.labels.map((label) => label.name),
+      comments: comments.map((comment) => ({
+        author: comment.user.login,
+        createdAt: comment.created_at,
+        body: comment.body,
+      })),
+    };
+    if (base.kind === "issue") {
+      return base;
+    }
+    const pull = yield* api
+      .request(auth, "GET", `${repoPath(ref)}/pulls/${number}`, { schema: PullResponse })
+      .pipe(Effect.mapError(apiFailed));
+    const files = yield* api
+      .request(auth, "GET", `${repoPath(ref)}/pulls/${number}/files`, {
+        query: { per_page: "100" },
+        schema: FilesResponse,
+      })
+      .pipe(Effect.mapError(apiFailed));
+    // GitHub refuses the diff of a very large pull request (406); the files list still tells the story.
+    const diff = yield* api
+      .request(auth, "GET", `${repoPath(ref)}/pulls/${number}`, {
+        accept: "application/vnd.github.diff",
+        schema: Schema.String,
+      })
+      .pipe(
+        Effect.map((answer) => answer.body),
+        Effect.catchIf(
+          (error) => error.status === 406,
+          () => Effect.succeed(""),
+        ),
+        Effect.mapError(apiFailed),
       );
-
-    const read = Effect.fn("forge.read")(function* (repository: string, number: number) {
-      const ref = yield* parseRepository(repository);
-      const auth = authFor(ref);
-      const issue = yield* api
-        .request(auth, "GET", `${repoPath(ref)}/issues/${number}`, { schema: IssueResponse })
-        .pipe(Effect.mapError(apiFailed));
-      const comments = yield* latest(
-        api,
-        auth,
-        `${repoPath(ref)}/issues/${number}/comments`,
-        CommentsResponse,
-        COMMENT_LIMIT,
-      ).pipe(Effect.mapError(apiFailed));
-      const base = {
-        kind:
-          issue.body.pull_request === undefined ? ("issue" as const) : ("pull_request" as const),
-        number: issue.body.number,
-        title: issue.body.title,
-        state: issue.body.state,
-        author: issue.body.user.login,
-        url: issue.body.html_url,
-        body: issue.body.body ?? "",
-        labels: issue.body.labels.map((label) => label.name),
-        comments: comments.map((comment) => ({
-          author: comment.user.login,
-          createdAt: comment.created_at,
-          body: comment.body,
+    const headRepository = pull.body.head.repo?.full_name;
+    const pullFields = {
+      headRef: pull.body.head.ref,
+      headSha: pull.body.head.sha,
+      baseRef: pull.body.base.ref,
+    };
+    return {
+      ...base,
+      pull: {
+        ...(headRepository === undefined ? pullFields : { ...pullFields, headRepository }),
+        draft: pull.body.draft,
+        files: files.body.map((file) => ({
+          path: file.filename,
+          status: file.status,
+          additions: file.additions,
+          deletions: file.deletions,
         })),
-      };
-      if (base.kind === "issue") {
-        return base;
-      }
+        diff: diff.slice(0, DIFF_LIMIT),
+        diffTruncated: diff.length > DIFF_LIMIT || diff === "",
+      },
+    };
+  });
+
+  const comment = Effect.fn("forge.comment")(function* (
+    repository: string,
+    number: number,
+    body: string,
+  ) {
+    const ref = yield* parseRepository(repository);
+    const created = yield* api
+      .request(authFor(ref), "POST", `${repoPath(ref)}/issues/${number}/comments`, {
+        body: { body },
+        schema: CreatedComment,
+      })
+      .pipe(Effect.mapError(apiFailed));
+    return { url: created.body.html_url };
+  });
+
+  const reviewComment = Effect.fn("forge.reviewComment")(function* (
+    params: typeof ForgeReviewComment.parametersSchema.Type,
+  ) {
+    const ref = yield* parseRepository(params.repository);
+    const auth = authFor(ref);
+    const pull = yield* api
+      .request(auth, "GET", `${repoPath(ref)}/pulls/${params.number}`, { schema: PullResponse })
+      .pipe(Effect.mapError(apiFailed));
+    const body =
+      params.suggestion === undefined
+        ? params.body
+        : `${params.body}\n\n\`\`\`suggestion\n${params.suggestion}\n\`\`\``;
+    const anchor = {
+      body,
+      commit_id: pull.body.head.sha,
+      path: params.path,
+      line: params.line,
+      side: params.side ?? "RIGHT",
+    };
+    const created = yield* api
+      .request(auth, "POST", `${repoPath(ref)}/pulls/${params.number}/comments`, {
+        body: params.startLine === undefined ? anchor : { ...anchor, start_line: params.startLine },
+        schema: CreatedComment,
+      })
+      .pipe(Effect.mapError(apiFailed));
+    return { url: created.body.html_url };
+  });
+
+  const checkout = Effect.fn("forge.checkout")(function* (
+    params: typeof ForgeCheckout.parametersSchema.Type,
+  ) {
+    const call = yield* ToolCallContext;
+    const ref = yield* parseRepository(params.repository);
+    yield* checkWorkspace(ref);
+    const auth = authFor(ref);
+    const token = yield* api.token(auth).pipe(Effect.mapError(apiFailed));
+    const identity = yield* deps.botIdentity(auth).pipe(Effect.mapError(apiFailed));
+    const permit = yield* permits.get(call.conversationId);
+    const coAuthoredBy = Option.map(
+      permit.requester,
+      (person) => `Co-authored-by: ${person.login} <${noreplyEmail(person.id, person.login)}>`,
+    );
+    // The bot signs the commits the model makes in the shell; the person is credited in the trailer.
+    yield* git.run(["config", "user.name", identity.name]).pipe(Effect.mapError(apiFailed));
+    yield* git.run(["config", "user.email", identity.email]).pipe(Effect.mapError(apiFailed));
+
+    if (params.pullRequest !== undefined) {
       const pull = yield* api
-        .request(auth, "GET", `${repoPath(ref)}/pulls/${number}`, { schema: PullResponse })
-        .pipe(Effect.mapError(apiFailed));
-      const files = yield* api
-        .request(auth, "GET", `${repoPath(ref)}/pulls/${number}/files`, {
-          query: { per_page: "100" },
-          schema: FilesResponse,
+        .request(auth, "GET", `${repoPath(ref)}/pulls/${params.pullRequest}`, {
+          schema: PullResponse,
         })
         .pipe(Effect.mapError(apiFailed));
-      // GitHub refuses the diff of a very large pull request (406); the files list still tells the story.
-      const diff = yield* api
-        .request(auth, "GET", `${repoPath(ref)}/pulls/${number}`, {
-          accept: "application/vnd.github.diff",
-          schema: Schema.String,
-        })
-        .pipe(
-          Effect.map((answer) => answer.body),
-          Effect.catchIf(
-            (error) => error.status === 406,
-            () => Effect.succeed(""),
-          ),
-          Effect.mapError(apiFailed),
-        );
-      const headRepository = pull.body.head.repo?.full_name;
-      const pullFields = {
-        headRef: pull.body.head.ref,
-        headSha: pull.body.head.sha,
-        baseRef: pull.body.base.ref,
-      };
-      return {
-        ...base,
-        pull: {
-          ...(headRepository === undefined ? pullFields : { ...pullFields, headRepository }),
-          draft: pull.body.draft,
-          files: files.body.map((file) => ({
-            path: file.filename,
-            status: file.status,
-            additions: file.additions,
-            deletions: file.deletions,
-          })),
-          diff: diff.slice(0, DIFF_LIMIT),
-          diffTruncated: diff.length > DIFF_LIMIT || diff === "",
-        },
-      };
-    });
-
-    const comment = Effect.fn("forge.comment")(function* (
-      repository: string,
-      number: number,
-      body: string,
-    ) {
-      const ref = yield* parseRepository(repository);
-      const created = yield* api
-        .request(authFor(ref), "POST", `${repoPath(ref)}/issues/${number}/comments`, {
-          body: { body },
-          schema: CreatedComment,
-        })
-        .pipe(Effect.mapError(apiFailed));
-      return { url: created.body.html_url };
-    });
-
-    const reviewComment = Effect.fn("forge.reviewComment")(function* (
-      params: typeof ForgeReviewComment.parametersSchema.Type,
-    ) {
-      const ref = yield* parseRepository(params.repository);
-      const auth = authFor(ref);
-      const pull = yield* api
-        .request(auth, "GET", `${repoPath(ref)}/pulls/${params.number}`, { schema: PullResponse })
-        .pipe(Effect.mapError(apiFailed));
-      const body =
-        params.suggestion === undefined
-          ? params.body
-          : `${params.body}\n\n\`\`\`suggestion\n${params.suggestion}\n\`\`\``;
-      const anchor = {
-        body,
-        commit_id: pull.body.head.sha,
-        path: params.path,
-        line: params.line,
-        side: params.side ?? "RIGHT",
-      };
-      const created = yield* api
-        .request(auth, "POST", `${repoPath(ref)}/pulls/${params.number}/comments`, {
-          body:
-            params.startLine === undefined ? anchor : { ...anchor, start_line: params.startLine },
-          schema: CreatedComment,
-        })
-        .pipe(Effect.mapError(apiFailed));
-      return { url: created.body.html_url };
-    });
-
-    const checkout = Effect.fn("forge.checkout")(function* (
-      params: typeof ForgeCheckout.parametersSchema.Type,
-    ) {
-      const call = yield* ToolCallContext;
-      const ref = yield* parseRepository(params.repository);
-      yield* checkWorkspace(ref);
-      const auth = authFor(ref);
-      const token = yield* api.token(auth).pipe(Effect.mapError(apiFailed));
-      const identity = yield* deps.botIdentity(auth).pipe(Effect.mapError(apiFailed));
-      const permit = yield* permits.get(call.conversationId);
-      const coAuthoredBy = Option.map(
-        permit.requester,
-        (person) => `Co-authored-by: ${person.login} <${noreplyEmail(person.id, person.login)}>`,
-      );
-      // The bot signs the commits the model makes in the shell; the person is credited in the trailer.
-      yield* git.run(["config", "user.name", identity.name]).pipe(Effect.mapError(apiFailed));
-      yield* git.run(["config", "user.email", identity.email]).pipe(Effect.mapError(apiFailed));
-
-      if (params.pullRequest !== undefined) {
-        const pull = yield* api
-          .request(auth, "GET", `${repoPath(ref)}/pulls/${params.pullRequest}`, {
-            schema: PullResponse,
-          })
-          .pipe(Effect.mapError(apiFailed));
-        const headRepository = pull.body.head.repo?.full_name.toLowerCase();
-        if (headRepository !== `${ref.owner}/${ref.repo}`.toLowerCase()) {
-          return yield* new ForgeToolError({
-            message: `pull request #${params.pullRequest} comes from a fork; answer it with comments and suggestions rather than pushes`,
-          });
-        }
-        const branch = pull.body.head.ref;
-        yield* git
-          .runWithToken(["fetch", cloneUrl(ref), `refs/heads/${branch}`], token.token)
-          .pipe(Effect.mapError(apiFailed));
-        yield* git.run(["checkout", "-B", branch, "FETCH_HEAD"]).pipe(Effect.mapError(apiFailed));
-        yield* permits.allow(call.conversationId, branch);
-        return withTrailer(
-          {
-            branch,
-            from: `pull request #${params.pullRequest}`,
-            sha: pull.body.head.sha,
-            note: `On ${branch}, the pull request's own branch. Commit with git in shell, then forge_push.`,
-          },
-          coAuthoredBy,
-        );
-      }
-
-      const base = yield* defaultBranch(ref).pipe(Effect.mapError(apiFailed));
-      const stamp = DateTime.formatIso(yield* DateTime.now)
-        .replaceAll(/[-:]/g, "")
-        .slice(0, 13)
-        .replace("T", "-");
-      const branch =
-        params.branch ??
-        `${deps.branchPrefix}${params.issue === undefined ? "task" : `issue-${params.issue}`}-${stamp}`;
-      if (!branch.startsWith(deps.branchPrefix)) {
+      const headRepository = pull.body.head.repo?.full_name.toLowerCase();
+      if (headRepository !== `${ref.owner}/${ref.repo}`.toLowerCase()) {
         return yield* new ForgeToolError({
-          message: `branch ${branch} is outside the bot's namespace ${deps.branchPrefix}`,
+          message: `pull request #${params.pullRequest} comes from a fork; answer it with comments and suggestions rather than pushes`,
         });
       }
+      const branch = pull.body.head.ref;
       yield* git
-        .runWithToken(["fetch", cloneUrl(ref), `refs/heads/${base}`], token.token)
+        .runWithToken(["fetch", cloneUrl(ref), `refs/heads/${branch}`], token.token)
         .pipe(Effect.mapError(apiFailed));
       yield* git.run(["checkout", "-B", branch, "FETCH_HEAD"]).pipe(Effect.mapError(apiFailed));
-      const sha = yield* git.run(["rev-parse", "HEAD"]).pipe(Effect.mapError(apiFailed));
       yield* permits.allow(call.conversationId, branch);
       return withTrailer(
         {
           branch,
-          from: base,
-          sha,
-          note: `On new branch ${branch} from ${base}. Commit with git in shell, then forge_push and forge_open_pr.`,
+          from: `pull request #${params.pullRequest}`,
+          sha: pull.body.head.sha,
+          note: `On ${branch}, the pull request's own branch. Commit with git in shell, then forge_push.`,
         },
         coAuthoredBy,
       );
-    });
+    }
 
-    const push = Effect.fn("forge.push")(function* (repository: string, requested?: string) {
-      const call = yield* ToolCallContext;
-      const ref = yield* parseRepository(repository);
-      yield* checkWorkspace(ref);
-      const branch = requested ?? (yield* currentBranch);
-      const permit = yield* permits.get(call.conversationId);
-      if (!permit.refs.has(branch) && !branch.startsWith(deps.branchPrefix)) {
-        return yield* new ForgeToolError({
-          message: `refusing to push ${branch}: the bot pushes only to branches forge_checkout prepared, a pull request's own branch, or ${deps.branchPrefix}*`,
-        });
-      }
-      const token = yield* api.token(authFor(ref)).pipe(Effect.mapError(apiFailed));
-      yield* git
-        .runWithToken(["push", cloneUrl(ref), `${branch}:refs/heads/${branch}`], token.token)
-        .pipe(Effect.mapError(apiFailed));
-      const sha = yield* git.run(["rev-parse", branch]).pipe(Effect.mapError(apiFailed));
-      return {
+    const base = yield* defaultBranch(ref).pipe(Effect.mapError(apiFailed));
+    const stamp = DateTime.formatIso(yield* DateTime.now)
+      .replaceAll(/[-:]/g, "")
+      .slice(0, 13)
+      .replace("T", "-");
+    const branch =
+      params.branch ??
+      `${deps.branchPrefix}${params.issue === undefined ? "task" : `issue-${params.issue}`}-${stamp}`;
+    if (!branch.startsWith(deps.branchPrefix)) {
+      return yield* new ForgeToolError({
+        message: `branch ${branch} is outside the bot's namespace ${deps.branchPrefix}`,
+      });
+    }
+    yield* git
+      .runWithToken(["fetch", cloneUrl(ref), `refs/heads/${base}`], token.token)
+      .pipe(Effect.mapError(apiFailed));
+    yield* git.run(["checkout", "-B", branch, "FETCH_HEAD"]).pipe(Effect.mapError(apiFailed));
+    const sha = yield* git.run(["rev-parse", "HEAD"]).pipe(Effect.mapError(apiFailed));
+    yield* permits.allow(call.conversationId, branch);
+    return withTrailer(
+      {
         branch,
+        from: base,
         sha,
-        url: `https://${deps.gitHost}/${ref.owner}/${ref.repo}/compare/${encodeURIComponent(branch)}?expand=1`,
-      };
-    });
-
-    const openPr = Effect.fn("forge.openPr")(function* (
-      params: typeof ForgeOpenPr.parametersSchema.Type,
-    ) {
-      const ref = yield* parseRepository(params.repository);
-      const auth = authFor(ref);
-      const head = params.head ?? (yield* currentBranch);
-      const base = params.base ?? (yield* defaultBranch(ref).pipe(Effect.mapError(apiFailed)));
-      const body =
-        params.closes === undefined
-          ? params.body
-          : `${params.body.trimEnd()}\n\nCloses #${params.closes}`;
-      const created = yield* api
-        .request(auth, "POST", `${repoPath(ref)}/pulls`, {
-          body: { title: params.title, head, base, body, draft: true },
-          schema: CreatedPull,
-        })
-        .pipe(Effect.mapError(apiFailed));
-      return { number: created.body.number, url: created.body.html_url };
-    });
-
-    return ForgeTools.of({
-      forge_read: ({ repository, number }) => read(repository, number),
-      forge_comment: ({ repository, number, body }) => comment(repository, number, body),
-      forge_review_comment: (params) => reviewComment(params),
-      forge_checkout: (params) => checkout(params),
-      forge_push: ({ repository, branch }) => push(repository, branch),
-      forge_open_pr: (params) => openPr(params),
-    });
+        note: `On new branch ${branch} from ${base}. Commit with git in shell, then forge_push and forge_open_pr.`,
+      },
+      coAuthoredBy,
+    );
   });
+
+  const push = Effect.fn("forge.push")(function* (repository: string, requested?: string) {
+    const call = yield* ToolCallContext;
+    const ref = yield* parseRepository(repository);
+    yield* checkWorkspace(ref);
+    const branch = requested ?? (yield* currentBranch);
+    const permit = yield* permits.get(call.conversationId);
+    if (!permit.refs.has(branch) && !branch.startsWith(deps.branchPrefix)) {
+      return yield* new ForgeToolError({
+        message: `refusing to push ${branch}: the bot pushes only to branches forge_checkout prepared, a pull request's own branch, or ${deps.branchPrefix}*`,
+      });
+    }
+    const token = yield* api.token(authFor(ref)).pipe(Effect.mapError(apiFailed));
+    yield* git
+      .runWithToken(["push", cloneUrl(ref), `${branch}:refs/heads/${branch}`], token.token)
+      .pipe(Effect.mapError(apiFailed));
+    const sha = yield* git.run(["rev-parse", branch]).pipe(Effect.mapError(apiFailed));
+    return {
+      branch,
+      sha,
+      url: `https://${deps.gitHost}/${ref.owner}/${ref.repo}/compare/${encodeURIComponent(branch)}?expand=1`,
+    };
+  });
+
+  const openPr = Effect.fn("forge.openPr")(function* (
+    params: typeof ForgeOpenPr.parametersSchema.Type,
+  ) {
+    const ref = yield* parseRepository(params.repository);
+    const auth = authFor(ref);
+    const head = params.head ?? (yield* currentBranch);
+    const base = params.base ?? (yield* defaultBranch(ref).pipe(Effect.mapError(apiFailed)));
+    const body =
+      params.closes === undefined
+        ? params.body
+        : `${params.body.trimEnd()}\n\nCloses #${params.closes}`;
+    const created = yield* api
+      .request(auth, "POST", `${repoPath(ref)}/pulls`, {
+        body: { title: params.title, head, base, body, draft: true },
+        schema: CreatedPull,
+      })
+      .pipe(Effect.mapError(apiFailed));
+    return { number: created.body.number, url: created.body.html_url };
+  });
+
+  return ForgeTools.of({
+    forge_read: ({ repository, number }) => read(repository, number),
+    forge_comment: ({ repository, number, body }) => comment(repository, number, body),
+    forge_review_comment: (params) => reviewComment(params),
+    forge_checkout: (params) => checkout(params),
+    forge_push: ({ repository, branch }) => push(repository, branch),
+    forge_open_pr: (params) => openPr(params),
+  });
+});

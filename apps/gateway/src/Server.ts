@@ -6,12 +6,16 @@ import {
   configDir,
   ConversationStore,
   dataDir,
+  layerWorkspace,
   PluginHost,
   PluginRoutes,
   Runner,
   ScheduledTaskStore,
   ScheduledTasks,
   Steering,
+  layerTraceCapture,
+  TraceStore,
+  traceToolPlugin,
 } from "@magentic/core";
 import { Identity } from "@magentic/identity";
 import { mcpPlugin, McpServers } from "@magentic/mcp";
@@ -21,13 +25,23 @@ import { Policy } from "@magentic/policy";
 import { Api, RPC_PATH, RemoteApi, REMOTE_CONTROL_PATH } from "@magentic/protocol";
 import {
   BackgroundTasks,
+  browserPlugin,
   fileToolsPlugin,
   httpFetchPlugin,
   shellToolPlugin,
   ToolOutputDir,
   WorkspaceRoot,
 } from "@magentic/tools";
-import { Config, Effect, FileSystem, Layer, Option, type Path, Schema } from "effect";
+import {
+  Config,
+  ConfigProvider,
+  Effect,
+  FileSystem,
+  Layer,
+  Option,
+  type Path,
+  Schema,
+} from "effect";
 import {
   FetchHttpClient,
   type HttpClient,
@@ -35,6 +49,7 @@ import {
   HttpServerRequest,
   HttpServerResponse,
 } from "effect/unstable/http";
+import { OtlpSerialization, OtlpTracer } from "effect/unstable/observability";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import { BridgesLayer } from "./Bridges.ts";
 import { configAgentsPlugin } from "./ConfigAgents.ts";
@@ -50,7 +65,7 @@ export const assistant = new AgentDefinition({
   description: "General assistant that can explore, change, and run things in the workspace.",
   prompt: `You are magentic, an assistant working inside a software workspace.
 
-Your tools are read_file, write_file, edit_file, list_dir, glob, grep, shell, and http_fetch, with task_output, task_stop, and task_list for commands shell left running in the background. The file tools and shell are the only way you can see or change the workspace; http_fetch reads pages on the public internet as markdown, the way a reader view shows them.
+Your tools are read_file, write_file, edit_file, list_dir, glob, grep, shell, http_fetch, session_trace, and browser_tabs, browser_select_tab, browser_snapshot, browser_navigate, browser_click, browser_type, browser_press, browser_scroll, and browser_evaluate. task_output, task_stop, and task_list manage commands shell left running in the background. The browser tools control a selected tab in the user's normally launched Helium browser; call browser_tabs then browser_select_tab before interacting with it. The file tools and shell are the only way you can see or change the workspace; http_fetch reads pages on the public internet as markdown, the way a reader view shows them. session_trace reports how this conversation's earlier runs spent their time and tokens; use it when asked why something was slow, costly, or failed, rather than guessing.
 
 Working with files:
 - Paths are relative to the workspace root.
@@ -90,6 +105,16 @@ Answering:
     "task_stop",
     "task_list",
     "http_fetch",
+    "session_trace",
+    "browser_tabs",
+    "browser_select_tab",
+    "browser_snapshot",
+    "browser_navigate",
+    "browser_click",
+    "browser_type",
+    "browser_press",
+    "browser_scroll",
+    "browser_evaluate",
   ],
 });
 
@@ -159,8 +184,10 @@ export const checkBind = (
 /** What we ship, in the order their contributions take. External plugins follow. */
 export const builtinPlugins = [
   builtin(fileToolsPlugin),
+  builtin(browserPlugin),
   builtin(shellToolPlugin),
   builtin(httpFetchPlugin),
+  builtin(traceToolPlugin),
   ...modelPlugins.map(builtin),
   builtin(assistantPlugin),
 ];
@@ -198,6 +225,27 @@ export const BackgroundTasksLayer = BackgroundTasks.layer.pipe(
   ),
 );
 
+/**
+ * Every run's spans kept beside its conversation, and sent on to an OTLP
+ * collector as well when `OTEL_EXPORTER_OTLP_ENDPOINT` (or its traces-only
+ * form) names one; the standard `OTEL_*` variables configure the rest.
+ * `OTEL_TRACES_EXPORTER` defaults to `otlp`, as the OpenTelemetry spec has
+ * it, where Effect's reading would leave export off until it is set.
+ */
+export const TracingLayer = layerTraceCapture.pipe(
+  Layer.provide(
+    OtlpTracer.layerFromConfig({ resource: { serviceName: "magentic-gateway" } }).pipe(
+      Layer.provide([
+        OtlpSerialization.layerJson,
+        ConfigProvider.layerAdd(ConfigProvider.fromUnknown({ OTEL_TRACES_EXPORTER: ["otlp"] })),
+      ]),
+    ),
+  ),
+  Layer.provideMerge(
+    Layer.unwrap(Effect.map(dataDir, (data) => TraceStore.layerFile(`${data}/conversations`))),
+  ),
+);
+
 /** Conversations on disk under the data directory, so they outlive the gateway. */
 export const ConversationStoreLayer = Layer.unwrap(
   Effect.map(dataDir, (data) => ConversationStore.layerFile(`${data}/conversations`)),
@@ -222,6 +270,8 @@ const ScheduledTasksLayer = ScheduledTasks.layer.pipe(
  */
 export const RunnerLayer = Runner.layer.pipe(
   Layer.provideMerge(Layer.mergeAll(ConversationStoreLayer, Steering.layer, ScheduledTasksLayer)),
+  // The workspace and its AGENTS.md go to every agent after its own prompt.
+  Layer.provide(Layer.unwrap(Effect.map(workspaceRoot, layerWorkspace))),
 );
 
 const AdmissionLayer = Layer.mergeAll(Identity.layerLocal, Policy.layerAllowAll, Audit.layerMemory);
@@ -334,6 +384,7 @@ export const layerServer = (port: number, options: ServerOptions = {}) =>
       BunHttpServer.layer({ port, hostname: options.hostname ?? "127.0.0.1", idleTimeout: 255 }),
     ),
     Layer.provide(options.catalog ?? ModelCatalog.layer),
+    Layer.provide(TracingLayer),
     Layer.provide([BunServices.layer, FetchHttpClient.layer]),
   );
 

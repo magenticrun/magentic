@@ -9,7 +9,7 @@ export const relaySetup = Command.make(
     url: Flag.String("url").pipe(Flag.withDefault("https://relay1.magentic.run")),
     publicUrl: Flag.String("public-url").pipe(Flag.optional),
   },
-  Effect.fn(function* ({ url, publicUrl }) {
+  Effect.fn("Cli.relaySetup")(function* ({ url, publicUrl }) {
     const token = yield* Prompt.password({
       message: "Gateway credential (mrk_…)",
       validate: (value) =>

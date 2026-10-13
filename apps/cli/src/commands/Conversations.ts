@@ -95,6 +95,7 @@ export const conversationCommandsPlugin = define({
     });
     yield* ctx.command.register({
       name: NEW,
+      aliases: ["clean", "clear"],
       description: "Start a new conversation",
       run: ({ session }) => session.startNew,
     });

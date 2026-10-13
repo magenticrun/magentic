@@ -82,6 +82,8 @@ export interface ToolDomain {
     tool: T,
     handle: Tool.Handler<T>,
   ): Effect.Effect<Registration, never, Scope.Scope | Tool.HandlerServices<T>>;
+  /** Tools still on their way; runs wait for `arrived` before gathering theirs. Bound it. */
+  arriving(arrived: Effect.Effect<void>): Effect.Effect<void>;
   hook(
     name: "execute.before",
     cb: (event: ToolCallBefore) => Effect.Effect<void>,
@@ -171,10 +173,14 @@ the names its thinking can be set to (the effort names when it takes an effort, 
 prices per million tokens. A chat cycles the levels with `ctrl+t` and sends the choice with
 each run; the runner asks the provider's `reasoning` for the request configuration and
 provides it as context around the model call, so a provider that speaks the OpenAI protocol
-answers with a reasoning effort and one that speaks Anthropic's with an effort or a thinking
-budget. The runner prices every call from `cost` and reports it on the `TokenUsage` event and
-the conversation's usage; a provider whose plan is not metered by the token, such as a ChatGPT
-subscription, leaves `cost` out.
+answers with a reasoning effort and one that speaks Anthropic's with an effort (and adaptive
+thinking, on the Claude models that think only when asked) or a thinking budget. The API-key
+providers also send the catalog's output limit as Anthropic's `max_tokens`, where Effect's
+client would otherwise guess from the model id, and never have OpenAI store a Responses turn:
+reasoning goes back as encrypted content, as on the ChatGPT route. The runner prices every
+call from `cost` and reports it on the `TokenUsage` event and the conversation's usage; a
+provider whose plan is not metered by the token, such as a ChatGPT subscription, leaves `cost`
+out.
 
 This follows opencode: an agent's `model:` is a `provider/model` reference such as
 `opencode-zen/gpt-5.5`; a bare provider id takes that provider's default model, and no
@@ -465,7 +471,9 @@ Tools from Model Context Protocol servers come through one plugin, `mcp` in `@ma
 the way pi keeps MCP out of its core and leaves it to an extension. The gateway reads the
 `mcp:` section of `magentic.yaml` and hands it to the plugin as its options; nothing else in
 the gateway knows the protocol. Each entry is a server, local (a command the gateway starts
-and talks to over stdio) or remote (a URL, Streamable HTTP first and SSE when that fails):
+and talks to over stdio) or remote (a URL, Streamable HTTP first and SSE when that fails; when
+both fail the error names each transport's failure, and a 401 or 403 from either is reported
+on its own, with a pointer to the entry's headers):
 
 ```yaml
 mcp:
@@ -487,26 +495,35 @@ mcp:
 
 What the plugin does with a server, following opencode's `MCP` service:
 
-- Connects to every enabled server concurrently at setup, with the entry's timeout. One that
-  cannot be reached, or whose entry does not decode, is logged and skipped; the others keep
-  working and the plugin stays active.
+- Connects to every enabled server concurrently, with the entry's timeout, without holding up
+  setup: the gateway serves, and the chat draws, while the handshakes are still on the network.
+  Setup hands the wait to `ctx.tool.arriving` instead, bounded at ten seconds, so a run that
+  starts before the servers have answered waits for their tools (and their instructions)
+  rather than going without. One that cannot be reached, or whose entry does not decode, is
+  logged and skipped; the others keep working and the plugin stays active.
 - Lists the server's tools and registers each as `<server>_<tool>` (anything outside
-  `[a-zA-Z0-9_-]` becomes `_`; two names that collapse to the same string get a numbered
-  suffix, logged), a `Tool.dynamic` carrying the server's own JSON Schema, so the model sees
-  the schema the server published and the server validates the arguments. Strict schema mode
+  `[a-zA-Z0-9_-]` becomes `_`; a name past OpenAI's 64 characters keeps its start and ends in
+  `_` and eight hex characters of its hash; two names that collapse to the same string get a
+  numbered suffix, logged), a `Tool.dynamic` carrying the server's own JSON Schema, so the
+  model sees the schema the server published and the server validates the arguments. The
+  schema is mended only where a provider would refuse it: the root is made `type: "object"`
+  with `properties` (empty when the server left them out), and `required`, at the root and in
+  nested object schemas, keeps only the properties declared beside it. Strict schema mode
   is off for these: OpenAI's rejects any optional property, and servers rarely write for it.
-  The arguments decode through a struct with one optional JSON slot per declared property,
-  since the OpenAI provider derives a codec from the decoder when a call comes back and cannot
-  from the `Schema.Unknown` a JSON-Schema tool carries; a key the server did not declare is
-  dropped there.
+  The arguments decode through a check that they are a JSON object, since the OpenAI
+  provider derives a codec from the decoder when a call comes back and cannot from the
+  `Schema.Unknown` a JSON-Schema tool carries; the server validates the rest.
   Every one declares the `mcp` capability: the gateway cannot tell what a foreign tool does,
   so policy rules say `mcp: approval` rather than reasoning per tool. MCP's `readOnlyHint`
   and the other hints become Effect's `Tool.Readonly`, `Destructive`, `Idempotent`, and
   `OpenWorld` annotations.
 - Returns the text of a result as one string when that is all there is, the structured
   content when there is no text, and otherwise every block, with images and audio described
-  (`{ type, mimeType, omitted }`) rather than copied into the context. A result marked
-  `isError`, a protocol error, and a lost server all reach the model as `McpToolError`.
+  (`{ type, mimeType, omitted }`) rather than copied into the context. Text past 30,000
+  characters, the limit our own tools' output has, keeps its first and last halves around
+  `[N characters omitted]`; structured content that long comes back as that capped JSON
+  text. A result marked `isError`, a protocol error, and a lost server all reach the model as
+  `McpToolError`.
 - Re-lists and re-registers when the server sends `tools/list_changed`, coalescing a burst
   into one republish; when the new listing cannot be registered the old tools are put back
   rather than left missing. Withdraws the tools when the connection closes. The server's
@@ -521,8 +538,8 @@ What the plugin does with a server, following opencode's `MCP` service:
   `mcp <server> [stderr]: ...`, rather than letting the child inherit the terminal: a gateway
   embedded in the full-screen chat would otherwise have the server's logs drawn over the
   transcript.
-- Reports where each server stands to `McpServers`, a service in the same package: `connected`
-  with its registered tools, `disabled`, `failed` with the decode or handshake error, or
+- Reports where each server stands to `McpServers`, a service in the same package, before setup
+  returns: `connecting` while the handshake is under way, `connected` with its registered tools, `disabled`, `failed` with the decode or handshake error, or
   `closed` once a connected server went away. A listing that could not be registered leaves
   the server `connected` with the error beside the tools it still offers. The gateway serves
   the table as the `listMcpServers` RPC, and `/mcp` in the CLI
@@ -688,8 +705,11 @@ Done, with tests beside the code:
   runs, the `/plugins/:plugin/*` route, open surface and provider names, `onBehalfOf` on
   `Principal`, the `forge:read` and `forge:write` capabilities, `trackProgress` and
   `deliverAnswer` with the capabilities that pick a delivery, and `@magentic/bridge-github`.
-  The shell tool blanks `GH_TOKEN`, `GITHUB_TOKEN`, and `GIT_ASKPASS` for every run and
-  points `GH_CONFIG_DIR` away from the operator's login for runs on behalf of someone.
+  The shell tool blanks `GH_TOKEN`, `GITHUB_TOKEN`, `GIT_ASKPASS`, and the gateway's own
+  secrets (`GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `MAGENTIC_RELAY_TOKEN`) for
+  every run. For runs on behalf of someone it also points `GH_CONFIG_DIR` away from the
+  operator's login and blanks every inherited variable named like a credential (ending in
+  `_API_KEY`, `_TOKEN`, `_SECRET`, `_PRIVATE_KEY`, or `_PASSWORD`).
 
 Still open: `magentic plugin add|remove`, `magentic github install`, and a reload endpoint,
 all waiting on a decision about the CLI surface.

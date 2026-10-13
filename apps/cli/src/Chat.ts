@@ -9,7 +9,7 @@ import {
 import type { Attachment, Conversation, FollowEvent, RunEvent } from "@magentic/protocol";
 import { render } from "@opentui/solid";
 import {
-  type Cause,
+  Cause,
   Config,
   DateTime,
   Deferred,
@@ -230,7 +230,11 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     model: initialModel,
     // Filled in below: the catalog is first read for it, and the screen need not wait.
     contextWindow: 0,
-    commands: (yield* commands.list).map(({ name, description }) => ({ name, description })),
+    commands: (yield* commands.list).map(({ name, aliases, description }) => ({
+      name,
+      aliases: aliases ?? [],
+      description,
+    })),
     history,
     // A message the history could not keep is only a message the next
     // session's arrows will not find; the ones this session sent are still
@@ -290,7 +294,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     },
     // Now, not in turn behind the run: the queue waits for the run to end.
     onStopDriver: (id) => {
-      void runPromise(session.schedules.remove(id).pipe(Effect.option));
+      void runPromise(session.schedules.remove(id).pipe(Effect.ignoreCause));
     },
     onCycleReasoning: () => {
       void runPromise(cycleReasoning);
@@ -432,73 +436,68 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
   });
 
   /** One event, whoever's run it is: counted, drawn, and the task count refreshed when it may have moved. */
-  const observe = (event: RunEvent) =>
-    Effect.gen(function* () {
-      yield* account(event);
-      tui.apply(event);
-      if (touchesTasks(event)) {
-        yield* refreshTasks;
-      }
-    });
+  const observe = Effect.fnUntraced(function* (event: RunEvent) {
+    yield* account(event);
+    tui.apply(event);
+    if (touchesTasks(event)) {
+      yield* refreshTasks;
+    }
+  });
 
   /** An event of a run the gateway started: in flight like the person's own, steered and stopped the same way. */
-  const onFollowed = (event: FollowEvent) =>
-    Effect.gen(function* () {
-      // The tick that holds the connection open; there is nothing to draw.
-      if (event._tag === "Keepalive") {
-        return;
+  const onFollowed = Effect.fnUntraced(function* (event: FollowEvent) {
+    // The tick that holds the connection open; there is nothing to draw.
+    if (event._tag === "Keepalive") {
+      return;
+    }
+    // Where a schedule stands. It arrives with no run behind it, which is
+    // most of a loop's life, so it goes to the footer rather than the
+    // transcript and never touches `busy`.
+    if (event._tag === "ScheduleChanged") {
+      tui.setDriver(
+        event.active
+          ? Option.some({
+              id: event.taskId,
+              kind: event.kind,
+              label: event.label,
+              detail: event.detail,
+              nextAt: Option.fromNullishOr(event.nextFireAt),
+            })
+          : Option.none(),
+      );
+      return;
+    }
+    if (event._tag === "RunStarted") {
+      const run: InFlight = {
+        stop: yield* Deferred.make<void>(),
+        named: yield* Deferred.make<string>(),
+        ended: yield* Deferred.make<void>(),
+        runId: event.runId,
+      };
+      yield* Deferred.succeed(run.named, event.runId);
+      // Esc asks the gateway to stop a run it started; the follow then hears the end.
+      const stopper = yield* Effect.forkIn(
+        Deferred.await(run.stop).pipe(
+          Effect.andThen(client.stopRun({ runId: event.runId }).pipe(Effect.ignore)),
+        ),
+        scope,
+      );
+      followedRun = { run, stopper };
+      inFlight = run;
+      tui.setBusy(true);
+    }
+    yield* observe(event);
+    if ((event._tag === "RunFinished" || event._tag === "RunFailed") && followedRun !== undefined) {
+      const { run, stopper } = followedRun;
+      followedRun = undefined;
+      if (inFlight === run) {
+        inFlight = undefined;
       }
-      // Where a schedule stands. It arrives with no run behind it, which is
-      // most of a loop's life, so it goes to the footer rather than the
-      // transcript and never touches `busy`.
-      if (event._tag === "ScheduleChanged") {
-        tui.setDriver(
-          event.active
-            ? Option.some({
-                id: event.taskId,
-                kind: event.kind,
-                label: event.label,
-                detail: event.detail,
-                nextAt: Option.fromNullishOr(event.nextFireAt),
-              })
-            : Option.none(),
-        );
-        return;
-      }
-      if (event._tag === "RunStarted") {
-        const run: InFlight = {
-          stop: yield* Deferred.make<void>(),
-          named: yield* Deferred.make<string>(),
-          ended: yield* Deferred.make<void>(),
-          runId: event.runId,
-        };
-        yield* Deferred.succeed(run.named, event.runId);
-        // Esc asks the gateway to stop a run it started; the follow then hears the end.
-        const stopper = yield* Effect.forkIn(
-          Deferred.await(run.stop).pipe(
-            Effect.andThen(client.stopRun({ runId: event.runId }).pipe(Effect.ignore)),
-          ),
-          scope,
-        );
-        followedRun = { run, stopper };
-        inFlight = run;
-        tui.setBusy(true);
-      }
-      yield* observe(event);
-      if (
-        (event._tag === "RunFinished" || event._tag === "RunFailed") &&
-        followedRun !== undefined
-      ) {
-        const { run, stopper } = followedRun;
-        followedRun = undefined;
-        if (inFlight === run) {
-          inFlight = undefined;
-        }
-        yield* Deferred.succeed(run.ended, undefined);
-        yield* Fiber.interrupt(stopper);
-        tui.setBusy(false);
-      }
-    });
+      yield* Deferred.succeed(run.ended, undefined);
+      yield* Fiber.interrupt(stopper);
+      tui.setBusy(false);
+    }
+  });
 
   const stopFollowing = Effect.suspend(() => {
     const current = following;
@@ -521,7 +520,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     }
     const opened = yield* client
       .openConversation({ agent: agent.name, directory: process.cwd() })
-      .pipe(Effect.catchCause((cause) => gatewayFailed("loop")(cause)));
+      .pipe(Effect.catchCause(gatewayFailed("loop")));
     yield* Ref.set(conversation, Option.some(opened.id));
     yield* follow(opened.id);
     return opened.id;
@@ -635,8 +634,19 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
       }),
     notify: (message) => Effect.sync(() => tui.note(message)),
   };
-  const gatewayFailed = (command: string) => (cause: Cause.Cause<unknown>) =>
-    new CommandError({ command, message: describeCause(cause) });
+  /**
+   * A gateway call that failed, as the command's own error. An interruption
+   * is not a failure and goes on as one: the loop's own interruption never
+   * reaches a catch, but the gateway answering that it interrupted the call,
+   * or the client refusing calls once the chat is closing, arrives here as a
+   * cause with nothing in it but interrupts.
+   */
+  const gatewayFailed =
+    (command: string) =>
+    (cause: Cause.Cause<unknown>): Effect.Effect<never, CommandError> =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.failCause(Cause.fromReasons(cause.reasons.filter(Cause.isInterruptReason)))
+        : Effect.fail(new CommandError({ command, message: describeCause(cause) }));
   const session: ChatSession = {
     remoteControl: (args) =>
       remoteCommand(remote, args, Ref.get(conversation), (code) => Effect.sync(() => tui.qr(code))),
@@ -654,7 +664,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     }),
     conversations: client
       .listConversations({ agent: agent.name, directory: process.cwd() })
-      .pipe(Effect.catchCause((cause) => gatewayFailed("resume")(cause))),
+      .pipe(Effect.catchCause(gatewayFailed("resume"))),
     resume: Effect.fn("Cli.chat.resume")(function* (id: string) {
       const info = yield* client
         .getConversation({ id })
@@ -669,7 +679,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
           message: `conversation ${id} is with ${info.agent}, not ${agent.name}`,
         });
       }
-      yield* restore(info).pipe(Effect.catchCause((cause) => gatewayFailed("resume")(cause)));
+      yield* restore(info).pipe(Effect.catchCause(gatewayFailed("resume")));
     }),
     startNew: Effect.gen(function* () {
       yield* stopFollowing;
@@ -690,7 +700,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
       yield* Effect.gen(function* () {
         const done = yield* client
           .compact({ id: id.value })
-          .pipe(Effect.catchCause((cause) => gatewayFailed("compact")(cause)));
+          .pipe(Effect.catchCause(gatewayFailed("compact")));
         // The totals stand; only the latest call's picture of the context is
         // stale until the next call, which the gateway counted this one into.
         tui.apply(done);
@@ -706,12 +716,20 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
       }
       const renamed = yield* client
         .rename({ id: id.value, title })
-        .pipe(Effect.catchCause((cause) => gatewayFailed("rename")(cause)));
+        .pipe(Effect.catchCause(gatewayFailed("rename")));
       tui.note(`Renamed to "${renamed.title}"`);
     }),
-    mcpServers: client
-      .listMcpServers()
-      .pipe(Effect.catchCause((cause) => gatewayFailed("mcp")(cause))),
+    mcpServers: client.listMcpServers().pipe(Effect.catchCause(gatewayFailed("mcp"))),
+    trace: Effect.gen(function* () {
+      const id = yield* Ref.get(conversation);
+      if (Option.isNone(id)) {
+        return yield* new CommandError({
+          command: "trace",
+          message: "Nothing traced yet; this conversation has not started.",
+        });
+      }
+      return yield* client.trace({ id: id.value }).pipe(Effect.catchCause(gatewayFailed("trace")));
+    }),
     schedules: {
       list: Effect.gen(function* () {
         const id = yield* Ref.get(conversation);
@@ -720,14 +738,14 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
         }
         return yield* client
           .listSchedules({ conversationId: id.value })
-          .pipe(Effect.catchCause((cause) => gatewayFailed("loop")(cause)));
+          .pipe(Effect.catchCause(gatewayFailed("loop")));
       }),
       read: Effect.fn("Cli.chat.schedules.read")(function* (text: string) {
         // The person's own zone, so `3pm` means three in the afternoon here.
         const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
         return yield* client
           .readSchedule({ agent: agent.name, text, zone })
-          .pipe(Effect.catchCause((cause) => gatewayFailed("loop")(cause)));
+          .pipe(Effect.catchCause(gatewayFailed("loop")));
       }),
       create: Effect.fn("Cli.chat.schedules.create")(function* (input: CreateSessionSchedule) {
         // A loop belongs to a conversation, and `/loop` may be the first thing
@@ -742,7 +760,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
             intervalMillis: input.intervalMillis,
             expiresAt: input.until,
           })
-          .pipe(Effect.catchCause((cause) => gatewayFailed("loop")(cause)));
+          .pipe(Effect.catchCause(gatewayFailed("loop")));
       }),
       remove: Effect.fn("Cli.chat.schedules.remove")(function* (id: string) {
         const current = yield* Ref.get(conversation);
@@ -752,7 +770,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
         return yield* client.deleteSchedule({ conversationId: current.value, id }).pipe(
           Effect.as(true),
           Effect.catchTag("ScheduleNotFound", () => Effect.succeed(false)),
-          Effect.catchCause((cause) => gatewayFailed("loop")(cause)),
+          Effect.catchCause(gatewayFailed("loop")),
         );
       }),
       removeAll: Effect.gen(function* () {
@@ -762,7 +780,7 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
         }
         const tasks = yield* client
           .listSchedules({ conversationId: current.value })
-          .pipe(Effect.catchCause((cause) => gatewayFailed("loop")(cause)));
+          .pipe(Effect.catchCause(gatewayFailed("loop")));
         let stopped = 0;
         for (const task of tasks.filter((candidate) => candidate.phase !== "ended")) {
           yield* client
@@ -790,7 +808,12 @@ export const chat = Effect.fn("Cli.chat")(function* (options: ChatOptions) {
     const outcome = yield* Effect.exit(command.value.run({ ui, session, args }));
     tui.dismiss();
     if (outcome._tag === "Failure") {
-      tui.error(describeCause(outcome.cause));
+      // Stopped, not broken; the loop goes on to the next input either way.
+      if (Cause.hasInterruptsOnly(outcome.cause)) {
+        tui.note(`/${name} was interrupted`);
+      } else {
+        tui.error(describeCause(outcome.cause));
+      }
     }
   });
 

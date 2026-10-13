@@ -4,6 +4,7 @@ import type {
   ReadScheduleResult,
   ScheduledTask,
   TokenUsage,
+  TraceSpan,
 } from "@magentic/protocol";
 import type { DateTime, Effect, Option, Scope } from "effect";
 import { Schema } from "effect";
@@ -142,6 +143,8 @@ export interface ChatSession {
   readonly mcpServers: Effect.Effect<ReadonlyArray<McpServerInfo>, CommandError>;
   /** What repeats on this chat, and how to start and stop one. */
   readonly schedules: SessionSchedules;
+  /** Every span the gateway traced of this conversation's runs, oldest first; fails before the first run. */
+  readonly trace: Effect.Effect<ReadonlyArray<TraceSpan>, CommandError>;
 }
 
 export interface CommandInput {
@@ -155,6 +158,8 @@ export interface CommandInput {
 export interface CommandRegistration {
   /** Without the slash, unique across plugins. */
   readonly name: string;
+  /** Alternative names, without the slash. */
+  readonly aliases?: ReadonlyArray<string>;
   readonly description: string;
   run(input: CommandInput): Effect.Effect<void, CommandError>;
 }
