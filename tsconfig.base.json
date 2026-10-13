@@ -34,6 +34,8 @@
           "effect/PlatformError",
           "effect/Terminal",
           "effect/Logger#toFile",
+          "effect/sql",
+          "@effect/sql-sqlite-bun",
           "@effect/ai-anthropic",
           "@effect/ai-openai",
           "@effect/ai-openai-compat",

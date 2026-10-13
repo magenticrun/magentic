@@ -1,4 +1,5 @@
 import { BunHttpServer, BunServices } from "@effect/platform-bun";
+import { SqliteClient } from "@effect/sql-sqlite-bun";
 import { Audit } from "@magentic/audit";
 import {
   AgentDefinition,
@@ -12,6 +13,8 @@ import {
   Runner,
   ScheduledTaskStore,
   ScheduledTasks,
+  SessionIndex,
+  sessionSearchPlugin,
   Steering,
   layerTraceCapture,
   TraceStore,
@@ -106,6 +109,8 @@ Answering:
     "task_list",
     "http_fetch",
     "session_trace",
+    "session_search",
+    "session_read",
     "browser_tabs",
     "browser_select_tab",
     "browser_snapshot",
@@ -188,6 +193,7 @@ export const builtinPlugins = [
   builtin(shellToolPlugin),
   builtin(httpFetchPlugin),
   builtin(traceToolPlugin),
+  builtin(sessionSearchPlugin),
   ...modelPlugins.map(builtin),
   builtin(assistantPlugin),
 ];
@@ -246,9 +252,48 @@ export const TracingLayer = layerTraceCapture.pipe(
   ),
 );
 
-/** Conversations on disk under the data directory, so they outlive the gateway. */
+/**
+ * The search index's database. It holds every word the histories do, so it
+ * is the person's alone as they are; SQLite gives its journal files the
+ * database's own mode.
+ */
+const sessionDatabase = (file: string) =>
+  Layer.unwrap(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      if (yield* fs.exists(file)) {
+        yield* fs.chmod(file, 0o600);
+      } else {
+        yield* fs.writeFile(file, new Uint8Array(), { mode: 0o600 });
+      }
+      return SqliteClient.layer({ filename: file });
+    }),
+  );
+
+/**
+ * Conversations on disk under the data directory, so they outlive the
+ * gateway, and the full-text index of them in `sessions.db` beside. An index
+ * that does not open leaves the conversations as they were, and search
+ * saying it is off.
+ */
 export const ConversationStoreLayer = Layer.unwrap(
-  Effect.map(dataDir, (data) => ConversationStore.layerFile(`${data}/conversations`)),
+  Effect.map(dataDir, (data) => {
+    const store = ConversationStore.layerFile(`${data}/conversations`);
+    return SessionIndex.layer.pipe(
+      Layer.provide([store, sessionDatabase(`${data}/sessions.db`)]),
+      Layer.catchCause((cause) =>
+        Layer.unwrap(
+          Effect.as(
+            Effect.logWarning("session search is off: its index did not open", cause),
+            Layer.merge(
+              store,
+              SessionIndex.layerUnavailable("its index did not open; the gateway log says why"),
+            ),
+          ),
+        ),
+      ),
+    );
+  }),
 );
 
 /**
@@ -297,6 +342,8 @@ export const ServicesLayer = Layer.mergeAll(
         WorkspaceLayer,
         layerCredentialStores,
         ToolCallGuardLive.pipe(Layer.provide(AdmissionLayer)),
+        // The same store the runner saves through, for the session tools.
+        ConversationStoreLayer,
       ]),
       Layer.provideMerge(McpServers.layer),
     ),

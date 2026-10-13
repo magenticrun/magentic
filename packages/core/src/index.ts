@@ -22,6 +22,8 @@ export * from "./ScheduleGrid.ts";
 export * from "./ScheduleParse.ts";
 export * from "./ScheduledTaskStore.ts";
 export * from "./ScheduledTasks.ts";
+export * from "./SessionIndex.ts";
+export * from "./SessionSearchPlugin.ts";
 export * from "./Steering.ts";
 export * from "./Transcript.ts";
 export * from "./TracePlugin.ts";

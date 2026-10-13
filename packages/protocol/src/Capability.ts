@@ -7,7 +7,8 @@ import { Schema } from "effect";
  * `forge:read` and `forge:write` are the tools a bridge brings for the code
  * host it knows (GitHub, GitLab): reading an issue or a pull request, and
  * commenting, pushing, and opening pull requests as the bot. `trace:read` is
- * reading how the calling conversation's own runs spent their time.
+ * reading how the calling conversation's own runs spent their time. `session:read`
+ * is searching and reading the calling person's own earlier conversations.
  */
 export const Capability = Schema.Literals([
   "fs:read",
@@ -20,5 +21,6 @@ export const Capability = Schema.Literals([
   "forge:read",
   "forge:write",
   "trace:read",
+  "session:read",
 ]);
 export type Capability = typeof Capability.Type;

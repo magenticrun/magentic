@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@effect/platform-bun": "catalog:",
+    "@effect/sql-sqlite-bun": "catalog:",
     "@magentic/audit": "workspace:*",
     "@magentic/core": "workspace:*",
     "@magentic/identity": "workspace:*",
