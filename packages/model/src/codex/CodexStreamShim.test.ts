@@ -1,6 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { HttpBody, HttpClient, HttpClientRequest } from "effect/unstable/http";
+import { HttpBody, HttpClient, HttpClientRequest } from "effect/http";
 import { withStreamOnlyBackend } from "./CodexStreamShim.ts";
 import { fakeHttp } from "./testing.ts";
 

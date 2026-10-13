@@ -1,6 +1,6 @@
 import { Clock, Effect, Fiber, FileSystem, Option, Path, Ref, Schema, Stream } from "effect";
-import { Tool, Toolkit } from "effect/unstable/ai";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { Tool, Toolkit } from "effect/ai";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { CapabilityAnnotation, ToolCallContext } from "@magentic/plugin";
 import { BackgroundTask, type Principal } from "@magentic/protocol";
 import {

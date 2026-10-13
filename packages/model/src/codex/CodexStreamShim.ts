@@ -1,10 +1,5 @@
 import { Effect, Option, Schema } from "effect";
-import {
-  HttpClient,
-  HttpClientError,
-  HttpClientRequest,
-  HttpClientResponse,
-} from "effect/unstable/http";
+import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 /**
  * The subscription backend answers `{"detail":"Stream must be set to true"}` to

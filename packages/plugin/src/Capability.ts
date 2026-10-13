@@ -1,6 +1,6 @@
 import type { Capability } from "@magentic/protocol";
 import { Context } from "effect";
-import type { Tool } from "effect/unstable/ai";
+import type { Tool } from "effect/ai";
 
 /**
  * Tool annotation carrying the capability policy evaluates for that tool.

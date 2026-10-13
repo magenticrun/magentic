@@ -3,7 +3,7 @@ import { assert, layer } from "@effect/vitest";
 import { fakeProviderPlugin } from "@magentic/model";
 import { ModelCatalog } from "@magentic/plugin";
 import { Effect, Layer, Option, Result } from "effect";
-import { FetchHttpClient } from "effect/unstable/http";
+import { FetchHttpClient } from "effect/http";
 import { ModelRegistry } from "./ModelRegistry.ts";
 import { builtin, PluginHost } from "./PluginHost.ts";
 import { ToolCallGuard } from "./ToolRegistry.ts";

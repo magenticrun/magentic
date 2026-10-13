@@ -17,7 +17,6 @@ import {
   Context,
   DateTime,
   Effect,
-  Encoding,
   Layer,
   Option,
   Predicate,
@@ -28,14 +27,8 @@ import {
   Semaphore,
   Stream,
 } from "effect";
-import {
-  type AiError,
-  Chat,
-  LanguageModel,
-  Prompt,
-  type Response,
-  type Tool,
-} from "effect/unstable/ai";
+import { type AiError, Chat, LanguageModel, Prompt, type Response, type Tool } from "effect/ai";
+import { Base64 } from "effect/encoding";
 import {
   compactContext,
   CompactionError,
@@ -162,7 +155,7 @@ const mapFileParts = (
 const forDisk = (prompt: Prompt.Prompt): Prompt.Prompt =>
   mapFileParts(prompt, (part) =>
     Predicate.isUint8Array(part.data)
-      ? Prompt.makePart("file", { ...part, data: Encoding.encodeBase64(part.data) })
+      ? Prompt.makePart("file", { ...part, data: Base64.encode(part.data) })
       : part,
   );
 
@@ -171,7 +164,7 @@ const forModel = (prompt: Prompt.Prompt): Prompt.Prompt =>
     if (!part.mediaType.startsWith("image/") || !Predicate.isString(part.data)) {
       return part;
     }
-    return Result.match(Encoding.decodeBase64(part.data), {
+    return Result.match(Base64.decode(part.data), {
       onFailure: () => part,
       onSuccess: (bytes) => Prompt.makePart("file", { ...part, data: bytes }),
     });

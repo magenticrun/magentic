@@ -4,7 +4,7 @@ import { fakeProviderPlugin, type FakeScript } from "@magentic/model";
 import { AgentDefinition, ModelCatalog, Notices } from "@magentic/plugin";
 import { Principal } from "@magentic/protocol";
 import { DateTime, Effect, Layer, Option, Stream } from "effect";
-import { FetchHttpClient } from "effect/unstable/http";
+import { FetchHttpClient } from "effect/http";
 import { ConversationStore } from "./ConversationStore.ts";
 import { builtin, PluginHost } from "./plugin/PluginHost.ts";
 import { ToolCallGuard } from "./plugin/ToolRegistry.ts";

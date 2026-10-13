@@ -18,6 +18,30 @@
     "noEmit": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "plugins": [{ "name": "@effect/language-service" }]
+    "plugins": [
+      {
+        "name": "@effect/language-service",
+        "allowedUnstableApis": [
+          "effect/ai",
+          "effect/cli",
+          "effect/http",
+          "effect/rpc",
+          "effect/process",
+          "effect/net",
+          "effect/observability",
+          "effect/FileSystem",
+          "effect/Path",
+          "effect/PlatformError",
+          "effect/Terminal",
+          "effect/Logger#toFile",
+          "@effect/ai-anthropic",
+          "@effect/ai-openai",
+          "@effect/ai-openai-compat",
+          "@effect/platform-bun",
+          "@effect/platform-node-shared",
+          "@effect/vitest"
+        ]
+      }
+    ]
   }
 }

@@ -1,5 +1,5 @@
 import { DateTime, Effect, Option, Schema } from "effect";
-import { LanguageModel } from "effect/unstable/ai";
+import { LanguageModel } from "effect/ai";
 import { MAX_INTERVAL_MILLIS, MIN_INTERVAL_MILLIS } from "./Interval.ts";
 
 /**

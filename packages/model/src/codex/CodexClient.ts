@@ -1,6 +1,6 @@
 import type { OpenAiClient } from "@effect/ai-openai";
 import { Effect, Layer } from "effect";
-import { HttpClient, HttpClientError, HttpClientRequest } from "effect/unstable/http";
+import { HttpClient, HttpClientError, HttpClientRequest } from "effect/http";
 import * as Clients from "../Clients.ts";
 import { CODEX_API_URL, CODEX_ORIGINATOR, CODEX_USER_AGENT } from "./Constants.ts";
 import { CodexAuth } from "./CodexAuth.ts";

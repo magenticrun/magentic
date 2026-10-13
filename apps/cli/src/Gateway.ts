@@ -15,7 +15,7 @@ import {
   Schedule,
   Schema,
 } from "effect";
-import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
+import { RpcClient, RpcSerialization } from "effect/rpc";
 
 class GatewayUnreachable extends Schema.TaggedError<GatewayUnreachable>()("GatewayUnreachable", {
   url: Schema.String,

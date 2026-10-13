@@ -14,8 +14,8 @@ import {
 } from "@magentic/plugin";
 import { Principal } from "@magentic/protocol";
 import { Deferred, Effect, Layer, Logger, Option, Ref, Schema, Stream } from "effect";
-import { LanguageModel, Tool, Toolkit } from "effect/unstable/ai";
-import { FetchHttpClient, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import { LanguageModel, Tool, Toolkit } from "effect/ai";
+import { FetchHttpClient, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { AgentRegistry } from "../AgentRegistry.ts";
 import { BridgeBackend, PluginRoutes } from "./Bridges.ts";
 import { CommandRegistry } from "./CommandRegistry.ts";

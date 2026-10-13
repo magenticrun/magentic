@@ -1,7 +1,7 @@
 import { Api, type AgentInfo, type Conversation, type TranscriptEntry } from "@magentic/protocol";
 import { Clock, Effect, Layer, Schema, Stream } from "effect";
-import { FetchHttpClient } from "effect/unstable/http";
-import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
+import { FetchHttpClient } from "effect/http";
+import { RpcClient, RpcSerialization } from "effect/rpc";
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { render } from "solid-js/web";
 

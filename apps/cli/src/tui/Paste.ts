@@ -1,8 +1,14 @@
 import type { Attachment } from "@magentic/protocol";
-import { createHostClipboard, type HostClipboardService, SyntaxStyle } from "@opentui/core";
+import {
+  createHostClipboard,
+  type HostClipboardService,
+  type NativeResourceOwner,
+  SyntaxStyle,
+} from "@opentui/core";
 import { readFile } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import { IMAGE_EXTENSIONS, toAttachment } from "../Attachments.ts";
+import { cachedStyle, type StyleCache } from "./Markdown.ts";
 import type { Palette } from "./Theme.ts";
 
 export { toAttachment };
@@ -103,15 +109,10 @@ export const imageAtPath = async (pasted: string): Promise<Attachment | undefine
 /** The name the composer's extmarks style placeholders with. */
 export const FOLD_STYLE = "fold";
 
-const styles = new Map<Palette, SyntaxStyle>();
+const styles: StyleCache = new WeakMap();
 
-/** The composer's syntax style: only the fold placeholders are coloured. One per palette. */
-export const composerStyleFor = (colours: Palette): SyntaxStyle => {
-  const known = styles.get(colours);
-  if (known !== undefined) {
-    return known;
-  }
-  const built = SyntaxStyle.fromStyles({ [FOLD_STYLE]: { fg: colours.accent } });
-  styles.set(colours, built);
-  return built;
-};
+/** The composer's syntax style: only the fold placeholders are coloured. One per palette and owner. */
+export const composerStyleFor = (colours: Palette, owner: NativeResourceOwner): SyntaxStyle =>
+  cachedStyle(styles, owner, colours, (c, o) =>
+    SyntaxStyle.fromStyles({ [FOLD_STYLE]: { fg: c.accent } }, o),
+  );

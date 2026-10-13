@@ -8,7 +8,7 @@ import {
   Screen,
 } from "@magentic/plugin";
 import { Duration, Effect, FileSystem, Layer, Option } from "effect";
-import { HttpClient } from "effect/unstable/http";
+import { HttpClient } from "effect/http";
 import { CodexAuth } from "../codex/CodexAuth.ts";
 import { CodexAuthStore, readCodexCliAuth } from "../codex/CodexAuthStore.ts";
 import { codexCliAuthFile } from "../codex/CodexConfig.ts";

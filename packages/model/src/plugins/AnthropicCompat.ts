@@ -1,5 +1,5 @@
 import { Effect, Option, Predicate, Schema, Stream } from "effect";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 
 /**
  * Effect's Anthropic schemas require these usage keys to be present (null is

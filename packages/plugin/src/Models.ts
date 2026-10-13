@@ -8,7 +8,7 @@ import {
   Schema,
   type Scope,
 } from "effect";
-import type { LanguageModel } from "effect/unstable/ai";
+import type { LanguageModel } from "effect/ai";
 import type { CatalogModel } from "./Catalog.ts";
 import type { Registration } from "./Plugin.ts";
 

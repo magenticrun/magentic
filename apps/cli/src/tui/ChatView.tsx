@@ -1081,7 +1081,7 @@ export const createChatTui = (options: {
     renderer.on("theme_mode", onMode);
     onCleanup(() => renderer.off("theme_mode", onMode));
     const palette = () => paletteFor(mode());
-    const markdownStyle = () => markdownStyleFor(palette());
+    const markdownStyle = () => markdownStyleFor(palette(), renderer.nativeScene);
 
     // Dragging selects text, as OpenTUI does with the mouse on; letting go
     // copies it and clears the selection, as opencode does. A click that ends
@@ -1261,7 +1261,7 @@ export const createChatTui = (options: {
       takeNumbers(entries);
       composer.extmarks.clear();
       composer.setText(text);
-      const styleId = composerStyleFor(palette()).getStyleId(FOLD_STYLE);
+      const styleId = composerStyleFor(palette(), renderer.nativeScene).getStyleId(FOLD_STYLE);
       for (const entry of entries) {
         const index = text.indexOf(entry.placeholder);
         if (index >= 0) {
@@ -1391,7 +1391,7 @@ export const createChatTui = (options: {
       const start = composer.cursorOffset;
       composer.insertText(entry.placeholder + suffix);
       const range = { start, end: start + displayWidth(entry.placeholder), virtual: true };
-      const styleId = composerStyleFor(palette()).getStyleId(FOLD_STYLE);
+      const styleId = composerStyleFor(palette(), renderer.nativeScene).getStyleId(FOLD_STYLE);
       composer.extmarks.create(styleId === null ? range : { ...range, styleId });
       folds = [...folds, entry];
     };
@@ -1682,7 +1682,7 @@ export const createChatTui = (options: {
                             // reconciler assigns props in this order, and content
                             // arriving first builds the blocks against no style at
                             // all — list items keep that hole and fail to highlight.
-                            syntaxStyle={subtleStyleFor(palette())}
+                            syntaxStyle={subtleStyleFor(palette(), renderer.nativeScene)}
                             content={thought().text}
                             fg={palette().muted}
                             streaming={thought().endedTick === undefined}
@@ -1947,7 +1947,7 @@ export const createChatTui = (options: {
             height={rows()}
             wrapMode="word"
             keyBindings={COMPOSER_KEYS}
-            syntaxStyle={composerStyleFor(palette())}
+            syntaxStyle={composerStyleFor(palette(), renderer.nativeScene)}
             textColor={palette().text}
             focusedTextColor={palette().text}
             cursorColor={palette().text}

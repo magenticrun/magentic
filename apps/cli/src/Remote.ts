@@ -1,8 +1,8 @@
 import { CommandError } from "@magentic/plugin";
 import { RemoteApi, REMOTE_CONTROL_PATH } from "@magentic/protocol";
 import { Clock, Effect, Layer, Option } from "effect";
-import { HttpClient, HttpClientError } from "effect/unstable/http";
-import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
+import { HttpClient, HttpClientError } from "effect/http";
+import { RpcClient, RpcSerialization } from "effect/rpc";
 import { QRCode } from "@opentui/qrcode";
 
 export const remoteClient = (baseUrl: string) =>

@@ -11,7 +11,7 @@ export * from "./Stores.ts";
 
 import type { ModelCatalog, Plugin } from "@magentic/plugin";
 import type { FileSystem } from "effect";
-import type { HttpClient } from "effect/unstable/http";
+import type { HttpClient } from "effect/http";
 import type { ApiKeyStore } from "./ApiKeys.ts";
 import type { CodexAuthStore } from "./codex/CodexAuthStore.ts";
 import {

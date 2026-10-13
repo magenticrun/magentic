@@ -48,9 +48,9 @@ import {
   HttpRouter,
   HttpServerRequest,
   HttpServerResponse,
-} from "effect/unstable/http";
-import { OtlpSerialization, OtlpTracer } from "effect/unstable/observability";
-import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
+} from "effect/http";
+import { OtlpSerialization, OtlpTracer } from "effect/observability";
+import { RpcSerialization, RpcServer } from "effect/rpc";
 import { BridgesLayer } from "./Bridges.ts";
 import { configAgentsPlugin } from "./ConfigAgents.ts";
 import { ToolCallGuardLive } from "./Guard.ts";
@@ -391,7 +391,7 @@ export const layerServer = (port: number, options: ServerOptions = {}) =>
 /** `Layer.launch` this to run the gateway on `PORT`, listening on `MAGENTIC_HOST`. */
 export const HttpServerLayer = Layer.unwrap(
   Effect.gen(function* () {
-    const port = yield* Config.Port("PORT").pipe(Config.withDefault(4321));
+    const port = yield* Config.Port("PORT").pipe(Config.withDefault(17321));
     const hostname = yield* checkBind(yield* listenHost, yield* localIdentityAcknowledged);
     return layerServer(port, { hostname });
   }),

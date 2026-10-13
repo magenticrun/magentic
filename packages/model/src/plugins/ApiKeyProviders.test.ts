@@ -7,8 +7,8 @@ import {
   type PluginContext,
 } from "@magentic/plugin";
 import { Context, Effect, Layer, Option, Redacted, Ref, type Schema, Scope, Stream } from "effect";
-import { LanguageModel } from "effect/unstable/ai";
-import type { HttpClient } from "effect/unstable/http";
+import { LanguageModel } from "effect/ai";
+import type { HttpClient } from "effect/http";
 import { ApiKeyStore } from "../ApiKeys.ts";
 import { fakeHttp } from "../codex/testing.ts";
 import {

@@ -1,6 +1,6 @@
 import { CapabilityAnnotation, define, ToolCallContext } from "@magentic/plugin";
 import { Effect, Schema } from "effect";
-import { Tool, Toolkit } from "effect/unstable/ai";
+import { Tool, Toolkit } from "effect/ai";
 import { RunTrace, summarizeTrace } from "./TraceReport.ts";
 import { TraceStore } from "./TraceStore.ts";
 

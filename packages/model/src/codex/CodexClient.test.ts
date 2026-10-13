@@ -1,6 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Ref } from "effect";
-import { HttpClient, HttpClientRequest } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest } from "effect/http";
 import { CodexAuth } from "./CodexAuth.ts";
 import { withCodexAuth } from "./CodexClient.ts";
 import { fakeHttp, fakeTokens } from "./testing.ts";

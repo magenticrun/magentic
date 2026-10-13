@@ -1,6 +1,6 @@
 let selectedTabId;
 const refs = new Map();
-const DEFAULT_GATEWAY = "http://127.0.0.1:4321/plugins/browser";
+const DEFAULT_GATEWAY = "http://127.0.0.1:17321/plugins/browser";
 
 const gateway = async () =>
   (await chrome.storage.local.get("gatewayUrl")).gatewayUrl ?? DEFAULT_GATEWAY;

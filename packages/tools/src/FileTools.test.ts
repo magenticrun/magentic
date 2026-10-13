@@ -1,7 +1,7 @@
 import { BunServices } from "@effect/platform-bun";
 import { assert, layer } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Stream } from "effect";
-import { AiError, type Tool } from "effect/unstable/ai";
+import { AiError, type Tool } from "effect/ai";
 import { capabilityOf } from "@magentic/plugin";
 import {
   EditFile,

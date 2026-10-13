@@ -14,7 +14,7 @@ import {
   Schema,
   Semaphore,
 } from "effect";
-import { HttpClient, HttpClientRequest } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest } from "effect/http";
 import snapshot from "./catalog/snapshot.json" with { type: "json" };
 
 /**

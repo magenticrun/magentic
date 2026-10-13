@@ -26,8 +26,8 @@ import {
   HttpRouter,
   HttpServerRequest,
   HttpServerResponse,
-} from "effect/unstable/http";
-import { NetAddress } from "effect/unstable/net";
+} from "effect/http";
+import { NetAddress } from "effect/net";
 
 const StoredDevice = Schema.Struct({
   id: Schema.String,

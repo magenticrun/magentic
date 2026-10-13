@@ -1,5 +1,5 @@
 import type { ContextBreakdown } from "@magentic/protocol";
-import { type Prompt, Tool } from "effect/unstable/ai";
+import { type Prompt, Tool } from "effect/ai";
 
 /** opencode's rule of thumb; close enough for a bar, not for billing. */
 const CHARS_PER_TOKEN = 4;

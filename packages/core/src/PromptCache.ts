@@ -1,5 +1,5 @@
 import { Config, Predicate } from "effect";
-import { Prompt } from "effect/unstable/ai";
+import { Prompt } from "effect/ai";
 
 /**
  * Whether a run asks Anthropic to keep the prefix it has already sent, and

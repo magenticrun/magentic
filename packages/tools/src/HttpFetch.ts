@@ -1,13 +1,13 @@
 import { lookup } from "node:dns/promises";
 import { Effect, FileSystem, Option, Path, Schema, Stream } from "effect";
-import { Tool, Toolkit } from "effect/unstable/ai";
+import { Tool, Toolkit } from "effect/ai";
 import {
   FetchHttpClient,
   Headers,
   HttpClient,
   HttpClientRequest,
   type HttpClientResponse,
-} from "effect/unstable/http";
+} from "effect/http";
 import { CapabilityAnnotation, messageOf } from "@magentic/plugin";
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";

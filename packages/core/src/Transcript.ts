@@ -1,6 +1,6 @@
 import type { TranscriptEntry } from "@magentic/protocol";
 import { Effect, Ref, type Schema } from "effect";
-import { Chat, type Prompt } from "effect/unstable/ai";
+import { Chat, type Prompt } from "effect/ai";
 import { isNotice, isScheduled, isSummary, noticeOf, scheduledOf, summaryOf } from "./Marks.ts";
 
 /** Tool parts carry `unknown`; on the wire they were JSON, so that is what they still are. */

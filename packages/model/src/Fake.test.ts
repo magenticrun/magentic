@@ -1,6 +1,6 @@
 import { assert, layer } from "@effect/vitest";
 import { Effect, Stream } from "effect";
-import { LanguageModel } from "effect/unstable/ai";
+import { LanguageModel } from "effect/ai";
 import { layerFake } from "./Fake.ts";
 
 const Scripted = layerFake(({ index }) => [

@@ -5,7 +5,7 @@
  */
 import { BunRuntime, BunServices } from "@effect/platform-bun";
 import { Effect, FileSystem, Schema } from "effect";
-import { FetchHttpClient, HttpClient } from "effect/unstable/http";
+import { FetchHttpClient, HttpClient } from "effect/http";
 import { CatalogProvider } from "../src/Catalog.ts";
 
 const SOURCE = "https://models.dev/api.json";

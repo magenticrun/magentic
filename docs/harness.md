@@ -4,9 +4,9 @@ This document plans the runtime that turns an `AgentDefinition` into a running a
 people reach from Slack, a terminal, or Cursor. It covers the request pipeline, the domain
 model, package boundaries, storage, and delivery phases. Identity is in `identity.md`.
 
-Everything below is built on Effect 4 primitives that exist in the installed rc
-(`effect/unstable/ai`, `effect/unstable/rpc`, `effect/unstable/workflow`,
-`effect/unstable/cluster`, `@effect/sql-sqlite-bun`). Where a primitive is "verified in the
+Everything below is built on Effect 4 primitives that exist in the installed release
+(`effect/ai`, `effect/rpc`, `effect/workflow`,
+`effect/cluster`, `@effect/sql-sqlite-bun`). Where a primitive is "verified in the
 checkout, not yet exercised in this repo" it is marked **verify**.
 
 ## Vocabulary
@@ -16,7 +16,7 @@ checkout, not yet exercised in this repo" it is marked **verify**.
 | Principal    | Who is asking. Resolved once at the edge by identity. Carries id, groups, provider, and the surface it came from. |
 | Surface      | Where a request enters: `cli`, `slack`, `cursor`, or a bridge plugin's own name (`github`). Thin adapters.        |
 | Agent        | A named definition: system prompt, model, tool names, skill names, memory scope, default policy hints.            |
-| Tool         | An `effect/unstable/ai` `Tool` with a handler layer plus magentic annotations: `capability` and `risk`.           |
+| Tool         | An `effect/ai` `Tool` with a handler layer plus magentic annotations: `capability` and `risk`.                    |
 | Capability   | A coarse label policy reasons about (`fs:read`, `fs:write`, `shell`, `http:egress`, `mcp`, `forge:write`).        |
 | Skill        | A directory with `SKILL.md` (Agent Skills format) and optional scripts. Loaded on demand into the prompt.         |
 | Run          | One invocation: principal + surface + agent + input. Emits a stream of `RunEvent`s and ends in a `RunResult`.     |
@@ -64,7 +64,7 @@ Schemas are `Schema.Class` and live in protocol so surfaces and the CLI share th
   decidedBy, decidedAt.
 - `Decision` moves from `@magentic/policy` into protocol because the CLI shows it.
 
-The wire protocol is Effect RPC (`effect/unstable/rpc`), not REST. `Api` in
+The wire protocol is Effect RPC (`effect/rpc`), not REST. `Api` in
 `@magentic/protocol` is one `RpcGroup`; the gateway implements it with `Api.toLayer` and
 serves it at `POST /rpc` as newline-delimited JSON (`RpcServer.layerHttp`), and every surface
 calls it through `RpcClient.make(Api)`. Decision: every surface we ship is TypeScript and
@@ -197,7 +197,7 @@ Each is a `Context.Service` with static layers. Ids are `magentic/core/<Name>`.
   the root of the repository down to the workspace, each cut at 20k characters. Read on
   every run, so an edit counts from the next one. Empty in tests.
 - **ModelProvider** (`@magentic/model`): picks the `LanguageModel` layer from
-  `magentic.yaml`. Decision: Effect AI (`effect/unstable/ai`) is the model interface, not the
+  `magentic.yaml`. Decision: Effect AI (`effect/ai`) is the model interface, not the
   Vercel AI SDK. The runner, `Toolkit`, `Chat`, `McpServer`, and the policy wrapper all sit
   on Effect's loop, and a provider is only two functions handed to `LanguageModel.make`.
   Three tiers of providers:
@@ -222,7 +222,7 @@ Each is a `Context.Service` with static layers. Ids are `magentic/core/<Name>`.
   `WorkflowEngine.layerMemory` for tests, `ClusterWorkflowEngine` + `SingleRunner` + SQL
   storage for durable single-box deployment).
 - **CronScheduler**: reads `crons` from config: `{ name, cron, agent, input, onBehalfOf,
-deliverTo }`. Phase one uses `Schedule.cron` in-process. Durable version uses
+  deliverTo }`. Phase one uses `Schedule.cron` in-process. Durable version uses
   `ClusterCron.make` on the same single-runner cluster as approvals.
 
 `@magentic/policy`, `@magentic/identity`, `@magentic/audit` stay separate packages so their
@@ -297,7 +297,7 @@ because `SqlClient` abstracts the dialect for what we need.
 ## Surfaces
 
 - **CLI** (`apps/cli`): the command line follows pi's, `magentic [flags] [--] [@files...]
-[message...]`. Bare `magentic` opens the full-screen chat (exists) and a message opens it
+  [message...]`. Bare `magentic` opens the full-screen chat (exists) and a message opens it
   with the message sent; `-a` names the agent, `-c` picks up the newest conversation and
   `-s <id>` a named one, transcript and model restored, and `/resume` and `/new` do the same
   from inside the chat, as in opencode. `-p` is print mode (exists): the message from the
@@ -306,7 +306,7 @@ because `SqlClient` abstracts the dialect for what we need.
   `RunEvent` as one JSON line, `-m` and `--thinking` for the model, exit code 1 when the run
   fails; without a TTY on stdin and stdout the same happens with no `-p`.
   `magentic agents` (exists), `magentic
-auth login|list|logout` (exists, inline `@clack/prompts` like opencode's, not the TUI),
+  auth login|list|logout` (exists, inline `@clack/prompts` like opencode's, not the TUI),
   `magentic approvals` (list and decide), `magentic tokens`, `magentic config check`,
   `magentic reload`. Talks only `@magentic/protocol` through `RpcClient`, with one
   exception: when nothing answers at a local gateway URL the CLI builds the gateway layer in

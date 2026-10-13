@@ -1,5 +1,5 @@
 import { Effect, Schema } from "effect";
-import { LanguageModel, Prompt, type Response } from "effect/unstable/ai";
+import { LanguageModel, Prompt, type Response } from "effect/ai";
 import { isSummary, summaryMessage, summaryOf } from "./Marks.ts";
 
 /**

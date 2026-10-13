@@ -1,6 +1,6 @@
 import type { Effect, FileSystem, Path, Scope } from "effect";
 import { Schema } from "effect";
-import type { HttpClient } from "effect/unstable/http";
+import type { HttpClient } from "effect/http";
 import type { PluginContext } from "./Context.ts";
 import type { ModelCatalog } from "./Catalog.ts";
 

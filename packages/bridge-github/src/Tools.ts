@@ -1,6 +1,6 @@
 import { CapabilityAnnotation, ToolCallContext } from "@magentic/plugin";
 import { Context, DateTime, Effect, Option, Ref, Schema } from "effect";
-import { Tool, Toolkit } from "effect/unstable/ai";
+import { Tool, Toolkit } from "effect/ai";
 import { type GitHubApi, type GitHubApiError, type GitHubAuth, latest } from "./GitHubApi.ts";
 import type { Git, GitError } from "./Git.ts";
 
