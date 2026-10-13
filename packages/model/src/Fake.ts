@@ -1,6 +1,6 @@
 import { define, ModelInfo } from "@magentic/plugin";
 import { Context, Effect, Layer, Option, Predicate, Ref, Stream } from "effect";
-import { AiError, LanguageModel, type Response } from "effect/unstable/ai";
+import { AiError, LanguageModel, type Response } from "effect/ai";
 
 /** Token limits the fake model claims; 0 when a test does not care, as the catalog would say. */
 export interface FakeLimits {

@@ -1,6 +1,6 @@
 import type { Capability, Principal } from "@magentic/protocol";
 import { Context, type Effect, type Schema, type Scope } from "effect";
-import type { Tool, Toolkit } from "effect/unstable/ai";
+import type { Tool, Toolkit } from "effect/ai";
 import type { PluginSetupError, Registration } from "./Plugin.ts";
 
 /** Services a toolkit's handlers and result codecs need at call time. */

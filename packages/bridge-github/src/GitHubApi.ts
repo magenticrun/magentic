@@ -11,12 +11,7 @@ import {
   Schema,
   Semaphore,
 } from "effect";
-import {
-  Headers,
-  HttpClient,
-  HttpClientRequest,
-  type HttpClientResponse,
-} from "effect/unstable/http";
+import { Headers, HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/http";
 
 export class GitHubApiError extends Schema.TaggedError<GitHubApiError>()("GitHubApiError", {
   reason: Schema.Literals([

@@ -1,6 +1,6 @@
 import type { RunEvent } from "@magentic/protocol";
 import { Cause, Duration, Effect, Option, Random, Schedule } from "effect";
-import { AiError } from "effect/unstable/ai";
+import { AiError } from "effect/ai";
 
 /**
  * How a failed model call is tried again, after opencode: backoff from two

@@ -7,7 +7,7 @@ import {
   parseModelRef,
 } from "@magentic/plugin";
 import { Context, Effect, Exit, Layer, Option, Schema, Scope, Semaphore } from "effect";
-import { LanguageModel } from "effect/unstable/ai";
+import { LanguageModel } from "effect/ai";
 
 /** A model built for one `provider/model`, with the credentials it was built from. */
 interface Built {

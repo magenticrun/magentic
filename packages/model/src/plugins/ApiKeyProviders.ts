@@ -10,8 +10,8 @@ import {
 } from "@magentic/plugin";
 import { Effect, Layer, Option, Predicate, type Redacted, Schema } from "effect";
 import { reasoningContext } from "../Reasoning.ts";
-import { LanguageModel } from "effect/unstable/ai";
-import { HttpClient, HttpClientRequest } from "effect/unstable/http";
+import { LanguageModel } from "effect/ai";
+import { HttpClient, HttpClientRequest } from "effect/http";
 import { apiKeyHint, type ApiKeyProvider, ApiKeyStore } from "../ApiKeys.ts";
 import * as Clients from "../Clients.ts";
 import {

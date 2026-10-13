@@ -1,6 +1,6 @@
 import { Effect, Layer } from "effect";
-import type { LanguageModel } from "effect/unstable/ai";
-import type { HttpClient } from "effect/unstable/http";
+import type { LanguageModel } from "effect/ai";
+import type { HttpClient } from "effect/http";
 import * as Clients from "../Clients.ts";
 import type { CodexAuth } from "./CodexAuth.ts";
 import { layerClient } from "./CodexClient.ts";

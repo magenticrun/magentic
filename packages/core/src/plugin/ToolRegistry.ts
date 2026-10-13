@@ -14,7 +14,7 @@ import {
   TRACE_RUN,
 } from "@magentic/protocol";
 import { Context, Deferred, Effect, Hash, Layer, Predicate, type Schema, Stream } from "effect";
-import type { AiError, Tool, Toolkit } from "effect/unstable/ai";
+import type { AiError, Tool, Toolkit } from "effect/ai";
 
 /** Whether a tool call may proceed. `RequireApproval` is a deny until approvals exist. */
 export type GuardDecision =
@@ -51,8 +51,13 @@ export interface ToolEntry {
     params: Schema.Json,
     callId: string,
   ) => Effect.Effect<
-    Stream.Stream<Tool.HandlerResult<Tool.Any>, Tool.HandlerError<Tool.Any>, ToolCallContext>,
-    AiError.AiError
+    Stream.Stream<
+      Tool.HandlerResult<Tool.Any>,
+      Tool.HandlerError<Tool.Any> | AiError.AiError,
+      ToolCallContext
+    >,
+    AiError.AiError,
+    ToolCallContext
   >;
 }
 

@@ -1,6 +1,6 @@
 import { define } from "@magentic/plugin";
 import { Effect, Option, Schema } from "effect";
-import { HttpServerResponse } from "effect/unstable/http";
+import { HttpServerResponse } from "effect/http";
 import { BrowserBridge, BrowserTools, browserHandlers } from "./Browser.ts";
 
 const CommandReply = Schema.Struct({

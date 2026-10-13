@@ -2,7 +2,7 @@ import { ModelRegistry } from "@magentic/core";
 import { apiKeysFile, Codex, modelPlugins } from "@magentic/model";
 import type { ModelProviderRegistration } from "@magentic/plugin";
 import { Config, Effect, Option, Path, Result, Schema } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/cli";
 import { runLogin } from "./auth/Login.ts";
 import { LocalHost } from "./Host.ts";
 import * as Prompt from "./auth/Prompt.ts";

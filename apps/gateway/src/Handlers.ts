@@ -40,7 +40,7 @@ import {
 } from "@magentic/protocol";
 import { BackgroundTasks } from "@magentic/tools";
 import { Config, DateTime, Effect, Option, Stream } from "effect";
-import { LanguageModel } from "effect/unstable/ai";
+import { LanguageModel } from "effect/ai";
 import { Wakeups } from "./Wakeups.ts";
 
 /** Until sessions exist, the OS user is the caller. */

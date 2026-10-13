@@ -1,6 +1,6 @@
 import { dataDir, RelayConfig } from "@magentic/core";
 import { Console, Effect, FileSystem, Option } from "effect";
-import { Command, Flag } from "effect/unstable/cli";
+import { Command, Flag } from "effect/cli";
 import * as Prompt from "./auth/Prompt.ts";
 
 export const relaySetup = Command.make(

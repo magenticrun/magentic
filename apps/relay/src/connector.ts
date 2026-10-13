@@ -36,7 +36,7 @@ export interface ConnectorOptions {
   readonly relay: string;
   /** The credential the operator minted at the relay. */
   readonly token: string;
-  /** The gateway to forward to: `http://127.0.0.1:4321`. */
+  /** The gateway to forward to: `http://127.0.0.1:17321`. */
   readonly target: string;
   /** Off in tests that want one attempt; on for a long-lived connector. */
   readonly reconnect?: boolean;

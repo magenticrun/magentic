@@ -1,4 +1,5 @@
-import { DateTime, Effect, Encoding, Option, Result, Schema } from "effect";
+import { DateTime, Effect, Option, Result, Schema } from "effect";
+import { Base64Url } from "effect/encoding";
 
 export class CodexAuthError extends Schema.TaggedError<CodexAuthError>()("CodexAuthError", {
   reason: Schema.Literals([
@@ -45,7 +46,7 @@ export const decodeJwtClaims = Effect.fn("CodexTokens.decodeJwtClaims")(function
   if (payload === undefined) {
     return yield* malformed("token is not a JWT");
   }
-  const json = Encoding.decodeBase64UrlString(payload);
+  const json = Base64Url.decodeString(payload);
   if (Result.isFailure(json)) {
     return yield* malformed("JWT payload is not base64url");
   }

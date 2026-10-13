@@ -14,7 +14,7 @@ the local port private and use the authenticated relay connection for remote acc
 
 ## Getting started
 
-Install [Bun](https://bun.sh), then run these from the repository:
+Install [Bun](https://bun.sh) 1.4.3 or newer, then run these from the repository:
 
 ```sh
 bun install
@@ -86,13 +86,13 @@ For a gateway that stays running between CLI sessions:
 bun run dev
 ```
 
-It listens at `http://127.0.0.1:4321`, serves Effect RPC at `/rpc`, and has a health
+It listens at `http://127.0.0.1:17321`, serves Effect RPC at `/rpc`, and has a health
 endpoint at `GET /health`.
 
 To connect to another gateway:
 
 ```sh
-bun apps/cli/src/main.ts --gateway http://gateway.internal:4321
+bun apps/cli/src/main.ts --gateway http://gateway.internal:17321
 ```
 
 Read the [security notes](#security) before making the gateway reachable over a network.
@@ -257,7 +257,7 @@ Bun loads `.env` from the working directory. Keep credentials out of version con
 
 | Variable                        | Default                              | Purpose                                                                |
 | ------------------------------- | ------------------------------------ | ---------------------------------------------------------------------- |
-| `PORT`                          | `4321`                               | Gateway port.                                                          |
+| `PORT`                          | `17321`                              | Gateway port.                                                          |
 | `MAGENTIC_HOST`                 | `127.0.0.1`                          | Listen address.                                                        |
 | `IDENTITY_LOCAL`                | `false`                              | Permit a non-loopback bind with local identity.                        |
 | `MAGENTIC_HOME`                 | `./magentic`                         | Configuration directory.                                               |

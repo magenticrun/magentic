@@ -1,6 +1,6 @@
 import { define } from "@magentic/plugin";
 import { Effect, type FileSystem, type Path } from "effect";
-import type { ChildProcessSpawner } from "effect/unstable/process";
+import type { ChildProcessSpawner } from "effect/process";
 import { BackgroundTasks } from "./BackgroundTasks.ts";
 import { shellToolHandlers, ShellTools } from "./ShellTool.ts";
 import { ToolOutputDir } from "./ToolOutput.ts";

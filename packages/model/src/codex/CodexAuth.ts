@@ -9,7 +9,7 @@ import {
   Schema,
   SynchronizedRef,
 } from "effect";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { CODEX_CLIENT_ID, CODEX_ISSUER } from "./Constants.ts";
 import { CodexAuthStore } from "./CodexAuthStore.ts";
 import { accessTokenExpiry, accountIdOf, CodexAuthError, CodexTokens } from "./CodexTokens.ts";

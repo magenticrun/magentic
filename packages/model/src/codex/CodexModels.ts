@@ -1,5 +1,5 @@
 import { Config, Effect, Schema } from "effect";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import { CODEX_API_URL, CODEX_CLIENT_VERSION } from "./Constants.ts";
 import type { CodexAuth } from "./CodexAuth.ts";
 import { withCodexAuth } from "./CodexClient.ts";

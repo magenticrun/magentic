@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { HttpRouteHandler } from "@magentic/plugin";
 import { DateTime, Effect, Option, Redacted, Schema } from "effect";
-import { Headers, HttpServerResponse } from "effect/unstable/http";
+import { Headers, HttpServerResponse } from "effect/http";
 import { type GitHubApi, GitHubApiError } from "./GitHubApi.ts";
 import type { BridgeState } from "./State.ts";
 

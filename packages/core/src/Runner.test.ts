@@ -29,8 +29,8 @@ import {
   Stream,
 } from "effect";
 import { TestClock } from "effect/testing";
-import { AiError, type Prompt, Tool, Toolkit } from "effect/unstable/ai";
-import { FetchHttpClient } from "effect/unstable/http";
+import { AiError, type Prompt, Tool, Toolkit } from "effect/ai";
+import { FetchHttpClient } from "effect/http";
 import { ConversationStore } from "./ConversationStore.ts";
 import { builtin, PluginHost } from "./plugin/PluginHost.ts";
 import { ToolCallGuard } from "./plugin/ToolRegistry.ts";

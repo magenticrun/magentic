@@ -6,7 +6,7 @@ import type {
 } from "@magentic/plugin";
 import type { RunEvent } from "@magentic/protocol";
 import { Context, Deferred, Effect, Layer, type Stream } from "effect";
-import type { HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import type { HttpServerRequest, HttpServerResponse } from "effect/http";
 
 /** A bridge's ask, with the surface and provider it registered under. */
 export interface BridgeRunRequest extends BridgeRunInput {

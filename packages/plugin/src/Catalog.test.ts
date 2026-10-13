@@ -1,7 +1,7 @@
 import { BunServices } from "@effect/platform-bun";
 import { assert, layer } from "@effect/vitest";
 import { ConfigProvider, Effect, FileSystem, Layer, Option } from "effect";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import { ModelCatalog } from "./Catalog.ts";
 
 /** A models.dev feed with one provider that decodes, one that does not, and stray fields. */

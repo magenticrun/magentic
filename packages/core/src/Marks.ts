@@ -1,5 +1,5 @@
 import { Predicate } from "effect";
-import { Prompt } from "effect/unstable/ai";
+import { Prompt } from "effect/ai";
 
 /**
  * User messages the harness wrote rather than the person, marked in their

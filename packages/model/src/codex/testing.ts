@@ -1,5 +1,6 @@
-import { DateTime, Effect, Encoding, Layer, Ref } from "effect";
-import { HttpClient, type HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { DateTime, Effect, Layer, Ref } from "effect";
+import { Base64Url } from "effect/encoding";
+import { HttpClient, type HttpClientRequest, HttpClientResponse } from "effect/http";
 import { AUTH_CLAIMS, CodexTokens } from "./CodexTokens.ts";
 
 /** The claims our fakes need; real tokens carry many more. */
@@ -14,7 +15,7 @@ export interface JwtPayload {
 
 /** An unsigned JWT with the given payload; only the payload is ever read. */
 export const fakeJwt = (payload: JwtPayload): string =>
-  ["e30", Encoding.encodeBase64Url(JSON.stringify(payload)), "sig"].join(".");
+  ["e30", Base64Url.encode(JSON.stringify(payload)), "sig"].join(".");
 
 export const fakeTokens = (options: {
   readonly expiresInSeconds: number;

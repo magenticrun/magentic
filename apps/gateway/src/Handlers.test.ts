@@ -31,7 +31,7 @@ import {
   HttpClientRequest,
   HttpClientResponse,
   HttpRouter,
-} from "effect/unstable/http";
+} from "effect/http";
 import {
   type Rpc,
   RpcClient,
@@ -39,7 +39,7 @@ import {
   RpcSerialization,
   RpcServer,
   RpcTest,
-} from "effect/unstable/rpc";
+} from "effect/rpc";
 import { BridgesLayer } from "./Bridges.ts";
 import { ToolCallGuardLive } from "./Guard.ts";
 import { RpcHandlers } from "./Handlers.ts";

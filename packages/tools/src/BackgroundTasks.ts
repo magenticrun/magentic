@@ -17,7 +17,7 @@ import {
   Semaphore,
   Stream,
 } from "effect";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { type Bounded, EMPTY, push, render, tailOf, ToolOutputDir } from "./ToolOutput.ts";
 
 /** Tasks that may exist at once, running or ended; past it the oldest ended one goes first. */

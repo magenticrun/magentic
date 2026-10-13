@@ -1,4 +1,4 @@
-import { SyntaxStyle } from "@opentui/core";
+import { type NativeResourceOwner, type ResourceContext, SyntaxStyle } from "@opentui/core";
 import type { Palette } from "./Theme.ts";
 
 /**
@@ -59,28 +59,41 @@ const subtleStylesFor = (colours: Palette) =>
     ]),
   );
 
-// A SyntaxStyle is a native handle; one per palette lives as long as the process.
-const cache = new Map<Palette, SyntaxStyle>();
-const subtleCache = new Map<Palette, SyntaxStyle>();
+/**
+ * Styles a renderer's resources own, one per palette. A SyntaxStyle is a
+ * native handle that lives in the owner's resource context, so it is kept
+ * per context: a style from a renderer that has gone is never handed to the
+ * next one.
+ */
+export type StyleCache = WeakMap<ResourceContext, Map<Palette, SyntaxStyle>>;
 
-const cached = (
-  store: Map<Palette, SyntaxStyle>,
+export const cachedStyle = (
+  store: StyleCache,
+  owner: NativeResourceOwner,
   colours: Palette,
-  build: (colours: Palette) => SyntaxStyle,
+  build: (colours: Palette, owner: NativeResourceOwner) => SyntaxStyle,
 ): SyntaxStyle => {
-  const known = store.get(colours);
+  let byPalette = store.get(owner.resourceContext);
+  if (byPalette === undefined) {
+    byPalette = new Map();
+    store.set(owner.resourceContext, byPalette);
+  }
+  const known = byPalette.get(colours);
   if (known !== undefined) {
     return known;
   }
-  const built = build(colours);
-  store.set(colours, built);
+  const built = build(colours, owner);
+  byPalette.set(colours, built);
   return built;
 };
 
-/** The syntax style for a palette, built once. */
-export const markdownStyleFor = (colours: Palette): SyntaxStyle =>
-  cached(cache, colours, (c) => SyntaxStyle.fromStyles(stylesFor(c)));
+const cache: StyleCache = new WeakMap();
+const subtleCache: StyleCache = new WeakMap();
 
-/** The muted style for reasoning, built once. */
-export const subtleStyleFor = (colours: Palette): SyntaxStyle =>
-  cached(subtleCache, colours, (c) => SyntaxStyle.fromStyles(subtleStylesFor(c)));
+/** The syntax style for a palette, built once per owner. */
+export const markdownStyleFor = (colours: Palette, owner: NativeResourceOwner): SyntaxStyle =>
+  cachedStyle(cache, owner, colours, (c, o) => SyntaxStyle.fromStyles(stylesFor(c), o));
+
+/** The muted style for reasoning, built once per owner. */
+export const subtleStyleFor = (colours: Palette, owner: NativeResourceOwner): SyntaxStyle =>
+  cachedStyle(subtleCache, owner, colours, (c, o) => SyntaxStyle.fromStyles(subtleStylesFor(c), o));

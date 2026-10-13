@@ -5,16 +5,18 @@ Bun workspace, Effect-native. Use `bun`, never npm/pnpm/yarn. Packages import ea
 ## Commands
 
 - `bun run check` runs typecheck, lint, knip, and tests, all four at once so one failure does not hide the others. Run it before claiming work is done. `bun run knip` alone reports unused files, exports, and dependencies; intentional exceptions live in `knip.jsonc` with a reason each.
+- Typechecking stays on `tsc` (TypeScript 7, patched with the Effect language service). Bun's built-in type checker (`bun check` outside this repo, `bun --check`, `bun build --check`) skips the Effect diagnostics such as `floatingEffect` and `missingLayerContext`, so a clean result from it proves nothing here. Inside the repo `bun check` runs the `check` script.
 - `bun run lint` is oxlint plus an oxfmt format check. `bun run format` applies both. Config lives in `.oxlintrc.json` and `.oxfmtrc.json`; rules are adapted from the Effect repo's own `packages/tools/oxc/oxlintrc.json`, plus the local anti-slop plugin in `tools/oxlint/anti-slop` (no `unknown` in signatures, no unjustified `as`, no `typeof` dispatch; every type assertion needs a `SAFETY:` comment stating the checked invariant).
 - `bun run test` runs vitest on the Bun runtime (`bun --bun vitest run`) across every package. Do not use `bun test`; the suite is written with `@effect/vitest` and needs vitest as the runner.
 - `bun run dev` starts the gateway with reload.
 
 ## Effect
 
-This codebase targets Effect 4 (currently `4.0.0-rc.117`, pinned exactly in the root catalog). Effect 4 differs from Effect 3 in ways that matter, so do not write from memory.
+This codebase targets Effect 4 (currently `4.0.4`, pinned exactly in the root catalog). Effect 4 differs from Effect 3 in ways that matter, so do not write from memory.
 
 - The reference checkout is at `~/references/effect`. Start with `LLMS.md`, then the worked examples under `ai-docs/src`, then `migration/v3-to-v4.md` when something you expect from v3 is missing.
-- The checkout tracks `main` and can be ahead of the installed rc. When a name from the checkout fails to typecheck, look in `node_modules/effect/dist/*.d.ts` for the installed spelling (for example `Config.port` was lowercase in rc.112 and is `Config.Port` now).
+- The checkout tracks `main` and can be ahead of the installed release. When a name from the checkout fails to typecheck, look in `node_modules/effect/dist/*.d.ts` for the installed spelling (for example `Config.port` was lowercase in rc.112 and is `Config.Port` now).
+- Modules that were `effect/unstable/<x>` in the release candidates are `effect/<x>` since 4.0 (`effect/ai`, `effect/http`, `effect/rpc`, `effect/cli`, ...), and `Encoding` became `effect/encoding` (`Base64.encode`, `Base64Url.decodeString`). Many of them are still marked `@stability unstable`; the ones this repo relies on are listed in `allowedUnstableApis` in `tsconfig.base.json`, so a new unstable import is flagged until it is added there on purpose.
 - Services: `class X extends Context.Service<X, { ... }>()("magentic/<pkg>/X")` with static layers on the class (`layer`, `layerMemory`, `layerNoDeps`). Service ids are `magentic/<package>/<Name>`.
 - Errors: `Schema.TaggedError`. Use a `reason` union when one service has many failure modes. Never throw.
 - Validation and domain models: `Schema.Class`, never hand-rolled parsing. Runtime checks come from `Predicate`.

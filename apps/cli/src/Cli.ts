@@ -1,7 +1,7 @@
 import { BunRuntime, BunServices } from "@effect/platform-bun";
 import { Console, Effect, Option } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
-import { FetchHttpClient } from "effect/unstable/http";
+import { Argument, Command, Flag } from "effect/cli";
+import { FetchHttpClient } from "effect/http";
 import { remoteClient, remoteCommand } from "./Remote.ts";
 import { relaySetup } from "./RelaySetup.ts";
 import { auth } from "./Auth.ts";
@@ -16,7 +16,7 @@ import { VERSION } from "./Version.ts";
 const gateway = Flag.String("gateway").pipe(
   Flag.withAlias("g"),
   Flag.withDescription("Base URL of the gateway; started here when nothing answers locally"),
-  Flag.withDefault("http://localhost:4321"),
+  Flag.withDefault("http://127.0.0.1:17321"),
 );
 
 const agentFlag = Flag.String("agent").pipe(

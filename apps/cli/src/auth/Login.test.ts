@@ -10,7 +10,7 @@ import {
   type Screen,
 } from "@magentic/plugin";
 import { ConfigProvider, Effect, Layer, Option, Redacted, Ref, Result } from "effect";
-import { FetchHttpClient } from "effect/unstable/http";
+import { FetchHttpClient } from "effect/http";
 import { runLogin } from "./Login.ts";
 
 /** A surface that answers from a script and records every screen it was shown. */

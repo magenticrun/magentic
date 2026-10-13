@@ -42,7 +42,7 @@ import {
   Semaphore,
   Stream,
 } from "effect";
-import { Tool, type Toolkit } from "effect/unstable/ai";
+import { Tool, type Toolkit } from "effect/ai";
 import { AgentRegistry } from "../AgentRegistry.ts";
 import { describeCause } from "../Errors.ts";
 import { RunEventBus } from "../EventBus.ts";
@@ -343,7 +343,7 @@ export class PluginHost extends Context.Service<
                 .pipe(Effect.provideContext(services), Effect.map(Stream.provideContext(services)));
             };
             // SAFETY: the captured context covers every handler service except ToolCallContext,
-            // which the registry provides on each call.
+            // which the registry provides on each call, to the effect and to its stream.
             const handle = bound as ToolEntry["handle"];
             registrations.push(
               yield* tools.register(ref, { plugin: ref.id, tool, capability, handle }),

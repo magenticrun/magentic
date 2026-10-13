@@ -3,7 +3,7 @@ import { assert, layer } from "@effect/vitest";
 import { AgentRegistry, builtin, PluginHost, ToolCallGuard } from "@magentic/core";
 import { ModelCatalog } from "@magentic/plugin";
 import { Effect, FileSystem, Layer, Option } from "effect";
-import { FetchHttpClient } from "effect/unstable/http";
+import { FetchHttpClient } from "effect/http";
 import { configAgentsPlugin } from "./ConfigAgents.ts";
 
 /** A config directory with one good agent, one using a prompt file, and one broken file. */

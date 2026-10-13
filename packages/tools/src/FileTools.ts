@@ -1,5 +1,5 @@
 import { Effect, FileSystem, Option, Path, Schema, Semaphore } from "effect";
-import { Tool, Toolkit } from "effect/unstable/ai";
+import { Tool, Toolkit } from "effect/ai";
 import { CapabilityAnnotation, messageOf } from "@magentic/plugin";
 import { applySpans, locate, missHint, normalize } from "./EditMatch.ts";
 import { resolveWithin, WorkspaceRoot } from "./WorkspaceRoot.ts";

@@ -1,5 +1,5 @@
 import { Effect, Redacted, Schema, Stream } from "effect";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 export class GitError extends Schema.TaggedError<GitError>()("GitError", {
   /** The command line, with the credential left out. */

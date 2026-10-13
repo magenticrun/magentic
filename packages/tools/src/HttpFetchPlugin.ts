@@ -1,6 +1,6 @@
 import { define } from "@magentic/plugin";
 import { Effect, type FileSystem, type Path } from "effect";
-import type { HttpClient } from "effect/unstable/http";
+import type { HttpClient } from "effect/http";
 import { httpFetchHandlers, HttpFetchTools } from "./HttpFetch.ts";
 import { ToolOutputDir } from "./ToolOutput.ts";
 

@@ -1,6 +1,6 @@
 import { CapabilityAnnotation } from "@magentic/plugin";
 import { Context, Deferred, Duration, Effect, Option, Queue, Schema } from "effect";
-import { Tool, Toolkit } from "effect/unstable/ai";
+import { Tool, Toolkit } from "effect/ai";
 
 export class BrowserError extends Schema.TaggedError<BrowserError>()("BrowserError", {
   reason: Schema.Literals(["Unavailable", "Timeout", "Rejected"]),

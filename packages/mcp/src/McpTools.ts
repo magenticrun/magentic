@@ -1,7 +1,7 @@
 import { CapabilityAnnotation } from "@magentic/plugin";
 import type { CallToolResult, Tool as McpToolDefinition } from "@modelcontextprotocol/client";
 import { Effect, Option, Predicate, Schema } from "effect";
-import { Tool, Toolkit } from "effect/unstable/ai";
+import { Tool, Toolkit } from "effect/ai";
 import { createHash } from "node:crypto";
 import { type McpConnection, ToolArguments } from "./McpConnection.ts";
 

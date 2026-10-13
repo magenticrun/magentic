@@ -1,5 +1,5 @@
 import type { Effect, Scope } from "effect";
-import type { HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import type { HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { PluginSetupError, Registration } from "./Plugin.ts";
 
 export type HttpRouteMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
